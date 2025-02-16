@@ -41,6 +41,9 @@ def evaluate(args, model, val_data_loader, device):
     logger.info('---------------------------------')
     centre_embeddings /= centre_embeddings.norm(dim=-1, keepdim=True)
     visual_embeddings /= visual_embeddings.norm(dim=-1, keepdim=True)
+    torch.save(centre_embeddings, os.path.join(args.output_dir, 'centre_embeddings.pt'))
+    torch.save(centre_labels, os.path.join(args.output_dir, 'centre_labels.pt'))
+    torch.save(visual_embeddings, os.path.join(args.output_dir, 'visual_embeddings.pt'))
     logic = (visual_embeddings.to(device) @ centre_embeddings.to(device).t()).softmax(dim=-1)
     acc = 0.0
     for i in range(logic.shape[0]):

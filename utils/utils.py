@@ -279,8 +279,9 @@ def load_centre_embeddings(embeddings_path, device):
     labels = []
     centre_embeddings = []
     for label in embeddings.keys():
-        labels.extend([label] * 50)
-        centre_embeddings.append(embeddings[label])
+        embedding = embeddings[label]
+        labels.extend([label] * embedding.shape[0])
+        centre_embeddings.append(embedding)
     centre_embeddings = torch.cat(centre_embeddings, dim=0).to(device)
 
     return centre_embeddings, labels
