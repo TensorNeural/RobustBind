@@ -17,41 +17,62 @@ from model import UniBind
 
 logger = logging.getLogger(__name__)
 
-def gen_visual_embeddings(model, data_loader):
-    all_embeddings = []
-    all_visual_labels = []
-    for _, batch in enumerate(tqdm(data_loader)):
-        with torch.no_grad():
-            all_visual_labels.extend(batch['labels'])
-            embeddings = model.encode_vision(batch['inputs'])
-            embeddings = embeddings.cpu()
-            all_embeddings.append(embeddings)
-    all_embeddings = torch.cat(all_embeddings, dim=0)
-    return all_embeddings, all_visual_labels
-
 def evaluate(args, model, val_data_loader, device):
+    """Evaluates accuracy batch-wise with detailed logging for each stage."""
     model.eval()
-    logger.info('Start to load centre embeddings!')
-    centre_embeddings, centre_labels = load_centre_embeddings(args.centre_embeddings_path, device)
-    logger.info('centre embedding load done!')
-    logger.info('---------------------------------')
-    logger.info('Start to generate visual embeddings!')
-    visual_embeddings, visual_labels = gen_visual_embeddings(model, val_data_loader)
-    logger.info('visual embedding generation done!')
-    logger.info('---------------------------------')
-    centre_embeddings /= centre_embeddings.norm(dim=-1, keepdim=True)
-    visual_embeddings /= visual_embeddings.norm(dim=-1, keepdim=True)
-    torch.save(centre_embeddings, os.path.join(args.output_dir, 'centre_embeddings.pt'))
-    torch.save(centre_labels, os.path.join(args.output_dir, 'centre_labels.pt'))
-    torch.save(visual_embeddings, os.path.join(args.output_dir, 'visual_embeddings.pt'))
-    logic = (visual_embeddings.to(device) @ centre_embeddings.to(device).t()).softmax(dim=-1)
-    acc = 0.0
-    for i in range(logic.shape[0]):
-        _, index = logic[i].topk(1)
-        if visual_labels[i] == centre_labels[int(index[0])]:
-            acc = acc + 1
-    return acc/logic.shape[0]
+    logger.info("Loading centre embeddings...")
 
+    # Load and normalize centre embeddings
+    centre_embeddings, centre_labels = load_centre_embeddings(args.centre_embeddings_path, device)
+    centre_embeddings = centre_embeddings.to(device)
+    centre_embeddings /= centre_embeddings.norm(dim=-1, keepdim=True)
+
+    # Save centre embeddings
+    torch.save(centre_embeddings.cpu(), os.path.join(args.output_dir, "centre_embeddings.pt"))
+    torch.save(centre_labels, os.path.join(args.output_dir, "centre_labels.pt"))
+
+    logger.info("Starting batch processing...")
+
+    acc, total_samples = 0, 0
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Process each batch separately
+    for batch_idx, batch in enumerate(tqdm(val_data_loader)):
+        with torch.no_grad():
+            logger.info(f"[Batch {batch_idx}] Generating visual embeddings...")
+            embeddings = model.encode_vision(batch["inputs"]).to(device)
+            embeddings /= embeddings.norm(dim=-1, keepdim=True)
+
+            # Save embeddings and labels for this batch
+            torch.save(embeddings.cpu(), os.path.join(args.output_dir, f"visual_embeddings_{batch_idx}.pt"))
+            torch.save(batch["labels"], os.path.join(args.output_dir, f"visual_labels_{batch_idx}.pt"))
+
+            logger.info(f"[Batch {batch_idx}] Computing similarity with centre embeddings...")
+            logic = (embeddings @ centre_embeddings.t()).softmax(dim=-1)
+
+            logger.info(f"[Batch {batch_idx}] Classifying and calculating accuracy...")
+            batch_correct = 0
+            batch_size = logic.shape[0]
+
+            for i in range(batch_size):
+                predicted_index = logic[i].argmax().item()  # Get index of highest probability
+                predicted_label = centre_labels[predicted_index]
+                if batch["labels"][i] == predicted_label:
+                    batch_correct += 1
+
+            batch_accuracy = batch_correct / batch_size
+            acc += batch_correct
+            total_samples += batch_size
+
+            logger.info(f"[Batch {batch_idx}] Accuracy: {batch_correct}/{batch_size} ({batch_accuracy:.4f})")
+
+            # Free memory after each batch
+            del embeddings, logic
+            torch.cuda.empty_cache()
+
+    final_acc = acc / total_samples
+    logger.info(f"Final Accuracy: {final_acc:.4f}")
+    return final_acc
 
 if __name__ == '__main__':
 
