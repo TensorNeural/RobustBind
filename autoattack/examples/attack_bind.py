@@ -184,7 +184,7 @@ if __name__ == '__main__':
             noise = x_test - adv_examples
 
             torch.save({'adv_complete': adv_examples, 'x_test': x_test, 'y_test': y_test},
-               os.path.join(args.save_dir, f"adv_results_eps{args.epsilon:.5f}.pth"))
+               os.path.join(args.save_dir, f"adv_results_eps{eps:.5f}.pth"))
 
             for i in range(x_test.size(0)):
                 original_image_path = image_paths[i]
