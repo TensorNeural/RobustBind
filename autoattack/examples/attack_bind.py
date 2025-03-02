@@ -26,7 +26,7 @@ class ImageNetDataset(datasets.ImageFolder):
 def load_images_parallel(dataset_root, batch_size, max_samples=None):
     """Loads ImageNet dataset with image paths included and applies `max_samples` limit."""
     transform = transforms.Compose([
-        transforms.Resize(256),
+        transforms.Resize(256, antialias=True),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -38,10 +38,12 @@ def load_images_parallel(dataset_root, batch_size, max_samples=None):
     # Apply max_samples limit if specified
     if max_samples is not None and max_samples < len(dataset):
         indices = torch.randperm(len(dataset))[:max_samples]  # Random subset
+        # indices = torch.arange(max_samples)  # Sequential subset
         dataset = Subset(dataset, indices)  # Create a Subset of the dataset
 
     dataloader = DataLoader(
-        dataset, batch_size=batch_size, num_workers=4, pin_memory=True, shuffle=True
+        dataset, batch_size=batch_size, num_workers=4, pin_memory=True, shuffle=True,
+        prefetch_factor=4, persistent_workers=True
     )
 
     return dataloader, class_to_index
@@ -62,11 +64,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_root', type=str, required=True, help="Root path to ImageNet dataset")
     parser.add_argument('--norm', type=str, default='Linf')
-    parser.add_argument('--epsilons', nargs='+', type=float, default=[0],
+    parser.add_argument('--epsilons', nargs='+', type=float, default=[2/255, 4/255],
                         help="List of epsilon values to test (space-separated)")
     parser.add_argument('--save_dir', type=str, default='./results')
-    parser.add_argument('--batch_size', type=int, default=20)
-    parser.add_argument('--max_samples', type=int, default=20, help="Limit the number of images processed")
+    parser.add_argument('--batch_size', type=int, default=25)
+    parser.add_argument('--max_samples', type=int, default=50000, help="Limit the number of images processed")
     parser.add_argument('--log_path', type=str, default='./autoattack/examples/results/log_file.txt')
     parser.add_argument('--version', type=str, default='custom')
     parser.add_argument('--state-path', type=str, default=None)
@@ -98,14 +100,12 @@ if __name__ == '__main__':
     # Step 3: Load and process center embeddings
     print("Loading and processing center embeddings...")
     centre_embeddings, centre_labels = load_centre_embeddings(args.centre_embeddings_path, device)
-    centre_embeddings = centre_embeddings.to(device, dtype=torch.float32, non_blocking=True)
+    centre_embeddings = centre_embeddings.to(device, dtype=torch.bfloat16, non_blocking=True)
     centre_embeddings /= centre_embeddings.norm(dim=-1, keepdim=True)
 
-    # Convert `centre_labels` (human-readable) to dataset indices using WordNet synsets
     centre_labels_indices_np = np.array(
         [class_to_index.get(center_label_to_wordnet.get(label, ""), 0) for label in centre_labels], dtype=np.int64
     )
-
     centre_labels_indices = torch.tensor(centre_labels_indices_np, dtype=torch.int64, device=device)
 
     print("Center embeddings and label mappings processed.")
@@ -115,98 +115,46 @@ if __name__ == '__main__':
     model = UniBind(args).to(device)
     model.eval()
     print("Model initialized and set to evaluation mode.")
-    
+
     def predict(x):
         x = {ModalityType.VISION: x}
-        visual_embeddings = model.encode_vision(x).to(torch.float32)
+        visual_embeddings = model.encode_vision(x).to(torch.bfloat16)
         visual_embeddings_norm = visual_embeddings / visual_embeddings.norm(dim=-1, keepdim=True)
-        similarity = (visual_embeddings_norm @ centre_embeddings.t()).to(torch.float32)
+        similarity = (visual_embeddings_norm @ centre_embeddings.t()).to(torch.bfloat16)
 
         batch_size = similarity.shape[0]
-        class_raw_scores = torch.zeros(batch_size, 1000, device=device, dtype=torch.float32)
+        class_raw_scores = torch.zeros(batch_size, 1000, device=device, dtype=torch.bfloat16)
         class_raw_scores, _ = torch_scatter.scatter_max(
             similarity, centre_labels_indices.expand(batch_size, -1), dim=1
         )
         return class_raw_scores
+    
+    # Ensure save directory exists
+    os.makedirs(args.save_dir, exist_ok=True)
 
-    # Step 5: Prepare directories and metadata
-    adv_mapping = {}
-
-    print("Preparing directories and metadata for all images...")
-    for batch_idx, (x_test, y_test, image_paths) in enumerate(dataloader):
-        for i in range(len(y_test)):
-            original_image_path = image_paths[i]
-            filename = os.path.basename(original_image_path)
-
-            # Create a directory for each original image
-            image_save_dir = os.path.join(args.save_dir, os.path.splitext(filename)[0])
-            os.makedirs(image_save_dir, exist_ok=True)
-
-            # Save the original image from x_test instead of copying
-            original_image_save_path = os.path.join(image_save_dir, filename)
-            if not os.path.exists(original_image_save_path):
-                original_image = transforms.ToPILImage()(x_test[i].cpu().clamp(0, 1))
-                original_image.save(original_image_save_path, format="JPEG")
-
-            # Store metadata
-            if original_image_path not in adv_mapping:
-                adv_mapping[original_image_path] = {
-                    "adv_noise_directory": image_save_dir,
-                    "label": y_test[i].item()
-                }
-
-        if (batch_idx + 1) % 10 == 0:
-            print(f"Processed {batch_idx + 1} batches...")
-
-    print("Directories and metadata prepared.")
-
-    # Step 6: Run AutoAttack for multiple epsilon values
-
+    # Step 5: Run AutoAttack for multiple epsilon values
     for eps in args.epsilons:
         print(f"Running AutoAttack for epsilon = {eps:.6f}")
         adversary = AutoAttack(predict, norm=args.norm, eps=eps, log_path=args.log_path, version=args.version, attacks_to_run=['apgd-ce'])
 
-        for batch_idx, (x_test, y_test, image_paths) in enumerate(dataloader):
+        for batch_idx, (x_test, y_test, _) in enumerate(dataloader):
             torch.cuda.empty_cache()
             print(f"Processing batch {batch_idx + 1} for epsilon = {eps:.6f}")
 
-            # Move tensors to device
             x_test = x_test.to(device, dtype=torch.float32, non_blocking=True)
             y_test = y_test.to(device, dtype=torch.int64, non_blocking=True)
 
-            x_test_unorm = x_test.clone()
+            x_test_unorm = x_test.clone().detach().to(torch.float32)
             unnormalize_inplace(x_test_unorm)
             with torch.no_grad():
                 adv_examples = adversary.run_standard_evaluation(x_test_unorm, y_test, bs=args.batch_size)
 
-            # Compute noise
             normalize_inplace(adv_examples)
             noise = x_test - adv_examples
 
-            torch.save({'adv_complete': adv_examples, 'x_test': x_test, 'y_test': y_test},
-               os.path.join(args.save_dir, f"adv_results_eps{eps:.5f}.pth"))
+            torch.save(
+                {'adv_complete': adv_examples, 'x_test': x_test, 'y_test': y_test},
+                os.path.join(args.save_dir, f"adv_results_eps{eps:.5f}_{batch_idx}.pth")
+            )
 
-            for i in range(x_test.size(0)):
-                original_image_path = image_paths[i]
-                filename = os.path.basename(original_image_path)
-                image_save_dir = os.path.join(args.save_dir, os.path.splitext(filename)[0])
-
-                # Save adversarial image and noise
-                adv_image_path = os.path.join(image_save_dir, f"adv_eps{int(eps * 255)}.jpeg")
-                noise_image_path = os.path.join(image_save_dir, f"noise_eps{int(eps * 255)}.jpeg")
-
-                adv_image = transforms.ToPILImage()(adv_examples[i].cpu().clamp(0, 1))
-                noise_image = transforms.ToPILImage()(noise[i].cpu().clamp(0, 1))
-
-                adv_image.save(adv_image_path, format="JPEG")
-                noise_image.save(noise_image_path, format="JPEG")
-
-        torch.cuda.empty_cache()
-
-    # Save mapping JSON
-    mapping_json_path = os.path.join(args.save_dir, "adv_mapping.json")
-    with open(mapping_json_path, "w") as f:
-        json.dump(adv_mapping, f, indent=4)
-
-    print(f"Adversarial images and noise saved. Metadata stored in {mapping_json_path}")
-    print("AutoAttack completed for all epsilon values.")
+    print("AutoAttack completed for all epsilon values. Only .pth files are saved.")
