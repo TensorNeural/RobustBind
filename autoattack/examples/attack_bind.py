@@ -9,8 +9,8 @@ from autoattack import AutoAttack
 from imagebind.imagebind_model import ModalityType
 from utils.utils import load_centre_embeddings
 import numpy as np
-from PIL import Image
 from torch.utils.data import Subset
+import torch_scatter
 
 # Import UniBind Model
 from model import UniBind
@@ -46,17 +46,29 @@ def load_images_parallel(dataset_root, batch_size, max_samples=None):
 
     return dataloader, class_to_index
 
+def unnormalize_inplace(x, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+    mean_t = torch.tensor(mean, device=x.device).view(1, -1, 1, 1)
+    std_t = torch.tensor(std, device=x.device).view(1, -1, 1, 1)
+    x.mul_(std_t).add_(mean_t).clamp_(0,1)
+    return x
+
+def normalize_inplace(x, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+    mean_t = torch.tensor(mean, device=x.device).view(1, -1, 1, 1)
+    std_t = torch.tensor(std, device=x.device).view(1, -1, 1, 1)
+    x.sub_(mean_t).div_(std_t)
+    return x
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_root', type=str, required=True, help="Root path to ImageNet dataset")
     parser.add_argument('--norm', type=str, default='Linf')
     parser.add_argument('--epsilons', nargs='+', type=float, default=[0],
                         help="List of epsilon values to test (space-separated)")
-    parser.add_argument('--save_dir', type=str, default='./autoattack/examples/results')
+    parser.add_argument('--save_dir', type=str, default='./results')
     parser.add_argument('--batch_size', type=int, default=20)
     parser.add_argument('--max_samples', type=int, default=20, help="Limit the number of images processed")
     parser.add_argument('--log_path', type=str, default='./autoattack/examples/results/log_file.txt')
-    parser.add_argument('--version', type=str, default='standard')
+    parser.add_argument('--version', type=str, default='custom')
     parser.add_argument('--state-path', type=str, default=None)
     parser.add_argument("--pretrain_weights", type=str, default='./ckpts/pretrained_weights.pt')
     parser.add_argument("--modality", type=str, default='image')
@@ -112,9 +124,9 @@ if __name__ == '__main__':
 
         batch_size = similarity.shape[0]
         class_raw_scores = torch.zeros(batch_size, 1000, device=device, dtype=torch.float32)
-
-        # Accumulate similarity scores for each class index without expanding
-        class_raw_scores.scatter_add_(1, centre_labels_indices.expand(batch_size, -1), similarity)
+        class_raw_scores, _ = torch_scatter.scatter_max(
+            similarity, centre_labels_indices.expand(batch_size, -1), dim=1
+        )
         return class_raw_scores
 
     # Step 5: Prepare directories and metadata
@@ -152,7 +164,7 @@ if __name__ == '__main__':
 
     for eps in args.epsilons:
         print(f"Running AutoAttack for epsilon = {eps:.6f}")
-        adversary = AutoAttack(predict, norm=args.norm, eps=eps, log_path=args.log_path, version=args.version)
+        adversary = AutoAttack(predict, norm=args.norm, eps=eps, log_path=args.log_path, version=args.version, attacks_to_run=['apgd-ce'])
 
         for batch_idx, (x_test, y_test, image_paths) in enumerate(dataloader):
             torch.cuda.empty_cache()
@@ -162,11 +174,17 @@ if __name__ == '__main__':
             x_test = x_test.to(device, dtype=torch.float32, non_blocking=True)
             y_test = y_test.to(device, dtype=torch.int64, non_blocking=True)
 
+            x_test_unorm = x_test.clone()
+            unnormalize_inplace(x_test_unorm)
             with torch.no_grad():
-                adv_examples = adversary.run_standard_evaluation(x_test, y_test, bs=args.batch_size)
+                adv_examples = adversary.run_standard_evaluation(x_test_unorm, y_test, bs=args.batch_size)
 
             # Compute noise
-            noise = adv_examples - x_test
+            normalize_inplace(adv_examples)
+            noise = x_test - adv_examples
+
+            torch.save({'adv_complete': adv_examples, 'x_test': x_test, 'y_test': y_test},
+               os.path.join(args.save_dir, f"adv_results_eps{args.epsilon:.5f}.pth"))
 
             for i in range(x_test.size(0)):
                 original_image_path = image_paths[i]
