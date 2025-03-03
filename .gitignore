@@ -3,5 +3,6 @@
 __pycache__
 *.pkl
 *.pt
+results/
 *.txt
 *.json
