@@ -1,6 +1,8 @@
 import os
+import abc
 from types import SimpleNamespace
 
+import torch
 import torch_scatter
 from torch.utils.data import DataLoader, Subset
 
@@ -169,7 +171,7 @@ class AutoAttackRunner:
 
             for batch_idx, (x_test, y_test) in enumerate(loader):
                 torch.cuda.empty_cache()
-                print(f"Processing batch {batch_idx + 1} for epsilon = {eps:.6f}")
+                print(f"Processing batch {batch_idx + 1} for epsilon = {int(eps * 255)}/255}")
 
                 x_test = x_test.to(self.device, dtype=torch.float32, non_blocking=True)
                 y_test = y_test.to(self.device, dtype=torch.int64, non_blocking=True)

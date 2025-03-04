@@ -133,8 +133,8 @@ def main():
         default="./datasets/Places365/center_to_places365.json",
     )
     parser.add_argument("--batch_size", type=int, default=300)
-    parser.add_argument("--max_samples", type=int, default=50000)
-    parser.add_argument("--epsilons", nargs="+", type=float, default=[2 / 255, 4 / 255])
+    parser.add_argument("--max_samples", type=int, default=36500)
+    parser.add_argument("--epsilons", nargs="+", type=float, default=[2/255, 4/255])
     parser.add_argument("--norm", type=str, default="Linf")
     parser.add_argument("--version", type=str, default="custom")
     parser.add_argument("--log_root", type=str, default="./logs")
