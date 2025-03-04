@@ -1,24 +1,14 @@
 import os
-import json
-import abc
-import argparse
-import torch
-import numpy as np
-from torch.utils.data import DataLoader, Subset
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
-import torch_scatter
-
-from PIL import Image
-
-from autoattack import AutoAttack
 from types import SimpleNamespace
 
-from model import UniBind
-import models.PointBind_models as models
-from imagebind.imagebind_model import ModalityType
+import torch_scatter
+from torch.utils.data import DataLoader, Subset
 
+from autoattack import AutoAttack
+from imagebind.imagebind_model import ModalityType
+from model import UniBind
 from utils.utils import load_centre_embeddings
+
 
 def unnormalize_inplace(x, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
     """
@@ -29,6 +19,7 @@ def unnormalize_inplace(x, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     x.mul_(std_t).add_(mean_t).clamp_(0, 1)
     return x
 
+
 def normalize_inplace(x, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
     """
     Normalizes in-place: (x - mean) / std.
@@ -37,6 +28,7 @@ def normalize_inplace(x, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
     std_t = torch.tensor(std, device=x.device).view(1, -1, 1, 1)
     x.sub_(mean_t).div_(std_t)
     return x
+
 
 class Attack(abc.ABC):
     def __init__(
@@ -47,13 +39,13 @@ class Attack(abc.ABC):
         save_dir="./results",
         batch_size=25,
         max_samples=50000,
-        epsilons=[2/255, 4/255],
-        norm='Linf',
-        version='custom',
+        epsilons=[2 / 255, 4 / 255],
+        norm="Linf",
+        version="custom",
         log_root="./logs",
         modality="image",
         mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
+        std=[0.229, 0.224, 0.225],
     ):
         self.dataset = dataset
         self.dataset_name = dataset_name
@@ -77,14 +69,16 @@ class Attack(abc.ABC):
     def get_label_indices(self, centre_labels, device) -> torch.Tensor:
         pass
 
+
 modality_map = {
     "image": ModalityType.VISION,
     "video": ModalityType.VISION,
     "audio": ModalityType.AUDIO,
     "thermal": ModalityType.THERMAL,
     "point": ModalityType.POINT,
-    "event": ModalityType.VISION
+    "event": ModalityType.VISION,
 }
+
 
 class AutoAttackRunner:
     def __init__(self, device=None):
@@ -101,10 +95,14 @@ class AutoAttackRunner:
         print("Initializing UniBind with weights:", self.pretrain_weights)
         print(f"Attack modality: {attack_modality}")
 
-        self.model = UniBind(SimpleNamespace(**{
-            'pretrain_weights': self.pretrain_weights,
-            'modality': attack_modality
-        })).to(self.device)
+        self.model = UniBind(
+            SimpleNamespace(
+                **{
+                    "pretrain_weights": self.pretrain_weights,
+                    "modality": attack_modality,
+                }
+            )
+        ).to(self.device)
 
         self.model.eval()
         print("UniBind model ready.")
@@ -114,13 +112,13 @@ class AutoAttackRunner:
         x_dict = {modality: x}
 
         visual_embeddings = self.model.encode_vision(x_dict).to(torch.bfloat16)
-        visual_embeddings = visual_embeddings / visual_embeddings.norm(dim=-1, keepdim=True)
+        visual_embeddings = visual_embeddings / visual_embeddings.norm(
+            dim=-1, keepdim=True
+        )
         similarity = visual_embeddings @ centre_embeddings.t()
         similarity = similarity.to(torch.bfloat16)
         class_raw_scores, _ = torch_scatter.scatter_max(
-            similarity,
-            label_indices.expand(similarity.shape[0], -1),
-            dim=1
+            similarity, label_indices.expand(similarity.shape[0], -1), dim=1
         )
         return class_raw_scores
 
@@ -129,7 +127,7 @@ class AutoAttackRunner:
             self._init_model(attack.modality)
 
         if attack.max_samples is not None and attack.max_samples < len(attack.dataset):
-            indices = torch.randperm(len(attack.dataset))[:attack.max_samples]
+            indices = torch.randperm(len(attack.dataset))[: attack.max_samples]
             attack.dataset = Subset(attack.dataset, indices)
 
         loader = DataLoader(
@@ -139,7 +137,7 @@ class AutoAttackRunner:
             pin_memory=True,
             shuffle=True,
             prefetch_factor=8,
-            persistent_workers=True
+            persistent_workers=True,
         )
         os.makedirs(attack.save_dir, exist_ok=True)
 
@@ -166,7 +164,7 @@ class AutoAttackRunner:
                 eps=eps,
                 log_path=attack.log_path,
                 version=attack.version,
-                attacks_to_run=['apgd-ce']
+                attacks_to_run=["apgd-ce"],
             )
 
             for batch_idx, (x_test, y_test) in enumerate(loader):
@@ -183,19 +181,17 @@ class AutoAttackRunner:
                     adv_examples = adversary.run_standard_evaluation(
                         x_test_unorm, y_test, bs=attack.batch_size
                     )
-                
+
                 normalize_inplace(adv_examples, attack.mean, attack.std)
                 outpath = os.path.join(
-                    attack.save_dir,
-                    f"adv_results_eps{int(eps * 255)}_{batch_idx}.pth"
+                    attack.save_dir, f"adv_results_eps{int(eps * 255)}_{batch_idx}.pth"
                 )
                 torch.save(
-                    {
-                        'adv_complete': adv_examples,
-                        'x_test': x_test,
-                        'y_test': y_test
-                    },
-                    outpath
+                    {"adv_complete": adv_examples, "x_test": x_test, "y_test": y_test},
+                    outpath,
                 )
 
-        print("AutoAttack completed for all epsilon values. .pth files are saved in:", attack.save_dir)
+        print(
+            "AutoAttack completed for all epsilon values. .pth files are saved in:",
+            attack.save_dir,
+        )

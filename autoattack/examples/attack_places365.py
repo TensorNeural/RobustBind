@@ -1,12 +1,15 @@
-import os
-import json
 import argparse
+import json
+import os
+
 import torch
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader
 from PIL import Image
+from torch.utils.data import Dataset
+
 from autoattack.attack_bind import Attack, AutoAttackRunner
+
 
 class Places365ValDataset(Dataset):
     def __init__(self, dataset_root, center_to_places_path, transform=None):
@@ -39,7 +42,9 @@ class Places365ValDataset(Dataset):
                 if line:
                     filename, str_label = line.split()
                     original_int_label = int(str_label)
-                    label_str = self.index_to_label.get(original_int_label, "unknown_label")
+                    label_str = self.index_to_label.get(
+                        original_int_label, "unknown_label"
+                    )
                     final_idx = self.label_to_final_index.get(label_str, 0)
                     self.samples.append((filename, final_idx))
 
@@ -56,6 +61,7 @@ class Places365ValDataset(Dataset):
 
         return image, final_label_idx
 
+
 class Places365Attack(Attack):
     def __init__(
         self,
@@ -64,23 +70,27 @@ class Places365Attack(Attack):
         save_dir="./results",
         batch_size=25,
         max_samples=50000,
-        epsilons=[2/255, 4/255],
-        norm='Linf',
-        version='custom',
+        epsilons=[2 / 255, 4 / 255],
+        norm="Linf",
+        version="custom",
         log_root="./logs",
-        modality="image"
+        modality="image",
     ):
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
 
-        transform = transforms.Compose([
-            transforms.Resize(256, antialias=True),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std)
-        ])
+        transform = transforms.Compose(
+            [
+                transforms.Resize(256, antialias=True),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std),
+            ]
+        )
 
-        ds = Places365ValDataset(dataset_root, center_to_places_path, transform=transform)
+        ds = Places365ValDataset(
+            dataset_root, center_to_places_path, transform=transform
+        )
         dataset_name = "Places365"
         centre_embeddings_path = "./centre_embs/image_p365_center_embeddings.pkl"
 
@@ -97,7 +107,7 @@ class Places365Attack(Attack):
             log_root=log_root,
             modality=modality,
             mean=mean,
-            std=std
+            std=std,
         )
 
     def get_label_indices(self, centre_labels, device) -> torch.Tensor:
@@ -116,17 +126,25 @@ class Places365Attack(Attack):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_root', type=str, required=True)
-    parser.add_argument('--center_to_places_path', type=str, default="./datasets/Places365/center_to_places365.json")
-    parser.add_argument('--batch_size', type=int, default=300)
-    parser.add_argument('--max_samples', type=int, default=50000)
-    parser.add_argument('--epsilons', nargs='+', type=float, default=[2/255, 4/255])
-    parser.add_argument('--norm', type=str, default='Linf')
-    parser.add_argument('--version', type=str, default='custom')
-    parser.add_argument('--log_root', type=str, default="./logs")
-    parser.add_argument('--modality', type=str, default="image")
-    parser.add_argument('--save_dir', type=str, default="./results")
-    parser.add_argument('--centre_embeddings_path', type=str, default="./centre_embs/image_p365_center_embeddings.pkl")
+    parser.add_argument("--dataset_root", type=str, required=True)
+    parser.add_argument(
+        "--center_to_places_path",
+        type=str,
+        default="./datasets/Places365/center_to_places365.json",
+    )
+    parser.add_argument("--batch_size", type=int, default=300)
+    parser.add_argument("--max_samples", type=int, default=50000)
+    parser.add_argument("--epsilons", nargs="+", type=float, default=[2 / 255, 4 / 255])
+    parser.add_argument("--norm", type=str, default="Linf")
+    parser.add_argument("--version", type=str, default="custom")
+    parser.add_argument("--log_root", type=str, default="./logs")
+    parser.add_argument("--modality", type=str, default="image")
+    parser.add_argument("--save_dir", type=str, default="./results")
+    parser.add_argument(
+        "--centre_embeddings_path",
+        type=str,
+        default="./centre_embs/image_p365_center_embeddings.pkl",
+    )
 
     args = parser.parse_args()
     cudnn.benchmark = True
@@ -140,7 +158,7 @@ def main():
         norm=args.norm,
         version=args.version,
         log_root=args.log_root,
-        modality=args.modality
+        modality=args.modality,
     )
 
     attack.save_dir = args.save_dir
