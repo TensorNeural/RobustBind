@@ -12,7 +12,6 @@ class ImageNetAttack(Attack):
     def __init__(
         self,
         dataset_root,
-        save_dir="./results",
         batch_size=25,
         max_samples=50000,
         epsilons=[2 / 255, 4 / 255],
@@ -43,7 +42,6 @@ class ImageNetAttack(Attack):
             dataset=ds,
             dataset_name=dataset_name,
             centre_embeddings_path=centre_embeddings_path,
-            save_dir=save_dir,
             batch_size=batch_size,
             max_samples=max_samples,
             epsilons=epsilons,
@@ -58,14 +56,15 @@ class ImageNetAttack(Attack):
         print(f"Loading WordNet mapping from: {self.center_label_to_wordnet_path}")
         with open(self.center_label_to_wordnet_path, "r") as f:
             self.center_label_to_wordnet = json.load(f)
+        
+        class_to_index = self._get_class_to_index()
+        self.idx_to_class = {v: k for k, v in class_to_index.items()}
+        self.wordnet_to_center_label = {v: k for k, v in self.center_label_to_wordnet.items()}
         print("Mapping loaded successfully.")
 
-    def get_label_indices(self, centre_labels, device) -> torch.Tensor:
-        if isinstance(self.dataset, torch.utils.data.Subset):
-            class_to_index = self.dataset.dataset.class_to_idx
-        else:
-            class_to_index = self.dataset.class_to_idx
-
+    def get_indices_from_labels(self, centre_labels, device) -> torch.Tensor:
+        class_to_index = self._get_class_to_index()
+        
         mapped_indices = []
         for lbl in centre_labels:
             wn_cls = self.center_label_to_wordnet.get(lbl, "")
@@ -73,16 +72,41 @@ class ImageNetAttack(Attack):
             mapped_indices.append(idx)
 
         return torch.tensor(mapped_indices, dtype=torch.int64, device=device)
+    
+    def get_labels_from_indices(self, indices) -> list:
+        labels = []
 
+        for idx in indices:
+            wordnet_id = self.idx_to_class[idx.item()]
+            center_label = self.wordnet_to_center_label.get(wordnet_id, "Unknown")
+            labels.append(center_label)
+        
+        return labels
+    
+    def _get_class_to_index(self):
+        if isinstance(self.dataset, torch.utils.data.Subset):
+            return self.dataset.dataset.class_to_idx
+        else:
+            return self.dataset.class_to_idx
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--dataset_root", type=str, required=True, help="Root path to ImageNet dataset"
+        "--dataset_root", 
+        type=str, 
+        default="/home/user/datasets/ImageNet-1K/val",
+        help="Root path to ImageNet dataset"
     )
-    parser.add_argument("--batch_size", type=int, default=200)
-    parser.add_argument("--max_samples", type=int, default=50000)
-    parser.add_argument("--epsilons", nargs="+", type=float, default=[2 / 255, 4 / 255])
+    parser.add_argument(
+        "--dataset_adversary_root",
+        type=str,
+        default="/home/user/datasets/ImageNet-1K/val_adv",
+        help="Output directory for ImageNet adversary dataset",
+    )
+    parser.add_argument("--batch_size", type=int, default=20)
+    parser.add_argument("--max_samples", type=int, default=20)
+    # parser.add_argument("--epsilons", nargs="+", type=float, default=[0/255, 2 / 255, 4 / 255])
+    parser.add_argument("--epsilons", nargs="+", type=float, default=[0])
     parser.add_argument("--norm", type=str, default="Linf")
     parser.add_argument("--version", type=str, default="custom")
     parser.add_argument(
@@ -98,12 +122,6 @@ def main():
         help="Which modality to use: 'image', 'audio', etc.",
     )
     parser.add_argument(
-        "--save_dir",
-        type=str,
-        default="./results",
-        help="Output directory for .pth results",
-    )
-    parser.add_argument(
         "--centre_embeddings_path",
         type=str,
         default="./centre_embs/image_in_center_embeddings.pkl",
@@ -114,6 +132,18 @@ def main():
         type=str,
         default="./datasets/ImageNet-1K/center_to_wordnet.json",
         help="Path to center-label-to-WordNet mapping",
+    )
+    parser.add_argument(
+        "--metadata_output_root",
+        type=str,
+        default="./datasets/ImageNet-1K/",
+        help="Output directory for metadata",
+    )
+    parser.add_argument(
+        "--metadata_prefix",
+        type=str,
+        default="val_adv",
+        help="Prefix for metadata files",
     )
 
     args = parser.parse_args()
@@ -128,8 +158,6 @@ def main():
         log_root=args.log_root,
         modality=args.modality,
     )
-
-    attack.save_dir = args.save_dir
     attack.centre_embeddings_path = args.centre_embeddings_path
 
     if (
@@ -138,7 +166,11 @@ def main():
     ):
         attack.center_label_to_wordnet_path = args.center_label_to_wordnet_path
 
-    runner = AutoAttackRunner()
+    runner = AutoAttackRunner(
+        dataset_adversary_root=args.dataset_adversary_root,
+        metadata_output_root=args.metadata_output_root,
+        metadata_prefix=args.metadata_prefix,
+    )
     runner.run(attack)
 
 
