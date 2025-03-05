@@ -1,5 +1,3 @@
-cd ../
-
 # Places365
 CUDA_VISIBLE_DEVICES=0 python infer.py \
   --test_dataset_dir /home/user/datasets/places365 \

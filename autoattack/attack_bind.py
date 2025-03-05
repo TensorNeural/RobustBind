@@ -1,6 +1,7 @@
 import os
 import abc
 import json
+import shutil
 from types import SimpleNamespace
 
 import torch
@@ -138,17 +139,17 @@ class AutoAttackRunner:
         self.model.eval()
         print("UniBind model ready.")
 
-    def predict(self, x, centre_embeddings, label_indices, attack: Attack):
+    def predict(self, x, centre_embeddings, center_label_indices, attack: Attack):
         modality = modality_map[attack.modality]
         x_dict = {modality: x}
-        visual_embeddings = self.model.encode_vision(x_dict).to(torch.bfloat16)
+        visual_embeddings = self.model.encode_vision(x_dict).to(torch.float32)
         visual_embeddings = visual_embeddings / visual_embeddings.norm(
             dim=-1, keepdim=True
         )
-        similarity = visual_embeddings @ centre_embeddings.t()
-        similarity = similarity.to(torch.bfloat16)
+        similarity = visual_embeddings @ centre_embeddings.t().softmax(dim=-1)
+        similarity = similarity.to(torch.float32)
         class_raw_scores, _ = torch_scatter.scatter_max(
-            similarity, label_indices.expand(similarity.shape[0], -1), dim=1
+            similarity, center_label_indices.expand(similarity.shape[0], -1), dim=1
         )
         return class_raw_scores
 
@@ -170,6 +171,8 @@ class AutoAttackRunner:
             persistent_workers=True,
         )
 
+        os.remove(attack.log_path) if os.path.exists(attack.log_path) else None
+        shutil.rmtree(self.dataset_adversary_root, ignore_errors=True)
         os.makedirs(self.dataset_adversary_root, exist_ok=True)
         os.makedirs(self.metadata_output_root, exist_ok=True)
 
@@ -178,15 +181,15 @@ class AutoAttackRunner:
             attack.centre_embeddings_path, self.device
         )
         centre_embeddings = centre_embeddings.to(
-            self.device, dtype=torch.bfloat16, non_blocking=True
+            self.device, dtype=torch.float32, non_blocking=True
         )
         centre_embeddings /= centre_embeddings.norm(dim=-1, keepdim=True)
 
         print("Mapping center labels to dataset IDs...")
-        label_indices = attack.get_indices_from_labels(centre_labels, self.device)
+        center_label_indices = attack.get_indices_from_labels(centre_labels, self.device)
 
         def local_predict(x):
-            return self.predict(x, centre_embeddings, label_indices, attack)
+            return self.predict(x, centre_embeddings, center_label_indices, attack)
 
         for eps in attack.epsilons:
             eps_int = int(eps * 255)
@@ -223,8 +226,7 @@ class AutoAttackRunner:
                         x_test_unorm, y_test, bs=attack.batch_size
                     )
 
-                unnormalize_inplace(adv_examples, attack.mean, attack.std)
-
+                normalize_inplace(adv_examples, attack.mean, attack.std)
                 outpath = os.path.join(abs_eps_dir, f"eps{eps_int}_{batch_idx}.pth")
                 torch.save(
                     {
@@ -236,14 +238,14 @@ class AutoAttackRunner:
                     outpath,
                 )
 
-                # parallel_save_images(adv_examples, abs_eps_dir, batch_idx)
+                parallel_save_images(adv_examples, abs_eps_dir, batch_idx)
 
                 for idx_in_batch in range(adv_examples.size(0)):
                     img_filename = f"batch{batch_idx}_idx{idx_in_batch}.png"
                     img_save_path = os.path.join(rel_eps_dir, img_filename)
                     label_str = labels[idx_in_batch]
                     adv_metadata_eps.append(
-                        {"data": os.path.abspath(img_save_path), "label": label_str}
+                        {"data": img_save_path, "label": label_str}
                     )
 
             meta_filename = f"{self.metadata_prefix}_eps{eps_int}.json"

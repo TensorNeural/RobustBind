@@ -24,6 +24,15 @@ DEFAULT_AUDIO_FRAME_SHIFT_MS = 10  # in milliseconds
 
 BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 
+IMAGE_MEAN = (0.485, 0.456, 0.406)
+IMAGE_STD = (0.229, 0.224, 0.225)
+
+IMAGE_TRANSFORM = transforms.Compose([
+    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=IMAGE_MEAN, std=IMAGE_STD),
+])
 
 def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
     # Based on https://github.com/YuanGongND/ast/blob/d7d8b4b8e06cdaeb6c843cdb38794c1c7692234c/src/dataloader.py#L102
@@ -82,23 +91,10 @@ def load_and_transform_vision_data(image_paths, device):
 
     image_ouputs = []
     for image_path in image_paths:
-        data_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    224, interpolation=transforms.InterpolationMode.BICUBIC
-                ),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
         with open(image_path, "rb") as fopen:
             image = Image.open(fopen).convert("RGB")
 
-        image = data_transform(image).to(device)
+        image = IMAGE_TRANSFORM(image).to(device)
         image_ouputs.append(image)
     return torch.stack(image_ouputs, dim=0)
 

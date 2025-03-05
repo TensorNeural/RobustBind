@@ -3,9 +3,9 @@ import json
 
 import torch
 import torchvision.datasets as datasets
-import torchvision.transforms as transforms
 
 from autoattack.attack_bind import Attack, AutoAttackRunner
+from utils.data_transform import IMAGE_TRANSFORM, IMAGE_MEAN, IMAGE_STD
 
 
 class ImageNetAttack(Attack):
@@ -20,18 +20,7 @@ class ImageNetAttack(Attack):
         log_root="./logs",
         modality="image",
     ):
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-        transform = transforms.Compose(
-            [
-                transforms.Resize(256, antialias=True),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=mean, std=std),
-            ]
-        )
-
-        ds = datasets.ImageFolder(root=dataset_root, transform=transform)
+        ds = datasets.ImageFolder(root=dataset_root, transform=IMAGE_TRANSFORM)
         dataset_name = "ImageNet_1K"
         centre_embeddings_path = "./centre_embs/image_in_center_embeddings.pkl"
         self.center_label_to_wordnet_path = (
@@ -49,8 +38,8 @@ class ImageNetAttack(Attack):
             version=version,
             log_root=log_root,
             modality=modality,
-            mean=mean,
-            std=std,
+            mean=IMAGE_MEAN,
+            std=IMAGE_STD,
         )
 
         print(f"Loading WordNet mapping from: {self.center_label_to_wordnet_path}")
@@ -103,10 +92,10 @@ def main():
         default="/home/user/datasets/ImageNet-1K/val_adv",
         help="Output directory for ImageNet adversary dataset",
     )
-    parser.add_argument("--batch_size", type=int, default=20)
-    parser.add_argument("--max_samples", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=175)
+    parser.add_argument("--max_samples", type=int, default=50000)
+    parser.add_argument("--epsilons", nargs="+", type=float, default=[2 / 255, 4 / 255])
     # parser.add_argument("--epsilons", nargs="+", type=float, default=[0/255, 2 / 255, 4 / 255])
-    parser.add_argument("--epsilons", nargs="+", type=float, default=[0])
     parser.add_argument("--norm", type=str, default="Linf")
     parser.add_argument("--version", type=str, default="custom")
     parser.add_argument(
