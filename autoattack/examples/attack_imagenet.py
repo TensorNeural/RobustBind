@@ -13,8 +13,8 @@ class ImageNetAttack(Attack):
         self,
         dataset_root,
         batch_size=25,
-        max_samples=50000,
-        epsilons=[2 / 255, 4 / 255],
+        max_samples=25,
+        epsilons=[2 / 255],
         norm="Linf",
         version="custom",
         log_root="./logs",
@@ -92,10 +92,9 @@ def main():
         default="/home/user/datasets/ImageNet-1K/val_adv",
         help="Output directory for ImageNet adversary dataset",
     )
-    parser.add_argument("--batch_size", type=int, default=175)
+    parser.add_argument("--batch_size", type=int, default=160)
     parser.add_argument("--max_samples", type=int, default=50000)
-    parser.add_argument("--epsilons", nargs="+", type=float, default=[2 / 255, 4 / 255])
-    # parser.add_argument("--epsilons", nargs="+", type=float, default=[0/255, 2 / 255, 4 / 255])
+    parser.add_argument("--epsilons", nargs="+", type=float, default=[1/255, 2 / 255, 4 / 255])
     parser.add_argument("--norm", type=str, default="Linf")
     parser.add_argument("--version", type=str, default="custom")
     parser.add_argument(

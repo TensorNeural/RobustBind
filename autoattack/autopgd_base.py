@@ -266,7 +266,7 @@ class APGDAttack():
         for _ in range(self.eot_iter):
             if not self.is_tf_model:
                 with torch.enable_grad():
-                    logits = self.model(x_adv)
+                    logits, _ = self.model(x_adv)
                     loss_indiv = criterion_indiv(logits, y)
                     loss = loss_indiv.sum()
 
@@ -364,7 +364,7 @@ class APGDAttack():
             for _ in range(self.eot_iter):
                 if not self.is_tf_model:
                     with torch.enable_grad():
-                        logits = self.model(x_adv)
+                        logits, _ = self.model(x_adv)
                         loss_indiv = criterion_indiv(logits, y)
                         loss = loss_indiv.sum()
     
@@ -458,9 +458,11 @@ class APGDAttack():
 
         x = x.detach().clone().float().to(self.device)
         if not self.is_tf_model:
-            y_pred = self.model(x).max(1)[1]
+            scores, _ = self.model(x)
+            y_pred = scores.max(1)[1]
         else:
-            y_pred = self.model.predict(x).max(1)[1]
+            scores = self.model.predict(x)
+            y_pred = scores.max(1)[1]
         if y is None:
             #y_pred = self.predict(x).max(1)[1]
             y = y_pred.detach().clone().long().to(self.device)
@@ -662,9 +664,9 @@ class APGDAttack_targeted(APGDAttack):
                     y_to_fool = y[ind_to_fool].clone()
                     
                     if not self.is_tf_model:
-                        output = self.model(x_to_fool)
+                        output, _ = self.model(x_to_fool)
                     else:
-                        output = self.model.predict(x_to_fool)
+                        output, _ = self.model.predict(x_to_fool)
                     self.y_target = output.sort(dim=1)[1][:, -target_class]
 
                     if not self.use_largereps:

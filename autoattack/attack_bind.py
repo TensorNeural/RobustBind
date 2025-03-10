@@ -113,6 +113,7 @@ class AutoAttackRunner:
         metadata_output_root: str,
         metadata_prefix: str,
         device=None,
+        debug=False,
     ):
         self.pretrain_weights = "./ckpts/pretrained_weights.pt"
         self.device = device or (
@@ -122,6 +123,7 @@ class AutoAttackRunner:
         self.dataset_adversary_root = dataset_adversary_root
         self.metadata_output_root = metadata_output_root
         self.metadata_prefix = metadata_prefix
+        self.debug = debug
 
     def _init_model(self, attack_modality: str):
         print("Initializing UniBind with weights:", self.pretrain_weights)
@@ -139,26 +141,29 @@ class AutoAttackRunner:
         self.model.eval()
         print("UniBind model ready.")
 
-    def predict(self, x, centre_embeddings, center_label_indices, attack: Attack):
-        modality = modality_map[attack.modality]
+    def predict(self, x, centre_embeddings, center_label_indices, modality):
+        modality = modality_map[modality]
         x_dict = {modality: x}
-        visual_embeddings = self.model.encode_vision(x_dict).to(torch.float32)
+        visual_embeddings = self.model.encode_vision(x_dict)
         visual_embeddings = visual_embeddings / visual_embeddings.norm(
             dim=-1, keepdim=True
         )
-        similarity = visual_embeddings @ centre_embeddings.t().softmax(dim=-1)
-        similarity = similarity.to(torch.float32)
+        similarity = visual_embeddings @ centre_embeddings.t()
+        expanded_indices = center_label_indices.expand(similarity.shape[0], -1)
         class_raw_scores, _ = torch_scatter.scatter_max(
-            similarity, center_label_indices.expand(similarity.shape[0], -1), dim=1
+            similarity, expanded_indices, dim=1
         )
-        return class_raw_scores
+        return class_raw_scores, similarity 
 
     def run(self, attack: Attack):
         if self.model is None:
             self._init_model(attack.modality)
 
         if attack.max_samples is not None and attack.max_samples < len(attack.dataset):
-            indices = torch.randperm(len(attack.dataset))[: attack.max_samples]
+            if self.debug:
+                indices = torch.arange(attack.max_samples)
+            else:
+                indices = torch.randperm(len(attack.dataset))[: attack.max_samples]
             attack.dataset = Subset(attack.dataset, indices)
 
         loader = DataLoader(
@@ -166,7 +171,7 @@ class AutoAttackRunner:
             batch_size=attack.batch_size,
             num_workers=4,
             pin_memory=True,
-            shuffle=True,
+            shuffle=False,
             prefetch_factor=8,
             persistent_workers=True,
         )
@@ -188,8 +193,12 @@ class AutoAttackRunner:
         print("Mapping center labels to dataset IDs...")
         center_label_indices = attack.get_indices_from_labels(centre_labels, self.device)
 
-        def local_predict(x):
-            return self.predict(x, centre_embeddings, center_label_indices, attack)
+        mean_t = torch.tensor(attack.mean, device=self.device).view(1, -1, 1, 1)
+        std_t = torch.tensor(attack.std, device=self.device).view(1, -1, 1, 1)
+
+        def predict_adapter(x):
+            x_norm = (x - mean_t) / std_t
+            return self.predict(x_norm, centre_embeddings, center_label_indices, attack.modality)
 
         for eps in attack.epsilons:
             eps_int = int(eps * 255)
@@ -202,7 +211,7 @@ class AutoAttackRunner:
             adv_metadata_eps = []
 
             adversary = AutoAttack(
-                local_predict,
+                predict_adapter,
                 norm=attack.norm,
                 eps=eps,
                 log_path=attack.log_path,
@@ -211,7 +220,6 @@ class AutoAttackRunner:
             )
 
             for batch_idx, (x_test, y_test) in enumerate(loader):
-                torch.cuda.empty_cache()
                 print(f"Processing batch {batch_idx + 1} for epsilon = {eps_int}/255")
 
                 x_test = x_test.to(self.device, dtype=torch.float32, non_blocking=True)
@@ -222,21 +230,38 @@ class AutoAttackRunner:
                 unnormalize_inplace(x_test_unorm, attack.mean, attack.std)
 
                 with torch.no_grad():
-                    adv_examples = adversary.run_standard_evaluation(
-                        x_test_unorm, y_test, bs=attack.batch_size
+                    adv_examples, adv_y_test, adv_similarity = adversary.run_standard_evaluation(
+                        x_test_unorm, y_test, centre_embeddings.shape[0], bs=attack.batch_size,
+                        return_labels=True
                     )
-
-                normalize_inplace(adv_examples, attack.mean, attack.std)
+                adv_examples_norm = adv_examples.clone().detach()
+                normalize_inplace(adv_examples_norm, attack.mean, attack.std)
                 outpath = os.path.join(abs_eps_dir, f"eps{eps_int}_{batch_idx}.pth")
-                torch.save(
-                    {
-                        "adv_complete": adv_examples,
-                        "x_test": x_test,
-                        "y_test": y_test,
-                        "labels": labels,
-                    },
-                    outpath,
-                )
+                adv_labels = attack.get_labels_from_indices(adv_y_test)
+                if self.debug:
+                    torch.save(
+                        {
+                            "adv_complete": adv_examples_norm,
+                            "adv_x_test": adv_examples,
+                            "adv_y_test": adv_y_test,
+                            "adv_similarity": adv_similarity,
+                            "adv_labels": adv_labels,
+                            "x_test": x_test,
+                            "y_test": y_test,
+                            "labels": labels,
+                        },
+                        outpath,
+                    )
+                else:
+                    torch.save(
+                        {
+                            "adv_complete": adv_examples_norm,
+                            "x_test": x_test,
+                            "adv_labels": adv_labels,
+                            "labels": labels,
+                        },
+                        outpath,
+                    )
 
                 parallel_save_images(adv_examples, abs_eps_dir, batch_idx)
 
@@ -247,6 +272,7 @@ class AutoAttackRunner:
                     adv_metadata_eps.append(
                         {"data": img_save_path, "label": label_str}
                     )
+                torch.cuda.empty_cache()
 
             meta_filename = f"{self.metadata_prefix}_eps{eps_int}.json"
             meta_filepath = os.path.join(self.metadata_output_root, meta_filename)

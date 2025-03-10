@@ -81,6 +81,7 @@ class AutoAttack():
     def run_standard_evaluation(self,
                                 x_orig,
                                 y_orig,
+                                similarity_dim=0,
                                 bs=250,
                                 return_labels=False,
                                 state_path=None):
@@ -124,14 +125,17 @@ class AutoAttack():
             if state.robust_flags is None:
                 robust_flags = torch.zeros(x_orig.shape[0], dtype=torch.bool, device=x_orig.device)
                 y_adv = torch.empty_like(y_orig)
+                similarity_adv = torch.zeros((x_orig.shape[0], similarity_dim), device=x_orig.device)
                 for batch_idx in range(n_batches):
                     start_idx = batch_idx * bs
                     end_idx = min( (batch_idx + 1) * bs, x_orig.shape[0])
 
                     x = x_orig[start_idx:end_idx, :].clone().to(self.device)
                     y = y_orig[start_idx:end_idx].clone().to(self.device)
-                    output = self.get_logits(x).max(dim=1)[1]
+                    logits, similarity = self.get_logits(x)
+                    output = logits.max(dim=1)[1]
                     y_adv[start_idx: end_idx] = output
+                    similarity_adv[start_idx:end_idx] = similarity
                     correct_batch = y.eq(output)
                     robust_flags[start_idx:end_idx] = correct_batch.detach().to(robust_flags.device)
 
@@ -217,8 +221,9 @@ class AutoAttack():
                     
                     else:
                         raise ValueError('Attack not supported')
-                
-                    output = self.get_logits(adv_curr).max(dim=1)[1]
+                    
+                    scores, similarity = self.get_logits(adv_curr)
+                    output = scores.max(dim=1)[1]
                     false_batch = ~y.eq(output).to(robust_flags.device)
                     non_robust_lin_idcs = batch_datapoint_idcs[false_batch]
                     robust_flags[non_robust_lin_idcs] = False
@@ -226,6 +231,7 @@ class AutoAttack():
 
                     x_adv[non_robust_lin_idcs] = adv_curr[false_batch].detach().to(x_adv.device)
                     y_adv[non_robust_lin_idcs] = output[false_batch].detach().to(x_adv.device)
+                    similarity_adv[non_robust_lin_idcs] = similarity[false_batch].detach()
 
                     if self.verbose:
                         num_non_robust_batch = torch.sum(false_batch)    
@@ -255,7 +261,7 @@ class AutoAttack():
                     self.norm, self.epsilon, res.max(), (x_adv != x_adv).sum(), x_adv.max(), x_adv.min()))
                 self.logger.log('robust accuracy: {:.2%}'.format(robust_accuracy))
         if return_labels:
-            return x_adv, y_adv
+            return x_adv, y_adv, similarity_adv
         else:
             return x_adv
         
@@ -265,7 +271,7 @@ class AutoAttack():
         for counter in range(n_batches):
             x = x_orig[counter * bs:min((counter + 1) * bs, x_orig.shape[0])].clone().to(self.device)
             y = y_orig[counter * bs:min((counter + 1) * bs, x_orig.shape[0])].clone().to(self.device)
-            output = self.get_logits(x)
+            output, _ = self.get_logits(x)
             acc += (output.max(1)[1] == y).float().sum()
             
         if self.verbose:
@@ -286,7 +292,7 @@ class AutoAttack():
         for c in l_attacks:
             startt = time.time()
             self.attacks_to_run = [c]
-            x_adv, y_adv = self.run_standard_evaluation(x_orig, y_orig, bs=bs, return_labels=True)
+            x_adv, y_adv = self.run_standard_evaluation(x_orig, y_orig, bs=bs, return_labels=return_labels)
             if return_labels:
                 adv[c] = (x_adv, y_adv)
             else:

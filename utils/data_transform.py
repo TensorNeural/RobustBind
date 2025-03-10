@@ -24,8 +24,8 @@ DEFAULT_AUDIO_FRAME_SHIFT_MS = 10  # in milliseconds
 
 BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 
-IMAGE_MEAN = (0.485, 0.456, 0.406)
-IMAGE_STD = (0.229, 0.224, 0.225)
+IMAGE_MEAN = (0.48145466, 0.4578275, 0.40821073)
+IMAGE_STD = (0.26862954, 0.26130258, 0.27577711)
 
 IMAGE_TRANSFORM = transforms.Compose([
     transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
