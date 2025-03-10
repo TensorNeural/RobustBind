@@ -45,15 +45,17 @@ class ImageNetAttack(Attack):
         print(f"Loading WordNet mapping from: {self.center_label_to_wordnet_path}")
         with open(self.center_label_to_wordnet_path, "r") as f:
             self.center_label_to_wordnet = json.load(f)
-        
+
         class_to_index = self._get_class_to_index()
         self.idx_to_class = {v: k for k, v in class_to_index.items()}
-        self.wordnet_to_center_label = {v: k for k, v in self.center_label_to_wordnet.items()}
+        self.wordnet_to_center_label = {
+            v: k for k, v in self.center_label_to_wordnet.items()
+        }
         print("Mapping loaded successfully.")
 
     def get_indices_from_labels(self, centre_labels, device) -> torch.Tensor:
         class_to_index = self._get_class_to_index()
-        
+
         mapped_indices = []
         for lbl in centre_labels:
             wn_cls = self.center_label_to_wordnet.get(lbl, "")
@@ -61,7 +63,7 @@ class ImageNetAttack(Attack):
             mapped_indices.append(idx)
 
         return torch.tensor(mapped_indices, dtype=torch.int64, device=device)
-    
+
     def get_labels_from_indices(self, indices) -> list:
         labels = []
 
@@ -69,22 +71,23 @@ class ImageNetAttack(Attack):
             wordnet_id = self.idx_to_class[idx.item()]
             center_label = self.wordnet_to_center_label.get(wordnet_id, "Unknown")
             labels.append(center_label)
-        
+
         return labels
-    
+
     def _get_class_to_index(self):
         if isinstance(self.dataset, torch.utils.data.Subset):
             return self.dataset.dataset.class_to_idx
         else:
             return self.dataset.class_to_idx
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--dataset_root", 
-        type=str, 
+        "--dataset_root",
+        type=str,
         default="/home/user/datasets/ImageNet-1K/val",
-        help="Root path to ImageNet dataset"
+        help="Root path to ImageNet dataset",
     )
     parser.add_argument(
         "--dataset_adversary_root",
@@ -94,7 +97,9 @@ def main():
     )
     parser.add_argument("--batch_size", type=int, default=160)
     parser.add_argument("--max_samples", type=int, default=50000)
-    parser.add_argument("--epsilons", nargs="+", type=float, default=[1/255, 2 / 255, 4 / 255])
+    parser.add_argument(
+        "--epsilons", nargs="+", type=float, default=[1 / 255, 2 / 255, 4 / 255]
+    )
     parser.add_argument("--norm", type=str, default="Linf")
     parser.add_argument("--version", type=str, default="custom")
     parser.add_argument(
