@@ -23,6 +23,9 @@ class UniBind(nn.Module):
         self.modality = args.modality
         self.backbone = models.PointBind_I2PMAE()
 
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
         if logger is None:
             self.logger = logging.getLogger(__name__)
         else:
