@@ -20,7 +20,7 @@ from autoattack.autopgd_base import APGDAttack
 from datasets.datasets import ImageNetDataset
 from imagebind.imagebind_model import ModalityType
 from model import UniBind
-from utils.data_transform import IMAGE_TRANSFORM
+from utils.data_transform import IMAGE_TRANSFORM, IMAGE_MEAN, IMAGE_STD
 from utils.utils import load_centre_embeddings
 
 ###################################
@@ -32,6 +32,20 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] - %(mess
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(formatter)
+
+def unnormalize_inplace(x, mean_t, std_t):
+    x.mul_(std_t).add_(mean_t).clamp_(0, 1)
+    return x
+
+def normalize_inplace(x, mean_t, std_t):
+    x.sub_(mean_t).div_(std_t)
+    return x
+
+def attack_adapter(mean, std, logits_fn):
+    def predict_adapter(x):
+        x_norm = (x - mean) / std
+        return logits_fn(x_norm)
+    return predict_adapter
 
 ###################################
 # 2) Model / Enum Definitions
@@ -119,12 +133,8 @@ class UniBindModel(BaseModel):
     def encode(self, x):
         modality = MODALITY_MAP[self.modality]
         inp_dict = {modality: x}
-        emb = self.unibind.encode_vision_with_mlp(inp_dict)
+        emb = self.unibind.encode_vision(inp_dict)
         return emb / emb.norm(dim=-1, keepdim=True)
-
-    def predict_label_index(self, similarity_row):
-        pred_centroid = similarity_row.argmax().item()
-        return self.centre_label_indices[pred_centroid].item()
     
     def save_fine_tuned_weights(self, path: str):
         self.logger.info(f"[save_fine_tuned_weights] Saving fine tuned weights to '{path}'...")
@@ -206,6 +216,8 @@ def train_epoch(
     device,
     model_train: UniBindModel,
     model_original: UniBindModel,
+    mean,
+    std,
     data_loader,
     optimizer,
     scheduler,
@@ -239,9 +251,13 @@ def train_epoch(
         # Move inputs/labels to device
         inp, lbl = inp.to(device), lbl.to(device)
 
-        # Generate adversarial examples
+         # Generate adversarial examples
         model_train.eval()
-        adv_inp = attack.perturb(inp, lbl)
+        inp_unorm = inp.clone().detach()
+        unnormalize_inplace(inp_unorm, mean, std)
+
+        adv_inp = attack.perturb(inp_unorm, lbl)
+        normalize_inplace(adv_inp, mean, std)
 
         model_train.train()
 
@@ -269,7 +285,7 @@ def train_epoch(
         # Evaluate cos-sim & optional classification
         model_train.eval()
         emb_clean = model_train.encode(inp)
-        
+
         with torch.no_grad():
             cos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
             cos_sim_meter.update(cos_sim.item(), n_samples)
@@ -304,7 +320,7 @@ def train_epoch(
         logger.info(f"Batch {batch_idx+1} training time: {batch_end_time - batch_start_time:.2f} seconds")
 
         # Clean up for memory
-        del inp, lbl, adv_inp, emb_adv, emb_clean, emb_orig, loss_val
+        del inp, lbl, inp_unorm, adv_inp, emb_adv, emb_clean, emb_orig, loss_val
         torch.cuda.empty_cache()
 
     epoch_end_time = time.time()
@@ -345,7 +361,7 @@ def evaluate_robust_one_stage(model: UniBindModel, data_loader, device, one_atta
     return robust_acc
 
 @torch.no_grad()
-def evaluate_two_stage(model: UniBindModel, data_loader, device, iteration_count=100, epsilon=2/255):
+def evaluate_two_stage(model: UniBindModel, data_loader, device, iteration_count, epsilon):
     logger.info(f"Running two-stage robust evaluation: iteration_count={iteration_count}, epsilon={(epsilon * 255):.2f}")
     eval_start_time = time.time()
 
@@ -436,11 +452,15 @@ def evaluate_clean(model: UniBindModel, data_loader, device):
 def train_and_evaluate(
     model_train: UniBindModel,
     model_original: UniBindModel,
+    train_mean,
+    train_std,
     train_loader,
+    val_mean,
+    val_std,
     val_loader,
     device,
     out_dir,
-    epsilon=2/255,
+    epsilon,
 ):
     logger.info(f"Starting training for 2 epochs with epsilon={(epsilon * 255):.2f}")
 
@@ -466,7 +486,7 @@ def train_and_evaluate(
 
     # Attack configurations
     train_attack = APGDAttack(
-        predict=model_train.logits,
+        predict=attack_adapter(train_mean, train_std, model_train.logits),
         norm='Linf',
         n_restarts=1,
         n_iter=10,
@@ -476,7 +496,7 @@ def train_and_evaluate(
         logger=logger
     )
     epoch_attack = APGDAttack(
-        predict=model_train.logits,
+        predict=attack_adapter(train_mean, train_std, model_train.logits),
         norm='Linf',
         n_restarts=1,
         n_iter=50,
@@ -502,6 +522,8 @@ def train_and_evaluate(
             device=device,
             model_train=model_train,
             model_original=model_original,
+            mean=train_mean,
+            std=train_std,
             data_loader=train_loader,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -528,9 +550,6 @@ def train_and_evaluate(
             best_acc = robust_acc
             logger.info(f"New best checkpoint with robust acc={best_acc:.4f}. Saving only fine tuned weights ...")
             model_train.save_fine_tuned_weights(os.path.join(out_dir, "best_fine_tuned_weights.pt"))
-
-        # Clean up memory after each epoch
-        torch.cuda.empty_cache()
 
     logger.info(f"Training complete! Best robust one-stage accuracy was {best_acc:.4f}")
 
@@ -576,7 +595,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        # max_samples=5120000,  # example large limit, set as needed
+        max_samples=5000,  # example large limit, set as needed
         debug=True,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -595,14 +614,14 @@ def main():
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         pin_memory=True
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=4,
         pin_memory=True
     )
@@ -638,7 +657,14 @@ def main():
     #     model_train = torch.compile(model_train)
 
     # 4) Train & Evaluate (2 epochs, OneCycleLR)
-    train_and_evaluate(model_train, model_orig, train_loader, val_loader, device, args.output_dir, args.epsilon)
+    mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
+    std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
+    
+    train_and_evaluate(
+        model_train, model_orig, 
+        train_mean=mean_t, train_std=std_t, train_loader=train_loader,
+        val_mean=mean_t, val_std=std_t, val_loader=val_loader, 
+        device=device, out_dir=args.output_dir, epsilon=args.epsilon)
 
     # 5) Final checks & evaluations
     best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
