@@ -32,7 +32,7 @@ class UniBind(nn.Module):
         self.backbone.load_state_dict(state_dict, strict=True)
         for param in self.backbone.parameters():
             param.requires_grad_(False)
-            
+
         if self.modality == "image":
             self.mlp_for_image = init_linear_as_identity(nn.Linear(1024, 1024))
         elif self.modality == "video":
