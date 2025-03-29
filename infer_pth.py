@@ -67,10 +67,20 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     parser = argparse.ArgumentParser("")
+    # parser.add_argument(
+    #     "--adv_pth_path",
+    #     type=str,
+    #     default="/home/user/datasets/Places365/val_adv/eps4/eps4_0.pth",
+    # )
+    # parser.add_argument(
+    #     "--centre_embeddings_path",
+    #     type=str,
+    #     default="./centre_embs/image_p365_center_embeddings.pkl",
+    # )
     parser.add_argument(
         "--adv_pth_path",
         type=str,
-        default="/home/user/datasets/ImageNet-1K/new_val_adv/eps0/eps0_0.pth",
+        default="/home/user/datasets/ImageNet-1K/val_5000_adv/eps2/eps2_0.pth",
     )
     parser.add_argument(
         "--centre_embeddings_path",

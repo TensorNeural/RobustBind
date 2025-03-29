@@ -191,7 +191,7 @@ class AutoAttackRunner:
         centre_embeddings /= centre_embeddings.norm(dim=-1, keepdim=True)
 
         print("Mapping center labels to dataset IDs...")
-        center_label_indices = attack.get_indices_from_labels(
+        centre_label_indices = attack.get_indices_from_labels(
             centre_labels, self.device
         )
 
@@ -201,7 +201,7 @@ class AutoAttackRunner:
         def predict_adapter(x):
             x_norm = (x - mean_t) / std_t
             return self.predict(
-                x_norm, centre_embeddings, center_label_indices, attack.modality
+                x_norm, centre_embeddings, centre_label_indices, attack.modality
             )
 
         for eps in attack.epsilons:

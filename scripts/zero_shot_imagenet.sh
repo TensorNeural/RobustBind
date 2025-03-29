@@ -1,43 +1,29 @@
-CUDA_VISIBLE_DEVICES=0 python infer.py \
-  --test_dataset_dir /home/user/datasets/ImageNet-1K \
-  --test_data_path ./datasets/ImageNet-1K/val_data.json \
-  --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
-  --pretrain_weights ./ckpts/pretrained_weights.pt \
-  --output_dir ./outputs/val_data_zero_shot \
-  --modality image \
-  --val_batch_size 2000 \
-  --num_workers 4 \
-  --seed 1234
+#!/usr/bin/env bash
 
-CUDA_VISIBLE_DEVICES=0 python infer.py \
-  --test_dataset_dir /home/user/datasets/ImageNet-1K/val_adv \
-  --test_data_path ./datasets/ImageNet-1K/val_adv_eps1.json \
-  --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
-  --pretrain_weights ./ckpts/pretrained_weights.pt \
-  --output_dir ./outputs/val_adv_eps1_data_zero_shot \
-  --modality image \
-  --val_batch_size 2000 \
-  --num_workers 4 \
-  --seed 1234
+# Each item contains three space-separated parts:
+#   1. The .json file name (e.g. val_data.json)
+#   2. The directory of the dataset (e.g. /home/user/datasets/ImageNet-1K)
+#   3. The output directory (e.g. ./outputs/ImageNet-1K_val_data_zero_shot)
+for combo in \
+  "val_data.json /home/user/datasets/ImageNet-1K ./outputs/ImageNet-1K_val_data_zero_shot" \
+  "val_5000_adv_eps2.json /home/user/datasets/ImageNet-1K/val_5000_adv ./outputs/ImageNet-1K_val_adv_eps2_data_zero_shot" \
+  "val_5000_adv_eps4.json /home/user/datasets/ImageNet-1K/val_5000_adv ./outputs/ImageNet-1K_val_adv_eps4_data_zero_shot"
+do
+  # Split each line into individual variables
+  set -- $combo
+  TEST_JSON="$1"
+  DATASET_DIR="$2"
+  OUTPUT_DIR="$3"
 
-CUDA_VISIBLE_DEVICES=0 python infer.py \
-  --test_dataset_dir /home/user/datasets/ImageNet-1K/val_adv \
-  --test_data_path ./datasets/ImageNet-1K/val_adv_eps2.json \
-  --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
-  --pretrain_weights ./ckpts/pretrained_weights.pt \
-  --output_dir ./outputs/val_adv_eps2_data_zero_shot \
-  --modality image \
-  --val_batch_size 175 \
-  --num_workers 4 \
-  --seed 1234
+  CUDA_VISIBLE_DEVICES=0 python infer.py \
+    --test_dataset_dir "$DATASET_DIR" \
+    --test_data_path "./datasets/ImageNet-1K/$TEST_JSON" \
+    --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
+    --pretrain_weights ./ckpts/pretrained_weights.pt \
+    --output_dir "$OUTPUT_DIR" \
+    --modality image \
+    --val_batch_size 2000 \
+    --num_workers 4 \
+    --seed 1234
 
-CUDA_VISIBLE_DEVICES=0 python infer.py \
-  --test_dataset_dir /home/user/datasets/ImageNet-1K/val_adv \
-  --test_data_path ./datasets/ImageNet-1K/val_adv_eps4.json \
-  --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
-  --pretrain_weights ./ckpts/pretrained_weights.pt \
-  --output_dir ./outputs/val_adv_eps4_data_zero_shot \
-  --modality image \
-  --val_batch_size 10 \
-  --num_workers 4 \
-  --seed 1234
+done
