@@ -21,7 +21,7 @@ def check_randomized(model, x, y, bs=250, n=5, alpha=1e-4, logger=None):
     outputs = []
     with torch.no_grad():
         for _ in range(n):
-            output = model(x)
+            output, _ = model(x)
             corrcl_curr = (output.max(1)[1] == y).sum().item()
             corrcl.append(corrcl_curr)
             outputs.append(output / (L2_norm(output, keepdim=True) + 1e-10))
@@ -43,7 +43,7 @@ def check_randomized(model, x, y, bs=250, n=5, alpha=1e-4, logger=None):
 
 def check_range_output(model, x, alpha=1e-5, logger=None):
     with torch.no_grad():
-        output = model(x)
+        output, _ = model(x)
     fl = [output.max() < 1. + alpha, output.min() >  -alpha,
         ((output.sum(-1) - 1.).abs() < alpha).all()]
     if all(fl):

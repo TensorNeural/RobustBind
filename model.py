@@ -10,7 +10,7 @@ class UniBind(nn.Module):
         super(UniBind, self).__init__()
         self.modality = args.modality
         self.backbone = models.PointBind_I2PMAE()
-        state_dict = torch.load(args.pretrain_weights, map_location='cpu')
+        state_dict = torch.load(args.pretrain_weights, map_location='cpu', weights_only=True)
         self.backbone.load_state_dict(state_dict, strict=True)
         for param in self.backbone.parameters():
             param.requires_grad_(False)
