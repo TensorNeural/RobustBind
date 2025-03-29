@@ -1,9 +1,11 @@
 import torch
 from torch import nn
+import torch.nn.init as init
 import torch.nn.functional as F
 import models.PointBind_models as models
 from imagebind.imagebind_model import ModalityType
 import numpy as np
+import logging
 
 class UniBind(nn.Module):
     def __init__(self, args, use_flash_attention = False, fine_tuned_weights=None, logger=None):
@@ -16,44 +18,44 @@ class UniBind(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad_(False)
         if self.modality == "image":
-            self.mlp_for_image = nn.Linear(1024,1024)
+            self.mlp_for_image = init_linear_as_identity(nn.Linear(1024,1024))
         if self.modality == "video":
-            self.mlp_for_video = nn.Linear(1024,1024)
+            self.mlp_for_video = init_linear_as_identity(nn.Linear(1024,1024))
         if self.modality == "audio":
-            self.mlp_for_audio = nn.Linear(1024,1024)
+            self.mlp_for_audio = init_linear_as_identity(nn.Linear(1024,1024))
         if self.modality == "thermal":
-            self.mlp_for_thermal = nn.Linear(1024,1024)
+            self.mlp_for_thermal = init_linear_as_identity(nn.Linear(1024,1024))
         if self.modality == "point":
-            self.mlp_for_point = nn.Linear(1024,1024)
+            self.mlp_for_point = init_linear_as_identity(nn.Linear(1024,1024))
         if self.modality == "event":
-            self.mlp_for_event = nn.Linear(1024,1024)
+            self.mlp_for_event = init_linear_as_identity(nn.Linear(1024,1024))
 
     def forward(self, inputs):
         if self.modality == "image":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             text_embeddings = outputs[ModalityType.TEXT]
             vision_embeddings = self.mlp_for_image(outputs[ModalityType.VISION])
         if self.modality == "video":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             text_embeddings = outputs[ModalityType.TEXT]
             vision_embeddings = self.mlp_for_video(outputs[ModalityType.VISION])
         if self.modality == "audio":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             text_embeddings = outputs[ModalityType.TEXT]
             vision_embeddings = self.mlp_for_audio(outputs[ModalityType.AUDIO])
         if self.modality == "thermal":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             text_embeddings = outputs[ModalityType.TEXT]
             vision_embeddings = self.mlp_for_thermal(outputs[ModalityType.THERMAL])
         if self.modality == "event":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             text_embeddings = outputs[ModalityType.TEXT]
             vision_embeddings = self.mlp_for_event(outputs[ModalityType.VISION])
         if self.modality == "point":
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
             pc_features = self.backbone.bind.modality_head_point(pc_features)
             pc_features = self.backbone.bind.modality_postprocessor_point(pc_features)
-            outputs = self.backbone.bind({ModalityType.TEXT: inputs['text']})
+            outputs = self.__bind({ModalityType.TEXT: inputs['text']})
             text_embeddings = outputs[ModalityType.TEXT]
             vision_embeddings = self.mlp_for_point(pc_embeddings)
         text_embeddings = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
@@ -112,3 +114,16 @@ class UniBind(nn.Module):
         text_embeddings = self.backbone.bind(inputs)[ModalityType.TEXT]
         text_embeddings = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
         return text_embeddings
+    
+    def __bind(self, inputs):
+        with torch.inference_mode():
+            return self.backbone.bind(inputs)
+    
+def init_linear_as_identity(linear_layer):
+    assert linear_layer.in_features == linear_layer.out_features, \
+        "Cannot set identity: layer must be square."
+    # Initialize weight to identity
+    init.eye_(linear_layer.weight)
+    # Initialize bias to zeros
+    nn.init.zeros_(linear_layer.bias)
+    return linear_layer
