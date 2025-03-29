@@ -1,15 +1,13 @@
-# ---------------------------------
-# 1) Sorted Imports
-# ---------------------------------
 import abc
 import argparse
 import logging
 import os
 import time
-from datetime import datetime  # <-- for timestamping
+from datetime import datetime  # for timestamping
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_scatter
 from enum import Enum
 from torch.optim import AdamW
@@ -20,7 +18,7 @@ from tqdm import tqdm
 # Mixed precision
 from torch.cuda.amp import autocast, GradScaler
 
-# Optional compile if PyTorch 2.x:
+# Optional compile if PyTorch 2.0+:
 # if hasattr(torch, 'compile'):
 #     model = torch.compile(model)
 
@@ -31,9 +29,9 @@ from model import UniBind
 from utils.data_transform import IMAGE_TRANSFORM
 from utils.utils import load_centre_embeddings
 
-# ---------------------------------
-# 2) Logging Setup
-# ---------------------------------
+###################################
+# 1) Logging Setup
+###################################
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] - %(message)s')
@@ -41,9 +39,9 @@ console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(formatter)
 
-# ---------------------------------
-# 3) Model / Enum Definitions
-# ---------------------------------
+###################################
+# 2) Model / Enum Definitions
+###################################
 class LossType(str, Enum):
     CROSS_ENTROPY = "ce"
     LATENT_DIMENSION_REDUCTION = "ldr"
@@ -61,9 +59,9 @@ class BaseModel(nn.Module):
     def encode(self, x):
         pass
 
-# ---------------------------------
-# 4) UniBind Model
-# ---------------------------------
+###################################
+# 3) UniBind Model
+###################################
 MODALITY_MAP = {
     "image": ModalityType.VISION,
     "video": ModalityType.VISION,
@@ -84,7 +82,7 @@ class UniBindModel(BaseModel):
         label_to_index,
         index_to_label,
         logger=None,
-        load_unibind_pretrained=True
+        fine_tuned_weights=None
     ):
         super().__init__()
         self.logger = logger if logger else logging.getLogger(__name__)
@@ -93,7 +91,7 @@ class UniBindModel(BaseModel):
         from types import SimpleNamespace
         self.unibind = UniBind(
             SimpleNamespace(pretrain_weights=pretrain_weights, modality=modality),
-            load_pretrained=load_unibind_pretrained,
+            fine_tuned_weights=fine_tuned_weights,
             logger=self.logger
         )
         self.unibind.to(device)
@@ -131,12 +129,50 @@ class UniBindModel(BaseModel):
     def predict_label_index(self, similarity_row):
         pred_centroid = similarity_row.argmax().item()
         return self.centre_label_indices[pred_centroid].item()
+    
+    def save_fine_tuned_weights(self, path: str):
+        self.logger.info(f"[save_fine_tuned_weights] Saving fine tuned weights to '{path}'...")
+        self.unibind.save_fine_tuned_weights(path)
 
-# ---------------------------------
+    def load_fine_tuned_weights(self, path: str):
+        self.logger.info(f"[load_fine_tuned_weights] Loading fine tuned weights from '{path}'...")
+        self.unibind.load_fine_tuned_weights(path)
+
+###################################
+# 4) Utility: AverageMeter + compute_acc
+###################################
+class AverageMeter:
+    """
+    Tracks and stores the average of some metric (e.g. loss, accuracy, etc.).
+    """
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.sum = 0.0
+        self.count = 0
+
+    @property
+    def avg(self):
+        return (self.sum / self.count) if self.count else 0.0
+
+    def update(self, val, n=1):
+        self.sum += val * n
+        self.count += n
+
+def compute_acc(logits, targets):
+    """
+    Simple classification accuracy in percentage (0-100).
+    """
+    preds = logits.argmax(dim=1)
+    correct = (preds == targets).float().sum().item()
+    return 100.0 * correct / targets.size(0)
+
+###################################
 # 5) Training Helpers
-# ---------------------------------
+###################################
 def compute_embedding_loss(emb1, emb2):
-    return torch.nn.functional.mse_loss(emb1, emb2, reduction='sum')
+    return nn.functional.mse_loss(emb1, emb2, reduction='sum')
 
 @torch.no_grad()
 def two_stage_attack(model, inputs, labels, attack_stage1: APGDAttack, attack_stage2: APGDAttack):
@@ -148,7 +184,6 @@ def two_stage_attack(model, inputs, labels, attack_stage1: APGDAttack, attack_st
     """
     logger.info("Running two-stage attack on batch...")
 
-    # We'll do the forward in half precision if possible
     with autocast():
         adv_stage1 = attack_stage1.perturb(inputs, labels)
 
@@ -168,6 +203,9 @@ def two_stage_attack(model, inputs, labels, attack_stage1: APGDAttack, attack_st
     logger.info("Two-stage attack finished.")
     return adv_final
 
+###################################
+# 6) Extended train_epoch with Cos-Sim & Acc Logging
+###################################
 def train_epoch(
     device,
     model_train: UniBindModel,
@@ -175,51 +213,110 @@ def train_epoch(
     data_loader,
     optimizer,
     scheduler,
-    attack: APGDAttack
+    attack: APGDAttack,
+    epoch: int,
+    total_epochs: int,
+    args,
+    loss_meter: AverageMeter,
+    cos_sim_meter: AverageMeter,
+    acc_meter: AverageMeter,
+    racc_meter: AverageMeter,
+    is_classification=False,
+    embedding_text_labels_norm=None,
 ):
     """
-    Train for one epoch, logging the time it takes per batch and overall epoch time.
+    Train for one epoch, computing:
+      - Clean & Adv embeddings
+      - Cosine similarity vs. original
+      - Classification accuracy (optional)
+      - Logging all metrics with logger instead of prints
     """
     epoch_start_time = time.time()
     model_train.train()
-    scaler = GradScaler()  # for half-precision training
+    scaler = GradScaler()
+
+    step_base = epoch * len(data_loader)
 
     for batch_idx, (inp, lbl) in enumerate(data_loader):
-        batch_start_time = time.time()
+        step_total = step_base + batch_idx + 1
 
-        logger.info(f"[TRAIN] Processing batch {batch_idx+1}/{len(data_loader)}")
+        batch_start_time = time.time()
+        logger.info(f"[TRAIN] Epoch {epoch+1}/{total_epochs}, batch {batch_idx+1}/{len(data_loader)}")
+
         inp, lbl = inp.to(device), lbl.to(device)
 
         logger.info("Generating adversarial examples (one-stage) ...")
         model_train.eval()
-        adv_inp = attack.perturb(inp, lbl)
-
+        with autocast():
+            adv_inp = attack.perturb(inp, lbl)
         model_train.train()
-        emb_adv = model_train.encode(adv_inp)
 
+        # Adversarial embedding
+        with autocast():
+            emb_adv = model_train.encode(adv_inp)
+
+        # Clean embedding of current training model (optional)
+        with autocast():
+            emb_clean = model_train.encode(inp)
+
+        # Original model's clean embedding for reference
         with torch.no_grad():
             emb_orig = model_original.encode(inp)
 
+        # Compute loss: MSE(adv_emb, orig_emb), as in your code
         loss_val = compute_embedding_loss(emb_adv, emb_orig)
-        logger.info(f"Embedding loss for this batch = {loss_val.item():.4f}")
-
         optimizer.zero_grad()
         scaler.scale(loss_val).backward()
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
 
+        # Update loss meter
+        n_samples = inp.size(0)
+        loss_meter.update(loss_val.item(), n_samples)
+
+        # with torch.no_grad, we compute cos-sim & classification metrics
+        with torch.no_grad():
+            cos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
+            cos_sim_meter.update(cos_sim.item(), n_samples)
+
+            # Classification metrics if relevant
+            if is_classification and embedding_text_labels_norm is not None:
+                logits_adv = emb_adv @ embedding_text_labels_norm
+                racc = compute_acc(logits_adv, lbl)
+
+                emb_clean_norm = F.normalize(emb_clean, dim=1)
+                logits_clean = emb_clean_norm @ embedding_text_labels_norm
+                acc = compute_acc(logits_clean, lbl)
+
+                acc_meter.update(acc, n_samples)
+                racc_meter.update(racc, n_samples)
+            else:
+                acc = None
+                racc = None
+
+        # Log each batch's metrics using logger
+        lr_ = optimizer.param_groups[0]['lr']
+        logger.info(
+            f"[TRAIN] Step={step_total}, LR={lr_:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}"
+            + (
+                f", Acc={acc:.2f}, RAcc={racc:.2f}"
+                if (acc is not None and racc is not None)
+                else ""
+            )
+        )
+
         batch_end_time = time.time()
         logger.info(f"Batch {batch_idx+1} training time: {batch_end_time - batch_start_time:.2f} seconds")
 
     epoch_end_time = time.time()
-    logger.info(f"Epoch training time: {epoch_end_time - epoch_start_time:.2f} seconds")
+    logger.info(f"Epoch {epoch+1}/{total_epochs} training time: {epoch_end_time - epoch_start_time:.2f} seconds")
 
+###################################
+# 7) Evaluate Helpers
+###################################
 @torch.no_grad()
 def evaluate_robust_one_stage(model: UniBindModel, data_loader, device, one_attack: APGDAttack):
-    """
-    Evaluate the model under a one-stage APGDAttack, logging per-batch timing.
-    """
     eval_start_time = time.time()
     model.eval()
     total_correct = 0
@@ -249,9 +346,6 @@ def evaluate_robust_one_stage(model: UniBindModel, data_loader, device, one_atta
 
 @torch.no_grad()
 def evaluate_two_stage(model: UniBindModel, data_loader, device, iteration_count=100, epsilon=2/255):
-    """
-    Evaluate the model under a two-stage APGDAttack, logging per-batch timing.
-    """
     logger.info(f"Running two-stage robust evaluation: iteration_count={iteration_count}, epsilon={(epsilon * 255):.2f}")
     eval_start_time = time.time()
 
@@ -303,9 +397,6 @@ def evaluate_two_stage(model: UniBindModel, data_loader, device, iteration_count
 
 @torch.no_grad()
 def evaluate_clean(model: UniBindModel, data_loader, device):
-    """
-    Evaluate the model on clean (non-adversarial) inputs, logging per-batch timing.
-    """
     logger.info("Running CLEAN evaluation (no attack).")
     eval_start_time = time.time()
     model.eval()
@@ -332,9 +423,9 @@ def evaluate_clean(model: UniBindModel, data_loader, device):
     logger.info(f"Total clean eval time: {eval_end_time - eval_start_time:.2f} seconds")
     return acc
 
-# ---------------------------------
-# 7) Main Training/Eval Flow
-# ---------------------------------
+###################################
+# 8) Main Training/Eval Flow
+###################################
 def train_and_evaluate(
     model_train: UniBindModel,
     model_original: UniBindModel,
@@ -354,7 +445,7 @@ def train_and_evaluate(
     cosine_sched = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=0.0)
     scheduler = SequentialLR(optimizer, [warmup_sched, cosine_sched], milestones=[warmup_steps])
 
-    # One-stage attacks for training (10 iter) & epoch-check (50 iter)
+    # Attack configurations
     train_attack = APGDAttack(
         predict=model_train.logits,
         norm='Linf',
@@ -376,12 +467,37 @@ def train_and_evaluate(
         logger=logger
     )
 
+    # (NEW) Create meters for logging cos-sim & accuracy across training
+    loss_meter = AverageMeter()
+    cos_sim_meter = AverageMeter()
+    acc_meter = AverageMeter()
+    racc_meter = AverageMeter()
+
     best_acc = 0.0
     for ep in range(epochs):
         epoch_start_time = time.time()
 
         logger.info(f"Epoch {ep+1}/{epochs} -----------------------------------------")
-        train_epoch(device, model_train, model_original, train_loader, optimizer, scheduler, train_attack)
+
+        # (NEW) Use the extended train_epoch that logs cos-sim & optional accuracy
+        train_epoch(
+            device=device,
+            model_train=model_train,
+            model_original=model_original,
+            data_loader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            attack=train_attack,
+            epoch=ep,
+            total_epochs=epochs,
+            args=None,  # If you need more fields, adapt or pass your actual args
+            loss_meter=loss_meter,
+            cos_sim_meter=cos_sim_meter,
+            acc_meter=acc_meter,
+            racc_meter=racc_meter,
+            is_classification=False,  # change to True if you have classification embeddings
+            embedding_text_labels_norm=None
+        )
 
         logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {ep+1}")
         robust_acc = evaluate_robust_one_stage(model_train, val_loader, device, epoch_attack)
@@ -390,16 +506,16 @@ def train_and_evaluate(
         epoch_end_time = time.time()
         logger.info(f"Epoch {ep+1} total time (training + evaluation): {epoch_end_time - epoch_start_time:.2f} seconds")
 
-        if robust_acc > best_acc:
+        if robust_acc >= best_acc:
             best_acc = robust_acc
-            logger.info(f"New best checkpoint with robust acc={best_acc:.4f}. Saving ...")
-            torch.save(model_train.state_dict(), os.path.join(out_dir, "best_model.pt"))
+            logger.info(f"New best checkpoint with robust acc={best_acc:.4f}. Saving only fine tuned weights ...")
+            model_train.save_fine_tuned_weights(os.path.join(out_dir, "best_fine_tuned_weights.pt"))
 
     logger.info(f"Training complete! Best robust one-stage accuracy was {best_acc:.4f}")
 
-# ---------------------------------
-# 8) Main
-# ---------------------------------
+###################################
+# 9) Main
+###################################
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="output")
@@ -439,7 +555,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=120000,  # for quick tests
+        max_samples=50,  # example limit for quick tests
         debug=True,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -449,7 +565,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.val_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=3000,
+        max_samples=100,
         debug=True,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -480,7 +596,8 @@ def main():
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
-        logger=logger
+        logger=logger,
+        fine_tuned_weights=None
     )
     model_train = UniBindModel(
         device=device,
@@ -490,7 +607,8 @@ def main():
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
-        logger=logger
+        logger=logger,
+        fine_tuned_weights=None
     )
 
     # (optional) If PyTorch 2.0+ you can compile the entire model:
@@ -501,10 +619,10 @@ def main():
     # 4) Train & Evaluate
     train_and_evaluate(model_train, model_orig, train_loader, val_loader, device, args.output_dir, args.epsilon)
 
-    # 5) Final checks
-    best_ckpt_path = os.path.join(args.output_dir, "best_model.pt")
-    if os.path.exists(best_ckpt_path):
-        logger.info("Loading best checkpoint for final two-stage & clean evaluations ...")
+    # 5) Final checks & evaluations
+    best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
+    if os.path.exists(best_fine_tuned_ckpt_path):
+        logger.info("Loading best fine tuned weights for final two-stage & clean evaluations ...")
         final_model = UniBindModel(
             device=device,
             pretrain_weights=args.pretrain_weights,
@@ -513,18 +631,19 @@ def main():
             centre_labels=raw_lbls,
             label_to_index=lbl_to_idx,
             index_to_label=idx_to_lbl,
-            load_unibind_pretrained=False,
-            logger=logger
+            logger=logger,
+            fine_tuned_weights=best_fine_tuned_ckpt_path
         )
-        final_model.load_state_dict(torch.load(best_ckpt_path))
 
-        final_robust_acc = evaluate_two_stage(final_model, val_loader, device, iteration_count=100, epsilon=args.epsilon)
+        final_robust_acc = evaluate_two_stage(
+            final_model, val_loader, device, iteration_count=100, epsilon=args.epsilon
+        )
         logger.info(f"Final two-stage robust accuracy = {final_robust_acc:.4f}")
 
         final_clean_acc = evaluate_clean(final_model, val_loader, device)
         logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
     else:
-        logger.warning("No best_model.pt found. Skipping final evaluations.")
+        logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
 
 if __name__ == "__main__":
     main()
