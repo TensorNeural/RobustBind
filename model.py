@@ -90,19 +90,19 @@ class UniBind(nn.Module):
     
     def encode_vision(self, inputs):
         if self.modality == "image":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = outputs[ModalityType.VISION]
         if self.modality == "video":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = outputs[ModalityType.VISION]
         if self.modality == "audio":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = outputs[ModalityType.AUDIO]
         if self.modality == "thermal":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = outputs[ModalityType.THERMAL]
         if self.modality == "event":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = outputs[ModalityType.VISION]
         if self.modality == "point":
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
@@ -113,19 +113,19 @@ class UniBind(nn.Module):
     
     def encode_vision_with_mlp(self, inputs):
         if self.modality == "image":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = self.mlp_for_image(outputs[ModalityType.VISION])
         if self.modality == "video":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = self.mlp_for_video(outputs[ModalityType.VISION])
         if self.modality == "audio":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = self.mlp_for_audio(outputs[ModalityType.AUDIO])
         if self.modality == "thermal":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = self.mlp_for_thermal(outputs[ModalityType.THERMAL])
         if self.modality == "event":
-            outputs = self.backbone.bind(inputs)
+            outputs = self.__bind(inputs)
             vision_embeddings = self.mlp_for_event(outputs[ModalityType.VISION])
         if self.modality == "point":
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
@@ -137,7 +137,7 @@ class UniBind(nn.Module):
     
 
     def encode_text(self, inputs):
-        text_embeddings = self.backbone.bind(inputs)[ModalityType.TEXT]
+        text_embeddings = self.__bind(inputs)[ModalityType.TEXT]
         text_embeddings = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
         return text_embeddings
     
@@ -174,8 +174,7 @@ class UniBind(nn.Module):
                 self.logger.warning(f"[load_fine_tuned_weights] This model has no '{mlp_attr}' attribute. Skipping.")
     
     def __bind(self, inputs):
-        with torch.inference_mode():
-            return self.backbone.bind(inputs)
+        return self.backbone.bind(inputs)
     
 def init_linear_as_identity(linear_layer):
     assert linear_layer.in_features == linear_layer.out_features, \
