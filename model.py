@@ -6,11 +6,12 @@ from imagebind.imagebind_model import ModalityType
 import numpy as np
 
 class UniBind(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args, use_flash_attention = False, fine_tuned_weights=None, logger=None):
         super(UniBind, self).__init__()
         self.modality = args.modality
-        self.backbone = models.PointBind_I2PMAE()
-        state_dict = torch.load(args.pretrain_weights, map_location='cpu', weights_only=True)
+        self.backbone = models.PointBind_I2PMAE(use_flash_attention=use_flash_attention)
+
+        state_dict = torch.load(args.pretrain_weights, weights_only=True, map_location='cpu')
         self.backbone.load_state_dict(state_dict, strict=True)
         for param in self.backbone.parameters():
             param.requires_grad_(False)
