@@ -22,7 +22,7 @@ from imagebind.multimodal_preprocessors import (AudioPreprocessor,
                                              SpatioTemporalPosEmbeddingHelper,
                                              TextPreprocessor,
                                              ThermalPreprocessor)
-from imagebind.transformer import MultiheadAttention, SimpleTransformer
+from imagebind.transformer import FlashAttention2, MultiheadAttention, SimpleTransformer
 
 ModalityType = SimpleNamespace(
     VISION="vision",
@@ -70,8 +70,10 @@ class ImageBindModel(nn.Module):
         imu_num_blocks=6,
         imu_num_heads=8,
         imu_drop_path=0.7,
+        use_flash_attn=False,
     ):
         super().__init__()
+        self.use_flash_attn = use_flash_attn
 
         self.modality_preprocessors = self._create_modality_preprocessors(
             video_frames,
@@ -303,13 +305,14 @@ class ImageBindModel(nn.Module):
         def instantiate_trunk(
             embed_dim, num_blocks, num_heads, pre_transformer_ln, add_bias_kv, drop_path
         ):
+            attention = FlashAttention2 if self.use_flash_attn else MultiheadAttention
             return SimpleTransformer(
                 embed_dim=embed_dim,
                 num_blocks=num_blocks,
                 ffn_dropout_rate=0.0,
                 drop_path_rate=drop_path,
                 attn_target=partial(
-                    MultiheadAttention,
+                    attention,
                     embed_dim=embed_dim,
                     num_heads=num_heads,
                     bias=True,
@@ -489,8 +492,7 @@ class ImageBindModel(nn.Module):
         return outputs
 
 
-def imagebind_huge():
-
+def imagebind_huge(use_flash_attn=False):
     return ImageBindModel(
         vision_embed_dim=1280,
         vision_num_blocks=32,
@@ -501,4 +503,5 @@ def imagebind_huge():
         out_embed_dim=1024,
         audio_drop_path=0.1,
         imu_drop_path=0.7,
+        use_flash_attn=use_flash_attn
     )
