@@ -71,10 +71,10 @@ class Transformer(nn.Module):
         return self.resblocks(x)
 
 class POINTBIND(nn.Module):
-    def __init__(self, point_encoder, pc_feat_dims):
+    def __init__(self, point_encoder, pc_feat_dims, use_flash_attention=False):
         super().__init__()
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        self.bind = imagebind_model.imagebind_huge().eval().cuda()
+        self.bind = imagebind_model.imagebind_huge(use_flash_attention).eval().cuda()
 
         self.point_encoder = point_encoder
         self.pc_projection = nn.Parameter(torch.empty(pc_feat_dims, 512))
@@ -111,8 +111,8 @@ def PointBind_PointBERT(args):
     model = POINTBIND(point_encoder, pc_feat_dims=768)
     return model
 
-def PointBind_I2PMAE(args=None):
+def PointBind_I2PMAE(args=None, use_flash_attention=False):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
     point_encoder = I2P_MAE_BIND()
-    model = POINTBIND(point_encoder, pc_feat_dims=384)
+    model = POINTBIND(point_encoder, pc_feat_dims=384, use_flash_attention=use_flash_attention)
     return model

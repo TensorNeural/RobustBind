@@ -72,7 +72,7 @@ class GpuMemoryTracker:
         if self.message:
             parts.append(self.message)
 
-        self.logger.info(" | ".join(parts))
+        self.logger.debug(" | ".join(parts))
 
     def _format_bytes(self, num_bytes):
         abs_bytes = abs(num_bytes)
@@ -280,6 +280,7 @@ class UniBindModel(BaseModel):
         from types import SimpleNamespace
         self.unibind = UniBind(
             SimpleNamespace(pretrain_weights=pretrain_weights, modality=modality),
+            use_flash_attention=True,
             fine_tuned_weights=fine_tuned_weights,
             logger=self.logger
         )
@@ -466,10 +467,6 @@ def train_epoch(
 
         with ProfileModelMemory(model_train, logger):
             emb_adv = model_train.encode(adv_inp)
-
-        for name, param in model_train.named_parameters():
-            if param.grad is not None:
-                print(f"{name} got gradient: shape={param.grad.shape}")
 
         with torch.no_grad():
             with GpuMemoryTracker(logger):
@@ -768,7 +765,7 @@ def main():
     parser.add_argument("--dataset_root", type=str, default="/home/user/datasets/ImageNet-1K")
     parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
     parser.add_argument("--val_json", type=str, default="./datasets/ImageNet-1K/val_data.json")
-    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights.pt")
+    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
     parser.add_argument("--batch_size", type=int, default=100)
     parser.add_argument("--epsilon", type=float, default=2/255)
@@ -801,7 +798,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=128000,  # example
+        # max_samples=128000,  # example
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -857,6 +854,12 @@ def main():
         logger=logger,
         fine_tuned_weights=None
     )
+
+    first_param = next(model_train.parameters(), None)
+    if first_param is not None:
+        logger.info(f"model_train first param dtype: {first_param.dtype}")
+    else:
+        logger.info("No parameters in model_train!")
 
     # 4) Train & Evaluate
     mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)

@@ -16,6 +16,7 @@ from typing import Callable, List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, trunc_normal_
 
@@ -64,6 +65,107 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class FlashAttention2(nn.Module):
+    """
+    Drop-in replacement for nn.MultiheadAttention focusing on self- or cross-attention.
+    It expects `[T, B, D]` in and returns `[T, B, D]` (batch_first=False),
+    just like nn.MultiheadAttention(batch_first=False).
+
+    * `bias`: Whether Q, K, V, out projections have a bias term.
+    * `add_bias_kv`: Whether to append learnable bias vectors to K, V (like MHA's add_bias_kv).
+    * Uses PyTorch 2.0's scaled_dot_product_attention for FlashAttention 2 on Ampere+ GPUs.
+    * No support for attn_mask, key_padding_mask, or returning attention weights.
+    """
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = 0.0,
+        bias: bool = True,
+        add_bias_kv: bool = False,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.add_bias_kv = add_bias_kv
+
+        # Check shapes
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == embed_dim, "embed_dim must divide num_heads"
+
+        # Q, K, V, out projections
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        if self.add_bias_kv:
+            self.bias_k = nn.Parameter(torch.empty(1, 1, embed_dim))
+            self.bias_v = nn.Parameter(torch.empty(1, 1, embed_dim))
+            nn.init.xavier_normal_(self.bias_k)
+            nn.init.xavier_normal_(self.bias_v)
+
+    def forward(
+        self,
+        x: torch.Tensor,                # [T, B, D] => query for self-attn
+        attn_mask: torch.Tensor = None, # Not supported
+        key: torch.Tensor = None,       # [T, B, D] => optional cross-attn K
+        value: torch.Tensor = None,     # [T, B, D] => optional cross-attn V
+        is_causal: bool = False
+    ) -> torch.Tensor:
+        """
+        For self-attention: pass x, omit key/value.
+        For cross-attention: pass separate key, value in [T, B, D].
+        Returns [T, B, D], matching nn.MultiheadAttention(batch_first=False).
+        """
+        if attn_mask is not None:
+            raise NotImplementedError("FlashAttention2 does not support attn_mask. Must be None.")
+
+        # x, key, value => [T, B, D]
+        T, B, _ = x.shape
+
+        # If cross-attention not provided, default key=value=x
+        if key is None:
+            key = x
+        if value is None:
+            value = x
+
+        # 1) Transpose to [B, T, D] for the underlying flash attention logic
+        x_btd = x.transpose(0, 1)     # => [B, T, D]
+        k_btd = key.transpose(0, 1)   # => [B, T, D]
+        v_btd = value.transpose(0, 1) # => [B, T, D]
+
+        # 2) Q, K, V projection
+        q = self.q_proj(x_btd)  # [B, T, D]
+        k = self.k_proj(k_btd)
+        v = self.v_proj(v_btd)
+
+        # Optionally add bias K/V => shape [B, T+1, D] if add_bias_kv
+        if self.add_bias_kv:
+            k = torch.cat([k, self.bias_k.expand(B, -1, -1)], dim=1)
+            v = torch.cat([v, self.bias_v.expand(B, -1, -1)], dim=1)
+
+        # Reshape => [B, num_heads, T, head_dim]
+        bsz, seq_len, _ = q.shape
+        q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # 3) FlashAttention 2
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=is_causal
+        )
+        # => [B, num_heads, T, head_dim]
+
+        # => [B, T, num_heads, head_dim] => [B, T, D]
+        out = out.transpose(1, 2).reshape(bsz, seq_len, self.embed_dim)
+
+        # 4) Final projection => [B, T, D]
+        out = self.out_proj(out)
+
+        # 5) Transpose **back** => [T, B, D], matching MHA(batch_first=False)
+        return out.transpose(0, 1)
 
 class Mlp(nn.Module):
     def __init__(
@@ -171,7 +273,6 @@ class BlockWithMasking(nn.Module):
 
 
 _LAYER_NORM = partial(nn.LayerNorm, eps=1e-6)
-
 
 class SimpleTransformer(nn.Module):
     def __init__(
