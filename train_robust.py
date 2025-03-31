@@ -305,6 +305,7 @@ class UniBindModel(BaseModel):
         x is expected to be 'normalized' if images.
         """
         embeddings = self.encode(x)
+        embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
         similarity = embeddings @ self.centre_embeddings.t()
         expanded_idx = self.centre_label_indices.expand(similarity.shape[0], -1)
         class_scores, _ = torch_scatter.scatter_max(similarity, expanded_idx, dim=1)
@@ -316,8 +317,7 @@ class UniBindModel(BaseModel):
     def encode(self, x):
         modality = MODALITY_MAP[self.modality]
         inp_dict = {modality: x}
-        emb = self.unibind.encode_vision_with_mlp(inp_dict)
-        return emb / emb.norm(dim=-1, keepdim=True)
+        return self.unibind.encode_vision_with_mlp(inp_dict)
     
     def save_fine_tuned_weights(self, path: str):
         self.logger.info(f"[save_fine_tuned_weights] Saving fine tuned weights to '{path}'...")
@@ -355,7 +355,7 @@ def compute_acc(logits, targets):
 # 7) MSE Loss for embeddings
 ###################################
 def compute_embedding_loss(emb1, emb2):
-    return nn.functional.mse_loss(emb1, emb2, reduction='sum')
+    return nn.functional.mse_loss(emb1, emb2, reduction='none').sum(dim=1).mean()
 
 ###################################
 # 8) Two‐Stage Attack (Fixed)
@@ -473,13 +473,13 @@ def train_epoch(
                 emb_orig = model_original.encode(inp)
         
         with GpuMemoryTracker(logger):
-            loss_val = compute_embedding_loss(emb_adv, emb_orig)
+            embe_loss_val = compute_embedding_loss(emb_adv, emb_orig)
         
         with GpuMemoryTracker(logger):
             optimizer.zero_grad()
         
         with GpuMemoryTracker(logger):
-            loss_val.backward()
+            embe_loss_val.backward()
 
         with GpuMemoryTracker(logger):
             optimizer.step()
@@ -488,7 +488,7 @@ def train_epoch(
             scheduler.step()
 
         n_samples = inp.size(0)
-        loss_meter.update(loss_val.item(), n_samples)
+        loss_meter.update(embe_loss_val.item(), n_samples)
 
         model_train.eval()
         with torch.no_grad():
@@ -512,12 +512,12 @@ def train_epoch(
 
         lr_ = optimizer.param_groups[0]['lr']
         logger.info(
-            f"[TRAIN] Step={step_total}, LR={lr_:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}"
+            f"[TRAIN] Step={step_total}, LR={lr_:.10f}, EmbeLoss={embe_loss_val.item():.6f}, CosSim={cos_sim.item():.4f}"
             + (f", Acc={acc:.2f}, RAcc={racc:.2f}, AvgAcc={acc_meter.avg}, AvgRAcc={racc_meter.avg}" 
                if (acc is not None and racc is not None) else "")
         )
 
-        del inp, lbl, inp_unorm, adv_inp, emb_adv, emb_orig, loss_val
+        del inp, lbl, inp_unorm, adv_inp, emb_adv, emb_orig, embe_loss_val
         with GpuMemoryTracker(logger):
             torch.cuda.empty_cache()
 
@@ -670,6 +670,9 @@ def train_and_evaluate(
     steps_per_epoch = len(train_loader)
 
     trainable_params = [p for p in model_train.parameters() if p.requires_grad]
+    if len(trainable_params) == 0:
+        raise ValueError("No trainable parameters found in the model.")
+    
     optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     scheduler = OneCycleLR(
         optimizer=optimizer,
@@ -678,7 +681,7 @@ def train_and_evaluate(
         epochs=epochs,
         pct_start=0.3,
         anneal_strategy='cos',
-        div_factor=25.0,
+        div_factor=5.0,
         final_div_factor=1e4
     )
 
