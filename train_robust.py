@@ -11,10 +11,12 @@ import torch.nn.functional as F
 import torch_scatter
 from enum import Enum
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 import inspect
 import os
+import math
+# from autoattack import apgd_train
 
 # autoattack & your custom modules
 from autoattack.autopgd_base import APGDAttack
@@ -455,9 +457,42 @@ def train_epoch(
         with GpuMemoryTracker(logger):
             inp_unorm = inp.clone().detach()
             unnormalize_inplace(inp_unorm, mean, std)
+
+        with torch.no_grad():
+            with GpuMemoryTracker(logger):
+                emb_orig = model_original.encode(inp)
+
+        loss_inner_wrapper = ComputeLossWrapper(
+            emb_orig,
+            reduction='none', loss='l2',
+            logit_scale=100.
+            )
         
         with GpuMemoryTracker(logger):
-            adv_inp = attack.perturb(inp_unorm, lbl)
+            # adv_inp = attack.perturb(inp_unorm, lbl)
+            # adv_inp = apgd_train()
+            # data_adv = apgd(
+            #     model=model,
+            #     loss_fn=loss_inner_wrapper,
+            #     x=data,
+            #     y=targets,
+            #     norm=args.norm,
+            #     eps=args.eps,
+            #     n_iter=args.iterations_adv,
+            #     verbose=True
+            # )
+            adv_inp = apgd_train(
+                encode_fn=model_train.encode,
+                logits_fn=model_train.logits,
+                loss_fn=loss_inner_wrapper,
+                x=inp_unorm,
+                y=lbl,
+                norm='Linf',
+                eps=2/255,
+                n_iter=10,
+                initial_stepsize=1/255,
+                verbose=True,
+            )
             normalize_inplace(adv_inp, mean, std)
 
         with GpuMemoryTracker(logger):
@@ -467,13 +502,12 @@ def train_epoch(
 
         with ProfileModelMemory(model_train, logger):
             emb_adv = model_train.encode(adv_inp)
-
-        with torch.no_grad():
-            with GpuMemoryTracker(logger):
-                emb_orig = model_original.encode(inp)
         
         with GpuMemoryTracker(logger):
             embe_loss_val = compute_embedding_loss(emb_adv, emb_orig)
+
+        with torch.no_grad():
+            before_logits_adv, _ = model_train.logits(adv_inp)
         
         with GpuMemoryTracker(logger):
             optimizer.zero_grad()
@@ -502,6 +536,7 @@ def train_epoch(
                 with GpuMemoryTracker(logger):
                     logits_clean, _ = model_train.logits(inp)
 
+                before_racc = compute_acc(before_logits_adv, lbl)
                 racc = compute_acc(logits_adv, lbl)
                 acc = compute_acc(logits_clean, lbl)
                 acc_meter.update(acc, n_samples)
@@ -513,7 +548,7 @@ def train_epoch(
         lr_ = optimizer.param_groups[0]['lr']
         logger.info(
             f"[TRAIN] Step={step_total}, LR={lr_:.10f}, EmbeLoss={embe_loss_val.item():.6f}, CosSim={cos_sim.item():.4f}"
-            + (f", Acc={acc:.2f}, RAcc={racc:.2f}, AvgAcc={acc_meter.avg}, AvgRAcc={racc_meter.avg}" 
+            + (f", Acc={acc:.2f}, BeforeAcc={before_racc:.2f}, RAcc={racc:.2f}, AvgAcc={acc_meter.avg}, AvgRAcc={racc_meter.avg}" 
                if (acc is not None and racc is not None) else "")
         )
 
@@ -670,19 +705,12 @@ def train_and_evaluate(
     steps_per_epoch = len(train_loader)
 
     trainable_params = [p for p in model_train.parameters() if p.requires_grad]
-    if len(trainable_params) == 0:
-        raise ValueError("No trainable parameters found in the model.")
-    
-    optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
-    scheduler = OneCycleLR(
+    optimizer = AdamW(trainable_params, lr=1e-4, weight_decay=1e-4, betas=(0.9, 0.95))
+    scheduler = cosine_schedule_with_warmup(
         optimizer=optimizer,
-        max_lr=1e-3,
-        steps_per_epoch=steps_per_epoch,
-        epochs=epochs,
-        pct_start=0.3,
-        anneal_strategy='cos',
-        div_factor=5.0,
-        final_div_factor=1e4
+        num_warmup_steps=int(0.07 * steps_per_epoch * epochs),
+        num_training_steps=steps_per_epoch * epochs,
+        num_cycles=0.5,
     )
 
     # Attack configs (training uses 10-step APGD)
@@ -770,7 +798,7 @@ def main():
     parser.add_argument("--val_json", type=str, default="./datasets/ImageNet-1K/val_data.json")
     parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
-    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epsilon", type=float, default=2/255)
     args = parser.parse_args()
 
@@ -801,7 +829,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        # max_samples=128000,  # example
+        # max_samples=2000,  # example
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -911,6 +939,351 @@ def main():
         logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
     else:
         logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
+
+def cosine_schedule_with_warmup(
+        optimizer, 
+                                   num_warmup_steps: int, 
+                                   num_training_steps: int, 
+                                   num_cycles: float = 0.5, 
+                                   last_epoch: int = -1):
+    """
+    Create a schedule with a learning rate that linearly warms up from 0 to the 
+    initial lr set in the optimizer over `num_warmup_steps`, then decreases 
+    following a cosine curve from the initial lr down to 0 over the remaining 
+    `num_training_steps - num_warmup_steps` steps.
+    
+    Args:
+        optimizer (Optimizer): Wrapped optimizer.
+        num_warmup_steps (int): The number of steps for the warmup phase.
+        num_training_steps (int): The total number of training steps.
+        num_cycles (float): The number of waves in the cosine schedule (half-waves).
+        last_epoch (int): The index of the last epoch when resuming training.
+
+    Returns:
+        LambdaLR: A PyTorch learning rate scheduler.
+    """
+
+    def lr_lambda(current_step: int):
+        # 1) Warmup phase: linearly increase from 0 to 1 over num_warmup_steps
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+
+        # 2) Cosine decay phase
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        return 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+def apgd_train(encode_fn, logits_fn, x, y, norm, eps, n_iter=10, use_rs=False, loss_fn=None,
+               verbose=False, is_train=True, initial_stepsize=None):
+    # assert not model.training
+    norm = norm.replace('linf', 'Linf').replace('l2', 'L2')
+    device = x.device
+    ndims = len(x.shape) - 1
+
+    if not use_rs:
+        x_adv = x.clone()
+    else:
+        raise NotImplemented
+        if norm == 'Linf':
+            t = torch.rand_like(x)
+
+    x_adv = x_adv.clamp(0., 1.)
+    x_best = x_adv.clone()
+    x_best_adv = x_adv.clone()
+    loss_steps = torch.zeros([n_iter, x.shape[0]], device=device)
+    loss_best_steps = torch.zeros([n_iter + 1, x.shape[0]], device=device)
+    acc_steps = torch.zeros_like(loss_best_steps)
+
+    # set loss
+    # criterion_indiv = criterion_dict[loss]
+
+
+    # set params
+    n_fts = math.prod(x.shape[1:])
+    if norm in ['Linf', 'L2']:
+        n_iter_2 = max(int(0.22 * n_iter), 1)
+        n_iter_min = max(int(0.06 * n_iter), 1)
+        size_decr = max(int(0.03 * n_iter), 1)
+        k = n_iter_2 + 0
+        thr_decr = .75
+        alpha = 2.
+    elif norm in ['L1']:
+        k = max(int(.04 * n_iter), 1)
+        init_topk = .05 if is_train else .2
+        topk = init_topk * torch.ones([x.shape[0]], device=device)
+        sp_old = n_fts * torch.ones_like(topk)
+        adasp_redstep = 1.5
+        adasp_minstep = 10.
+        alpha = 1.
+
+    if initial_stepsize:
+        alpha = initial_stepsize / eps
+
+    step_size = alpha * eps * torch.ones(
+        [x.shape[0], *[1] * ndims],
+        device=device
+        )
+    counter3 = 0
+
+    x_adv.requires_grad_()
+    # grad = torch.zeros_like(x)
+    # for _ in range(self.eot_iter)
+    # with torch.enable_grad()
+    output = encode_fn(x_adv)
+    loss_indiv = loss_fn(output, y)
+    loss = loss_indiv.sum()
+    # grad += torch.autograd.grad(loss, [x_adv])[0].detach()
+    grad = torch.autograd.grad(loss, [x_adv])[0].detach()
+    # grad /= float(self.eot_iter)
+    grad_best = grad.clone()
+    x_adv.detach_()
+    loss_indiv.detach_()
+    loss.detach_()
+
+    logits, _ = logits_fn(x_adv)
+    acc = logits.detach().max(1)[1] == y
+    acc_steps[0] = acc + 0
+    loss_best = loss_indiv.detach().clone()
+    loss_best_last_check = loss_best.clone()
+    reduced_last_check = torch.ones_like(loss_best)
+    n_reduced = 0
+
+    u = torch.arange(x.shape[0], device=device)
+    x_adv_old = x_adv.clone().detach()
+
+    for i in range(n_iter):
+        ### gradient step
+        if True:  # with torch.no_grad()
+            x_adv = x_adv.detach()
+            grad2 = x_adv - x_adv_old
+            x_adv_old = x_adv.clone()
+            loss_curr = loss.detach().mean()
+
+            a = 0.75 if i > 0 else 1.0
+
+            if norm == 'Linf':
+                x_adv_1 = x_adv + step_size * torch.sign(grad)
+                x_adv_1 = torch.clamp(
+                    torch.min(
+                        torch.max(
+                            x_adv_1,
+                            x - eps
+                            ), x + eps
+                        ), 0.0, 1.0
+                    )
+                x_adv_1 = torch.clamp(
+                    torch.min(
+                        torch.max(
+                            x_adv + (x_adv_1 - x_adv) * a + grad2 * (1 - a),
+                            x - eps
+                        ), x + eps
+                    ), 0.0, 1.0
+                )
+
+            # elif norm == 'L2':
+            #     x_adv_1 = x_adv + step_size * grad / (L2_norm(
+            #         grad,
+            #         keepdim=True
+            #         ) + 1e-12)
+            #     x_adv_1 = torch.clamp(
+            #         x + (x_adv_1 - x) / (L2_norm(
+            #             x_adv_1 - x,
+            #             keepdim=True
+            #             ) + 1e-12) * torch.min(
+            #             eps * torch.ones_like(x),
+            #             L2_norm(x_adv_1 - x, keepdim=True)
+            #             ), 0.0, 1.0
+            #         )
+            #     x_adv_1 = x_adv + (x_adv_1 - x_adv) * a + grad2 * (1 - a)
+            #     x_adv_1 = torch.clamp(
+            #         x + (x_adv_1 - x) / (L2_norm(
+            #             x_adv_1 - x,
+            #             keepdim=True
+            #             ) + 1e-12) * torch.min(
+            #             eps * torch.ones_like(x),
+            #             L2_norm(x_adv_1 - x, keepdim=True)
+            #             ), 0.0, 1.0
+            #         )
+
+            # elif norm == 'L1':
+            #     grad_topk = grad.abs().view(x.shape[0], -1).sort(-1)[0]
+            #     topk_curr = torch.clamp((1. - topk) * n_fts, min=0, max=n_fts - 1).long()
+            #     grad_topk = grad_topk[u, topk_curr].view(-1, *[1] * (len(x.shape) - 1))
+            #     sparsegrad = grad * (grad.abs() >= grad_topk).float()
+            #     x_adv_1 = x_adv + step_size * sparsegrad.sign() / (
+            #             sparsegrad.sign().abs().view(x.shape[0], -1).sum(dim=-1).view(
+            #                 -1, 1, 1, 1
+            #             ) + 1e-10)
+
+            #     delta_u = x_adv_1 - x
+            #     delta_p = L1_projection(x, delta_u, eps)
+            #     x_adv_1 = x + delta_u + delta_p
+
+            # elif norm == 'L0':
+            #     L1normgrad = grad / (grad.abs().view(grad.shape[0], -1).sum(
+            #         dim=-1, keepdim=True
+            #     ) + 1e-12).view(
+            #         grad.shape[0], *[1] * (
+            #                 len(grad.shape) - 1)
+            #         )
+            #     x_adv_1 = x_adv + step_size * L1normgrad * n_fts
+            #     x_adv_1 = L0_projection(x_adv_1, x, eps)
+            #     # TODO: add momentum
+
+            x_adv = x_adv_1 + 0.
+
+        ### get gradient
+        x_adv.requires_grad_()
+        # grad = torch.zeros_like(x)
+        # for _ in range(self.eot_iter)
+        # with torch.enable_grad()
+        output = encode_fn(x_adv)
+        loss_indiv = loss_fn(output, y)
+        loss = loss_indiv.sum()
+
+        # grad += torch.autograd.grad(loss, [x_adv])[0].detach()
+        if i < n_iter - 1:
+            # save one backward pass
+            grad = torch.autograd.grad(loss, [x_adv])[0].detach()
+        # grad /= float(self.eot_iter)
+        x_adv.detach_()
+        loss_indiv.detach_()
+        loss.detach_()
+
+        logits, _ = logits_fn(x_adv)
+        pred = logits.detach().max(1)[1] == y
+        acc = torch.min(acc, pred)
+        acc_steps[i + 1] = acc + 0
+        ind_pred = (pred == 0).nonzero().squeeze()
+        x_best_adv[ind_pred] = x_adv[ind_pred] + 0.
+        if verbose:
+            str_stats = ' - step size: {:.5f} - topk: {:.2f}'.format(
+                step_size.mean(), topk.mean() * n_fts
+            ) if norm in ['L1'] else ' - step size: {:.5f}'.format(
+                step_size.mean()
+            )
+            print(
+                'iteration: {} - best loss: {:.6f} curr loss {:.6f} - robust accuracy: {:.2%}{}'.format(
+                    i, loss_best.sum(), loss_curr, acc.float().mean(), str_stats
+                )
+            )
+            # print('pert {}'.format((x - x_best_adv).abs().view(x.shape[0], -1).sum(-1).max()))
+
+        ### check step size
+        if True:  # with torch.no_grad()
+            y1 = loss_indiv.detach().clone()
+            loss_steps[i] = y1 + 0
+            ind = (y1 > loss_best).nonzero().squeeze()
+            x_best[ind] = x_adv[ind].clone()
+            grad_best[ind] = grad[ind].clone()
+            loss_best[ind] = y1[ind] + 0
+            loss_best_steps[i + 1] = loss_best + 0
+
+            counter3 += 1
+
+            if counter3 == k:
+                if norm in ['Linf', 'L2']:
+                    fl_oscillation = check_oscillation(
+                        loss_steps, i, k,
+                        loss_best, k3=thr_decr
+                        )
+                    fl_reduce_no_impr = (1. - reduced_last_check) * (
+                            loss_best_last_check >= loss_best).float()
+                    fl_oscillation = torch.max(
+                        fl_oscillation,
+                        fl_reduce_no_impr
+                        )
+                    reduced_last_check = fl_oscillation.clone()
+                    loss_best_last_check = loss_best.clone()
+
+                    if fl_oscillation.sum() > 0:
+                        ind_fl_osc = (fl_oscillation > 0).nonzero().squeeze()
+                        step_size[ind_fl_osc] /= 2.0
+                        n_reduced = fl_oscillation.sum()
+
+                        x_adv[ind_fl_osc] = x_best[ind_fl_osc].clone()
+                        grad[ind_fl_osc] = grad_best[ind_fl_osc].clone()
+
+                    counter3 = 0
+                    k = max(k - size_decr, n_iter_min)
+
+                # elif norm == 'L1':
+                #     # adjust sparsity
+                #     sp_curr = L0_norm(x_best - x)
+                #     fl_redtopk = (sp_curr / sp_old) < .95
+                #     topk = sp_curr / n_fts / 1.5
+                #     step_size[fl_redtopk] = alpha * eps
+                #     step_size[~fl_redtopk] /= adasp_redstep
+                #     step_size.clamp_(alpha * eps / adasp_minstep, alpha * eps)
+                #     sp_old = sp_curr.clone()
+
+                #     x_adv[fl_redtopk] = x_best[fl_redtopk].clone()
+                #     grad[fl_redtopk] = grad_best[fl_redtopk].clone()
+
+                #     counter3 = 0
+
+    #return x_best, acc, loss_best, x_best_adv
+    return x_best_adv
+
+def check_oscillation(x, j, k, y5, k3=0.75):
+    t = torch.zeros(x.shape[1]).to(x.device)
+    for counter5 in range(k):
+        t += (x[j - counter5] > x[j - counter5 - 1]).float()
+
+    return (t <= k * k3 * torch.ones_like(t)).float()
+
+class ComputeLossWrapper:
+    def __init__(self, embedding_orig, reduction='mean', loss=None,
+                 logit_scale=100.):
+        self.embedding_orig = embedding_orig
+        self.reduction = reduction
+        self.loss_str = loss
+        self.logit_scale = logit_scale
+
+    def __call__(self, embedding, targets):
+        return compute_loss(
+            loss_str=self.loss_str, embedding=embedding, targets=targets,
+            embedding_orig=self.embedding_orig, logit_scale=self.logit_scale,
+            reduction=self.reduction
+            )
+
+def compute_loss(loss_str, embedding, targets, embedding_orig, logit_scale,
+                 embedding_text_labels_norm=None, reduction='mean'):
+    if loss_str == 'l2':
+        loss = l2(out=embedding, targets=embedding_orig, reduction=reduction)
+    elif loss_str == 'ce':
+        loss = ce(
+            out=embedding @ (logit_scale * embedding_text_labels_norm),
+            targets=targets,
+            reduction=reduction
+        )
+    else:
+        raise ValueError(f'loss {loss_str} not supported')
+    return loss
+
+def l2(out, targets, reduction='none'):
+    # squared l2 - it does not divide by the latent dimension
+    # should have shape (batch_size, embedding_size)
+    assert out.shape == targets.shape, f'{out.shape} != {targets.shape}'
+    assert out.shape[0] > 1
+    # Compute the element-wise squared error
+    squared_error_batch = F.mse_loss(out, targets, reduction='none')
+    if reduction == 'mean':
+        squared_error_batch = torch.mean(squared_error_batch.sum(dim=1))
+    else:
+        squared_error_batch = squared_error_batch.sum(dim=1)
+        assert squared_error_batch.shape == (out.shape[0],), f'{squared_error_batch.shape} != {(out.shape[0],)}'
+    return squared_error_batch
+
+def ce(out, targets, reduction='mean'):
+    # out = logits
+    assert out.shape[0] == targets.shape[0], (out.shape, targets.shape)
+    assert out.shape[0] > 1
+
+    return F.cross_entropy(out, targets, reduction=reduction)
 
 if __name__ == "__main__":
     main()
