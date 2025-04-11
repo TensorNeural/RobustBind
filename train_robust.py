@@ -787,158 +787,6 @@ def train_and_evaluate(
 
     logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
 
-###################################
-# 12) Main
-###################################
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, default="output")
-    parser.add_argument("--dataset_root", type=str, default="/home/user/datasets/ImageNet-1K")
-    parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
-    parser.add_argument("--val_json", type=str, default="./datasets/ImageNet-1K/val_data.json")
-    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
-    parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--epsilon", type=float, default=2/255)
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # Setup logging to file + console
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_filename = f"training_{timestamp}.log"
-    file_handler = logging.FileHandler(os.path.join(args.output_dir, log_filename), mode='w')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.handlers = [console_handler, file_handler]
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
-
-    # 1) Load center embeddings
-    logger.info("Loading center embeddings ...")
-    raw_emb, raw_lbls = load_centre_embeddings(args.center_emb, device)
-    raw_emb = raw_emb / raw_emb.norm(dim=-1, keepdim=True)
-    unique_lbls = sorted(list(set(raw_lbls)))
-    lbl_to_idx = {l: i for i, l in enumerate(unique_lbls)}
-    idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
-
-    # 2) Datasets
-    logger.info("Loading train dataset ...")
-    train_ds = ImageNetDataset(
-        dataset_root=args.dataset_root,
-        data_json_path=args.train_json,
-        transform=IMAGE_TRANSFORM,
-        # max_samples=2000,  # example
-        debug=False,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl
-    )
-    logger.info("Loading val dataset ...")
-    val_ds = ImageNetDataset(
-        dataset_root=args.dataset_root,
-        data_json_path=args.val_json,
-        transform=IMAGE_TRANSFORM,
-        max_samples=5000,
-        debug=False,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl
-    )
-
-    # NOTE: Typically shuffle=True for training
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    # 3) Models
-    logger.info("Initializing original + training models ...")
-    model_orig = UniBindModel(
-        device=device,
-        pretrain_weights=args.pretrain_weights,
-        modality="image",
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
-        logger=logger,
-        fine_tuned_weights=None
-    )
-    model_train = UniBindModel(
-        device=device,
-        pretrain_weights=args.pretrain_weights,
-        modality="image",
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
-        logger=logger,
-        fine_tuned_weights=None
-    )
-
-    first_param = next(model_train.parameters(), None)
-    if first_param is not None:
-        logger.info(f"model_train first param dtype: {first_param.dtype}")
-    else:
-        logger.info("No parameters in model_train!")
-
-    # 4) Train & Evaluate
-    mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
-    std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
-
-    train_and_evaluate(
-        model_train=model_train,
-        model_original=model_orig,
-        train_mean=mean_t,
-        train_std=std_t,
-        train_loader=train_loader,
-        val_mean=mean_t,
-        val_std=std_t,
-        val_loader=val_loader,
-        device=device,
-        out_dir=args.output_dir,
-        epsilon=args.epsilon
-    )
-
-    # 5) Final two-stage + clean checks (optional)
-    best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
-    if os.path.exists(best_fine_tuned_ckpt_path):
-        logger.info("Loading best fine tuned weights for final two-stage & clean evaluations ...")
-        final_model = UniBindModel(
-            device=device,
-            pretrain_weights=args.pretrain_weights,
-            modality="image",
-            centre_embeddings=raw_emb,
-            centre_labels=raw_lbls,
-            label_to_index=lbl_to_idx,
-            index_to_label=idx_to_lbl,
-            logger=logger,
-            fine_tuned_weights=best_fine_tuned_ckpt_path
-        )
-
-        final_robust_acc = evaluate_two_stage(
-            final_model, val_loader, device,
-            iteration_count=100, 
-            epsilon=args.epsilon,
-            mean=mean_t, 
-            std=std_t
-        )
-        logger.info(f"Final two-stage robust accuracy = {final_robust_acc:.4f}")
-
-        final_clean_acc = evaluate_clean(final_model, val_loader, device)
-        logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
-    else:
-        logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
 
 def cosine_schedule_with_warmup(
         optimizer, 
@@ -1284,6 +1132,159 @@ def ce(out, targets, reduction='mean'):
     assert out.shape[0] > 1
 
     return F.cross_entropy(out, targets, reduction=reduction)
+
+###################################
+# 12) Main
+###################################
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output_dir", type=str, default="output")
+    parser.add_argument("--dataset_root", type=str, default="/home/user/datasets/ImageNet-1K")
+    parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
+    parser.add_argument("--val_json", type=str, default="./datasets/ImageNet-1K/val_data.json")
+    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
+    parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--epsilon", type=float, default=2/255)
+    args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Setup logging to file + console
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_filename = f"training_{timestamp}.log"
+    file_handler = logging.FileHandler(os.path.join(args.output_dir, log_filename), mode='w')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.handlers = [console_handler, file_handler]
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
+
+    # 1) Load center embeddings
+    logger.info("Loading center embeddings ...")
+    raw_emb, raw_lbls = load_centre_embeddings(args.center_emb, device)
+    raw_emb = raw_emb / raw_emb.norm(dim=-1, keepdim=True)
+    unique_lbls = sorted(list(set(raw_lbls)))
+    lbl_to_idx = {l: i for i, l in enumerate(unique_lbls)}
+    idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
+
+    # 2) Datasets
+    logger.info("Loading train dataset ...")
+    train_ds = ImageNetDataset(
+        dataset_root=args.dataset_root,
+        data_json_path=args.train_json,
+        transform=IMAGE_TRANSFORM,
+        # max_samples=2000,  # example
+        debug=False,
+        label_to_index=lbl_to_idx,
+        index_to_label=idx_to_lbl
+    )
+    logger.info("Loading val dataset ...")
+    val_ds = ImageNetDataset(
+        dataset_root=args.dataset_root,
+        data_json_path=args.val_json,
+        transform=IMAGE_TRANSFORM,
+        max_samples=5000,
+        debug=False,
+        label_to_index=lbl_to_idx,
+        index_to_label=idx_to_lbl
+    )
+
+    # NOTE: Typically shuffle=True for training
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    # 3) Models
+    logger.info("Initializing original + training models ...")
+    model_orig = UniBindModel(
+        device=device,
+        pretrain_weights=args.pretrain_weights,
+        modality="image",
+        centre_embeddings=raw_emb,
+        centre_labels=raw_lbls,
+        label_to_index=lbl_to_idx,
+        index_to_label=idx_to_lbl,
+        logger=logger,
+        fine_tuned_weights=None
+    )
+    model_train = UniBindModel(
+        device=device,
+        pretrain_weights=args.pretrain_weights,
+        modality="image",
+        centre_embeddings=raw_emb,
+        centre_labels=raw_lbls,
+        label_to_index=lbl_to_idx,
+        index_to_label=idx_to_lbl,
+        logger=logger,
+        fine_tuned_weights=None
+    )
+
+    first_param = next(model_train.parameters(), None)
+    if first_param is not None:
+        logger.info(f"model_train first param dtype: {first_param.dtype}")
+    else:
+        logger.info("No parameters in model_train!")
+
+    # 4) Train & Evaluate
+    mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
+    std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
+
+    train_and_evaluate(
+        model_train=model_train,
+        model_original=model_orig,
+        train_mean=mean_t,
+        train_std=std_t,
+        train_loader=train_loader,
+        val_mean=mean_t,
+        val_std=std_t,
+        val_loader=val_loader,
+        device=device,
+        out_dir=args.output_dir,
+        epsilon=args.epsilon
+    )
+
+    # 5) Final two-stage + clean checks (optional)
+    best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
+    if os.path.exists(best_fine_tuned_ckpt_path):
+        logger.info("Loading best fine tuned weights for final two-stage & clean evaluations ...")
+        final_model = UniBindModel(
+            device=device,
+            pretrain_weights=args.pretrain_weights,
+            modality="image",
+            centre_embeddings=raw_emb,
+            centre_labels=raw_lbls,
+            label_to_index=lbl_to_idx,
+            index_to_label=idx_to_lbl,
+            logger=logger,
+            fine_tuned_weights=best_fine_tuned_ckpt_path
+        )
+
+        final_robust_acc = evaluate_two_stage(
+            final_model, val_loader, device,
+            iteration_count=100, 
+            epsilon=args.epsilon,
+            mean=mean_t, 
+            std=std_t
+        )
+        logger.info(f"Final two-stage robust accuracy = {final_robust_acc:.4f}")
+
+        final_clean_acc = evaluate_clean(final_model, val_loader, device)
+        logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
+    else:
+        logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
 
 if __name__ == "__main__":
     main()
