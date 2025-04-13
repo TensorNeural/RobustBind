@@ -2,10 +2,15 @@ import torch
 from torch import nn
 import torch.nn.init as init
 import torch.nn.functional as F
-import models.PointBind_models as models
+from models import PointBind_models
 from imagebind.imagebind_model import ModalityType
 import numpy as np
 import logging
+from types import SimpleNamespace
+import torch_scatter
+from typing import Dict, Any
+import abc
+from perf.profiling import GpuMemoryTracker
 
 # Mapping from modality string -> the attribute name for that MLP
 MODALITY_TO_MLP = {
@@ -20,19 +25,19 @@ MODALITY_TO_MLP = {
 class UniBind(nn.Module):
     def __init__(self, args, use_flash_attention=False, fine_tuned_weights=None, logger=None):
         super(UniBind, self).__init__()
-        self.modality = args.modality
-        self.backbone = models.PointBind_I2PMAE(use_flash_attention=use_flash_attention)
-
-        state_dict = torch.load(args.pretrain_weights, weights_only=True, map_location='cpu')
-        self.backbone.load_state_dict(state_dict, strict=True)
-
-        for param in self.backbone.parameters():
-            param.requires_grad = False
-
         if logger is None:
             self.logger = logging.getLogger(__name__)
         else:
             self.logger = logger
+
+        self.modality = args.modality
+        self.backbone = PointBind_models.PointBind_I2PMAE(use_flash_attention=use_flash_attention)
+
+        state_dict = torch.load(args.pretrain_weights, weights_only=True, map_location='cpu')
+        self.backbone.load_state_dict(state_dict, strict=True)
+        for param in self.backbone.parameters():
+            param.requires_grad_(False)
+
         if self.modality == "image":
             self.mlp_for_image = init_linear_as_identity(nn.Linear(1024, 1024))
         elif self.modality == "video":
@@ -184,3 +189,86 @@ def init_linear_as_identity(linear_layer):
     # Initialize bias to zeros
     nn.init.zeros_(linear_layer.bias)
     return linear_layer
+
+MODALITY_MAP = {
+    "image": ModalityType.VISION,
+    "video": ModalityType.VISION,
+    "audio": ModalityType.AUDIO,
+    "thermal": ModalityType.THERMAL,
+    "point": ModalityType.POINT,
+    "event": ModalityType.VISION
+}
+
+class BaseModel(nn.Module):
+    @abc.abstractmethod
+    def logits(self, x):
+        pass
+
+    @abc.abstractmethod
+    def encode(self, x):
+        pass
+
+class UniBindModel(BaseModel):
+    def __init__(
+        self,
+        device,
+        pretrain_weights,
+        modality,
+        centre_embeddings,
+        centre_labels,
+        label_to_index,
+        index_to_label,
+        logger=None,
+        fine_tuned_weights=None
+    ):
+        super().__init__()
+        self.logger = logger if logger else logging.getLogger(__name__)
+        self.logger.info("Initializing UniBindModel...")
+
+        self.unibind = UniBind(
+            SimpleNamespace(pretrain_weights=pretrain_weights, modality=modality),
+            fine_tuned_weights=fine_tuned_weights,
+            logger=self.logger
+        )
+        self.unibind.to(device)
+
+        self.modality = modality
+        self.label_to_index_map = label_to_index
+        self.index_to_label_map = index_to_label
+
+        self.logger.info("Storing centre embeddings on device...")
+        self.centre_embeddings = centre_embeddings.to(device)
+
+        self.logger.info("Building centre_label_indices...")
+        self.centre_label_indices = torch.tensor(
+            [self.label_to_index_map[lbl] for lbl in centre_labels],
+            dtype=torch.int64,
+            device=device
+        )
+
+    def logits(self, x):
+        """
+        x is expected to be 'normalized' if images.
+        """
+        embeddings = self.encode(x)
+        with GpuMemoryTracker(self.logger):
+            similarity = embeddings @ self.centre_embeddings.t()
+        with GpuMemoryTracker(self.logger):
+            expanded_idx = self.centre_label_indices.expand(similarity.shape[0], -1)
+        with GpuMemoryTracker(self.logger):
+            class_scores, _ = torch_scatter.scatter_max(similarity, expanded_idx, dim=1)
+        return class_scores, similarity
+
+    def encode(self, x):
+        modality = MODALITY_MAP[self.modality]
+        inp_dict = {modality: x}
+        emb = self.unibind.encode_vision_with_mlp(inp_dict)
+        return emb / emb.norm(dim=-1, keepdim=True)
+    
+    def save_fine_tuned_weights(self, path: str):
+        self.logger.info(f"[save_fine_tuned_weights] Saving fine tuned weights to '{path}'...")
+        self.unibind.save_fine_tuned_weights(path)
+
+    def load_fine_tuned_weights(self, path: str):
+        self.logger.info(f"[load_fine_tuned_weights] Loading fine tuned weights from '{path}'...")
+        self.unibind.load_fine_tuned_weights(path)

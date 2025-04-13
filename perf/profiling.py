@@ -1,0 +1,163 @@
+import os
+import inspect
+import time
+import torch
+
+class GpuMemoryTracker:
+    def __init__(self, logger, label=None, device=None, message=None):
+        self.logger = logger
+        self.label = label
+        self.message = message
+        self.device = device or torch.device("cuda")
+
+        # Capture file & line for reference
+        frame = inspect.currentframe()
+        outer_frame = inspect.getouterframes(frame)[1]
+        self.filename = os.path.basename(outer_frame.filename)
+        self.lineno = outer_frame.lineno
+
+    def __enter__(self):
+        torch.cuda.reset_peak_memory_stats(self.device)
+        self.start_allocated = torch.cuda.memory_allocated(self.device)
+        self.start_reserved = torch.cuda.memory_reserved(self.device)
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        end_allocated = torch.cuda.memory_allocated(self.device)
+        end_reserved = torch.cuda.memory_reserved(self.device)
+        duration = time.time() - self.start_time
+        delta_allocated = end_allocated - self.start_allocated
+        delta_reserved = end_reserved - self.start_reserved
+
+        parts = []
+        parts.append("[{}:{}]".format(self.filename, self.lineno))
+        if self.label:
+            parts.append(self.label)
+        parts.append("Duration: {:.2f}s".format(duration))
+        parts.append("Allocated Δ: {}".format(self._format_bytes(delta_allocated)))
+        parts.append("Reserved Δ: {}".format(self._format_bytes(delta_reserved)))
+
+        if self.message:
+            parts.append(self.message)
+
+        self.logger.debug(" | ".join(parts))
+
+    def _format_bytes(self, num_bytes):
+        abs_bytes = abs(num_bytes)
+        if abs_bytes >= 1024 ** 3:
+            value = num_bytes / (1024 ** 3)
+            unit = "GB"
+        elif abs_bytes >= 1024 ** 2:
+            value = num_bytes / (1024 ** 2)
+            unit = "MB"
+        elif abs_bytes >= 1024:
+            value = num_bytes / 1024
+            unit = "KB"
+        else:
+            value = num_bytes
+            unit = "B"
+        return "{:+.2f} {}".format(value, unit)
+
+class ProfileModelMemory:
+    def __init__(self, model, logger, label="ProfileModelMemory", device=None):
+        self.model = model
+        self.logger = logger
+        self.label = label
+        self.device = device or torch.device("cuda")
+        self.hooks = []
+        self.ctx_map = {}
+
+        # Create a top-level GpuMemoryTracker (not entered yet)
+        self.top_tracker = GpuMemoryTracker(
+            logger=self.logger,
+            label=self.label,
+            device=self.device,
+            message="(Top-level model forward)"
+        )
+
+    def __enter__(self):
+        # Manually enter the top-level tracker
+        self.top_tracker.__enter__()
+        # Register hooks on all modules (including containers)
+        self._register_hooks(self.model, prefix="", depth=0)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Remove all hooks
+        for h in self.hooks:
+            h.remove()
+        self.hooks.clear()
+
+        # Exit the top-level tracker
+        self.top_tracker.__exit__(exc_type, exc_val, exc_tb)
+
+    def _register_hooks(self, module, prefix="", depth=0):
+        """
+        Recursively register forward_pre_hook and forward_hook on every module
+        (including containers). Indentation is based on 'depth'.
+        """
+        # 1) Register hooks on this module
+        indent = "  " * depth  # 2 spaces per depth level
+
+        module_name = prefix if prefix else module.__class__.__name__
+        # forward_pre_hook
+        pre_hook_handle = module.register_forward_pre_hook(
+            self._hook_pre(module_name, module, indent)
+        )
+        self.hooks.append(pre_hook_handle)
+
+        # forward_hook
+        post_hook_handle = module.register_forward_hook(
+            self._hook_post(module_name, module, indent)
+        )
+        self.hooks.append(post_hook_handle)
+
+        # 2) Recurse into children
+        for child_name, child_module in module.named_children():
+            full_name = f"{module_name}.{child_name}"
+            self._register_hooks(child_module, full_name, depth + 1)
+
+    def _hook_pre(self, name, module, indent):
+        """Called BEFORE module.forward()."""
+        def inner_pre_hook(module, inputs):
+            input_shapes = [
+                inp.shape for inp in inputs if hasattr(inp, 'shape')
+            ]
+            msg = "Input shapes: {}".format(input_shapes)
+            label_str = "{}{}::Pre::{}({})".format(
+                indent, self.label, name, module.__class__.__name__
+            )
+
+            tracker = GpuMemoryTracker(
+                logger=self.logger,
+                label=label_str,
+                message=msg,
+                device=self.device
+            )
+            tracker.__enter__()
+            self.ctx_map[module] = tracker
+        return inner_pre_hook
+
+    def _hook_post(self, name, module, indent):
+        """Called AFTER module.forward()."""
+        def inner_post_hook(module, inputs, output):
+            tracker = self.ctx_map.pop(module, None)
+            if tracker is not None:
+                # Update label for post-forward
+                tracker.label = "{}{}::Post::{}({})".format(
+                    indent, self.label, name, module.__class__.__name__
+                )
+
+                # If there's an output shape, append to the message
+                if hasattr(output, 'shape'):
+                    if tracker.message:
+                        tracker.message = "{} | Output shape: {}".format(
+                            tracker.message, list(output.shape)
+                        )
+                    else:
+                        tracker.message = "Output shape: {}".format(list(output.shape))
+
+                # Manually exit => logs memory usage
+                tracker.__exit__(None, None, None)
+        return inner_post_hook
