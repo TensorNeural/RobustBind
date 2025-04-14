@@ -1,6 +1,7 @@
 import time
 import torch
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 from autoattack.autopgd_base import APGDAttack
 from perf.profiling import GpuMemoryTracker, ProfileModelMemory
 from model import UniBindModel
@@ -25,7 +26,8 @@ def train_epoch(
     loss_meter: AverageMeter,
     cos_sim_meter: AverageMeter,
     acc_meter: AverageMeter,
-    racc_meter: AverageMeter
+    racc_meter: AverageMeter,
+    writer: SummaryWriter,
 ):
     epoch_start_time = time.time()
     step_base = epoch * len(data_loader)
@@ -65,7 +67,7 @@ def train_epoch(
             with torch.no_grad():
                 with GpuMemoryTracker(logger):
                     emb_orig = model_original.encode(inp)
-                    
+
             with GpuMemoryTracker(logger):
                 loss_val = l2_loss(emb_adv, emb_orig)
         elif train_loss_type == 'ce':
@@ -98,6 +100,11 @@ def train_epoch(
                 cos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
                 cos_sim_meter.update(cos_sim.item(), n_samples)
                 logger.info(f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}")
+
+                writer.add_scalar("train/loss", loss_val.item(), step_total)
+                writer.add_scalar("train/cos_sim", cos_sim.item(), step_total)
+                writer.add_scalar("train/lr", lr, step_total)
+
                 del emb_adv, emb_orig, cos_sim
             elif train_loss_type == 'ce':
                 with GpuMemoryTracker(logger):
@@ -111,6 +118,12 @@ def train_epoch(
                     f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, "
                     f"Acc={acc:.2f}, RAcc={racc:.2f}, AvgAcc={acc_meter.avg:.2f}, AvgRAcc={racc_meter.avg:.2f}"
                 )
+
+                writer.add_scalar("train/loss", loss_val.item(), step_total)
+                writer.add_scalar("train/clean_acc", acc, step_total)
+                writer.add_scalar("train/robust_acc", racc, step_total)
+                writer.add_scalar("train/lr", lr, step_total)
+                
                 del logits_clean, logits_adv
 
         del inp, lbl, inp_unorm, adv_inp, loss_val

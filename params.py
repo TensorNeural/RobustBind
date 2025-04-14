@@ -5,7 +5,6 @@ from loss import l2_loss, ce_loss
 import torch
 from torch.optim import AdamW
 from transform import unnormalize_inplace, normalize_inplace
-import matplotlib.pyplot as plt
 
 def find_lr(
     logger,
@@ -84,6 +83,7 @@ def find_lr(
     batch_num = 0
 
     losses = []
+    smoothed_losses = []
     lrs = []
 
     for batch_idx, (inp, lbl) in enumerate(train_loader):
@@ -119,14 +119,16 @@ def find_lr(
         else: 
             raise ValueError(f"Unknown loss type: {train_loss_type}")
 
-        avg_loss = beta * avg_loss + (1 - beta) * loss.item()
+        loss_val = loss.item()
+        avg_loss = beta * avg_loss + (1 - beta) * loss_val
         smoothed_loss = avg_loss / (1 - beta ** batch_num)
-        logger.info(f"Loss: {loss.item()}, Smoothed loss: {smoothed_loss:.6f}, best loss: {best_loss:.6f}")
+        logger.info(f"Loss: {loss_val}, Smoothed loss: {smoothed_loss:.6f}, best loss: {best_loss:.6f}")
 
         if smoothed_loss < best_loss:
             best_loss = smoothed_loss
 
-        losses.append(smoothed_loss)
+        losses.append(loss_val)
+        smoothed_losses.append(smoothed_loss)
         lrs.append(lr)
 
         loss.backward()
@@ -145,4 +147,4 @@ def find_lr(
         torch.cuda.empty_cache()
     
     logger.info("Finished running LR finder.")
-    return lrs, losses
+    return lrs, losses, smoothed_losses

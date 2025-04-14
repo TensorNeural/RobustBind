@@ -8,6 +8,7 @@ from enum import Enum
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from autoattack.autopgd_base import APGDAttack
 from datasets.datasets import ImageNetDataset
@@ -51,6 +52,7 @@ def train_and_evaluate(
     out_dir,
     epsilon,
 ):
+    writer = SummaryWriter(log_dir=os.path.join(out_dir, "tensorBoard"))
     logger.info("Initializing original + training models ...")
     model_original = UniBindModel(
         device=device,
@@ -88,13 +90,13 @@ def train_and_evaluate(
     optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     scheduler = OneCycleLR(
         optimizer=optimizer,
-        max_lr=1e-3,
+        max_lr=3e-3,               # Sweet spot from LR finder
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
-        pct_start=0.3,
-        anneal_strategy='cos',
-        div_factor=25.0,
-        final_div_factor=1e4
+        pct_start=0.1,             # 10% warmup (default and ideal)
+        anneal_strategy='cos',     # Cosine decay after warmup
+        div_factor=25.0,           # Start at max_lr / 25 = 1.2e-4
+        final_div_factor=1e4       # End at ~1.2e-8
     )
 
     # Attack configs (training uses 10-step APGD)
@@ -150,7 +152,8 @@ def train_and_evaluate(
             loss_meter=loss_meter,
             cos_sim_meter=cos_sim_meter,
             acc_meter=acc_meter,
-            racc_meter=racc_meter
+            racc_meter=racc_meter,
+            writer=writer
         )
 
         # Evaluate robust accuracy (one-stage, 50 steps)
@@ -174,7 +177,8 @@ def train_and_evaluate(
             best_acc = robust_acc
             logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving fine-tuned weights ...")
             model_train.save_fine_tuned_weights(os.path.join(out_dir, "best_fine_tuned_weights.pt"))
-
+    
+    writer.close()
     logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
 
 def main():
@@ -187,11 +191,11 @@ def main():
     parser.add_argument("--use_flash_attention", action="store_true", default=True, 
                         help="Use flash attention for training")
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
-    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--attack_loss", type=str, default="ce")
     parser.add_argument("--train_loss", type=str, default="ce")
     parser.add_argument("--epsilon", type=float, default=2/255)
-    parser.add_argument("--lr_finder", action='store_true', default=True,
+    parser.add_argument("--lr_finder", action='store_true', default=False,
                         help="runs the LR Finder instead of the main training")
     parser.add_argument("--lr_finder_steps", type=int, default=200,
                         help="Max steps for LR finder")
@@ -236,7 +240,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=5000,
+        # max_samples=5000,
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -251,7 +255,7 @@ def main():
 
     if args.lr_finder:
         logger.info("Running LR finder ...")
-        lrs, losses = find_lr(
+        lrs, losses, smoothed_losses = find_lr(
             logger=logger,
             device=device,
             raw_emb=raw_emb,
@@ -269,7 +273,11 @@ def main():
             steps=args.lr_finder_steps
         )
         with open(os.path.join(args.output_dir, "lr_finder_results.json"), "w") as f:
-            json.dump({"lrs": lrs, "losses": losses}, f)
+            json.dump({
+                "lrs": lrs, 
+                "losses": losses, 
+                "smoothed_losses": smoothed_losses
+            }, f)
         return
 
     logger.info("Loading val dataset ...")
@@ -277,7 +285,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.val_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=500,
+        max_samples=5000,
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
