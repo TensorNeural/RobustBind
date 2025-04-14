@@ -219,6 +219,7 @@ class UniBindModel(BaseModel):
         label_to_index,
         index_to_label,
         logger=None,
+        use_flash_attention=False,
         fine_tuned_weights=None
     ):
         super().__init__()
@@ -227,6 +228,7 @@ class UniBindModel(BaseModel):
 
         self.unibind = UniBind(
             SimpleNamespace(pretrain_weights=pretrain_weights, modality=modality),
+            use_flash_attention=use_flash_attention,
             fine_tuned_weights=fine_tuned_weights,
             logger=self.logger
         )

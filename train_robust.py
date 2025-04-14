@@ -18,6 +18,8 @@ from attack import attack_adapter
 from meter import AverageMeter
 from training import train_epoch
 from eval import evaluate_robust_one_stage, evaluate_two_stage, evaluate_clean
+from params import find_lr
+import json
 
 class RelativePathFormatter(logging.Formatter):
     def format(self, record):
@@ -36,6 +38,7 @@ def train_and_evaluate(
     lbl_to_idx,
     idx_to_lbl,
     pretrain_weights,
+    use_flash_attention,
     train_mean,
     train_std,
     train_loader,
@@ -58,7 +61,9 @@ def train_and_evaluate(
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
         logger=logger,
-        fine_tuned_weights=None
+        use_flash_attention=use_flash_attention,
+        fine_tuned_weights=None,
+        
     )
     model_train = UniBindModel(
         device=device,
@@ -69,6 +74,7 @@ def train_and_evaluate(
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
         logger=logger,
+        use_flash_attention=use_flash_attention,
         fine_tuned_weights=None
     )
 
@@ -177,12 +183,18 @@ def main():
     parser.add_argument("--dataset_root", type=str, default="/home/user/datasets/ImageNet-1K")
     parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
     parser.add_argument("--val_json", type=str, default="./datasets/ImageNet-1K/val_data.json")
-    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights.pt")
+    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
+    parser.add_argument("--use_flash_attention", action="store_true", default=True, 
+                        help="Use flash attention for training")
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
     parser.add_argument("--batch_size", type=int, default=100)
     parser.add_argument("--attack_loss", type=str, default="ce")
     parser.add_argument("--train_loss", type=str, default="ce")
     parser.add_argument("--epsilon", type=float, default=2/255)
+    parser.add_argument("--lr_finder", action='store_true', default=True,
+                        help="runs the LR Finder instead of the main training")
+    parser.add_argument("--lr_finder_steps", type=int, default=200,
+                        help="Max steps for LR finder")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -215,34 +227,60 @@ def main():
     lbl_to_idx = {l: i for i, l in enumerate(unique_lbls)}
     idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
 
+    mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
+    std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
+
     # 2) Datasets
     logger.info("Loading train dataset ...")
     train_ds = ImageNetDataset(
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=1000,
+        max_samples=5000,
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
     )
-    logger.info("Loading val dataset ...")
-    val_ds = ImageNetDataset(
-        dataset_root=args.dataset_root,
-        data_json_path=args.val_json,
-        transform=IMAGE_TRANSFORM,
-        max_samples=100,
-        debug=True,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl
-    )
-    
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True
+    )
+
+    if args.lr_finder:
+        logger.info("Running LR finder ...")
+        lrs, losses = find_lr(
+            logger=logger,
+            device=device,
+            raw_emb=raw_emb,
+            raw_lbls=raw_lbls,
+            lbl_to_idx=lbl_to_idx,
+            idx_to_lbl=idx_to_lbl,
+            pretrain_weights=args.pretrain_weights,
+            use_flash_attention=args.use_flash_attention,
+            train_mean=mean_t,
+            train_std=std_t,
+            train_loader=train_loader,
+            attack_loss_type=args.attack_loss,
+            train_loss_type=args.train_loss,
+            epsilon=args.epsilon,
+            steps=args.lr_finder_steps
+        )
+        with open(os.path.join(args.output_dir, "lr_finder_results.json"), "w") as f:
+            json.dump({"lrs": lrs, "losses": losses}, f)
+        return
+
+    logger.info("Loading val dataset ...")
+    val_ds = ImageNetDataset(
+        dataset_root=args.dataset_root,
+        data_json_path=args.val_json,
+        transform=IMAGE_TRANSFORM,
+        max_samples=500,
+        debug=False,
+        label_to_index=lbl_to_idx,
+        index_to_label=idx_to_lbl
     )
     val_loader = DataLoader(
         val_ds,
@@ -252,10 +290,6 @@ def main():
         pin_memory=True
     )
 
-    # 4) Train & Evaluate
-    mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
-    std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
-
     train_and_evaluate(
         logger=logger,
         raw_emb=raw_emb,
@@ -263,6 +297,7 @@ def main():
         lbl_to_idx=lbl_to_idx,
         idx_to_lbl=idx_to_lbl,
         pretrain_weights=args.pretrain_weights,
+        use_flash_attention=args.use_flash_attention,
         train_mean=mean_t,
         train_std=std_t,
         train_loader=train_loader,
@@ -289,6 +324,7 @@ def main():
             label_to_index=lbl_to_idx,
             index_to_label=idx_to_lbl,
             logger=logger,
+            use_flash_attention=args.use_flash_attention,
             fine_tuned_weights=best_fine_tuned_ckpt_path
         )
 

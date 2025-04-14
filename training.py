@@ -55,13 +55,17 @@ def train_epoch(
             torch.cuda.empty_cache()
 
         model_train.train()
+        with GpuMemoryTracker(logger):
+            optimizer.zero_grad()
         
         if train_loss_type == 'l2':
             with GpuMemoryTracker(logger):
                 emb_adv = model_train.encode(adv_inp)
+
             with torch.no_grad():
                 with GpuMemoryTracker(logger):
                     emb_orig = model_original.encode(inp)
+                    
             with GpuMemoryTracker(logger):
                 loss_val = l2_loss(emb_adv, emb_orig)
         elif train_loss_type == 'ce':
@@ -71,9 +75,6 @@ def train_epoch(
                 loss_val = ce_loss(logits_adv, lbl)
         else:
             raise ValueError(f"Unknown loss type: {train_loss_type}")
-        
-        with GpuMemoryTracker(logger):
-            optimizer.zero_grad()
         
         with GpuMemoryTracker(logger):
             loss_val.backward()
