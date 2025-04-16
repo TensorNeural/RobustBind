@@ -34,6 +34,12 @@ def plot_lr_finder_with_slope(
 
     # --- Compute slope of smoothed losses in log(LR) space ---
     slopes = np.diff(smoothed_losses) / np.diff(smoothed_log_lrs)
+    if min_lr_idx >= len(slopes):
+        return -1
+    for i in range(min_lr_idx, len(slopes)):
+        if slopes[i - 1] < negative_slope_threshold and slopes[i] > rebound_slope_threshold:
+            return i
+    return -1
 
     # --- Detect sweet spot index ---
     # Skip the first min_lr_idx slope points to avoid extremely low LRs
@@ -87,9 +93,11 @@ def plot_lr_finder_with_slope(
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
 
-    print(f"Suggested sweet spot LR: {best_lr:.6f}")
+    if save_plot_path:
+        plt.savefig(save_plot_path)
+    else:
+        plt.show()
 
 def main():
     parser = argparse.ArgumentParser(description="Plot LR Finder and Slope")
