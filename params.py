@@ -1,6 +1,5 @@
 from model import UniBindModel
 from autoattack.autopgd_base import APGDAttack
-from attack import attack_adapter
 from loss import l2_loss, ce_loss
 import torch
 from torch.optim import AdamW
@@ -33,6 +32,8 @@ def find_lr(
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
+        mean=train_mean,
+        std=train_std,
         logger=logger,
         use_flash_attention=use_flash_attention,
         fine_tuned_weights=None
@@ -45,6 +46,8 @@ def find_lr(
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
+        mean=train_mean,
+        std=train_std,
         logger=logger,
         use_flash_attention=use_flash_attention,
         fine_tuned_weights=None
@@ -53,7 +56,7 @@ def find_lr(
     trainable_params = [p for p in model_train.parameters() if p.requires_grad]
     optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     attack = APGDAttack(
-        predict=attack_adapter(model_train.logits, train_mean, train_std),
+        predict=model_train,
         norm='Linf',
         n_restarts=1,
         n_iter=10,

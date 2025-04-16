@@ -199,7 +199,7 @@ MODALITY_MAP = {
     "event": ModalityType.VISION
 }
 
-class BaseModel(nn.Module):
+class Model(nn.Module):
     @abc.abstractmethod
     def logits(self, x):
         pass
@@ -208,7 +208,7 @@ class BaseModel(nn.Module):
     def encode(self, x):
         pass
 
-class UniBindModel(BaseModel):
+class UniBindModel(Model):
     def __init__(
         self,
         device,

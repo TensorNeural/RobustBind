@@ -2,9 +2,9 @@ import time
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from autoattack.autopgd_base import APGDAttack
+from attack import Attack
 from perf.profiling import GpuMemoryTracker, ProfileModelMemory
-from model import UniBindModel
+from model import Model
 from meter import AverageMeter
 from transform import unnormalize_inplace, normalize_inplace
 from loss import l2_loss, ce_loss
@@ -12,14 +12,14 @@ from loss import l2_loss, ce_loss
 def train_epoch(
     logger,
     device,
-    model_train: UniBindModel,
-    model_original: UniBindModel,
+    model_train: Model,
+    model_original: Model,
     mean,
     std,
     data_loader,
     optimizer,
     scheduler,
-    attack: APGDAttack,
+    attack: Attack,
     train_loss_type,
     epoch: int,
     total_epochs: int,
@@ -48,7 +48,7 @@ def train_epoch(
         with GpuMemoryTracker(logger):
             inp_unorm = inp.clone().detach()
             unnormalize_inplace(inp_unorm, mean, std)
-        
+
         with GpuMemoryTracker(logger):
             adv_inp = attack.perturb(inp_unorm, lbl)
             normalize_inplace(adv_inp, mean, std)
@@ -70,11 +70,26 @@ def train_epoch(
 
             with GpuMemoryTracker(logger):
                 loss_val = l2_loss(emb_adv, emb_orig)
+            
+            with torch.no_grad():
+                with GpuMemoryTracker(logger):
+                    cos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
+
+                logger.info(f"[TRAIN] (Initial) Step={step_total}, CosSim={cos_sim.item():.4f}")
         elif train_loss_type == 'ce':
             with ProfileModelMemory(model_train, logger):
                 logits_adv, _ = model_train.logits(adv_inp)
+                
             with GpuMemoryTracker(logger):
                 loss_val = ce_loss(logits_adv, lbl)
+
+            with torch.no_grad():
+                with GpuMemoryTracker(logger):
+                    logits_clean, _ = model_train.logits(inp)
+    
+                acc = compute_acc(logits_clean, lbl)
+                racc = compute_acc(logits_adv, lbl)
+                logger.info(f"[TRAIN] (Initial) Step={step_total}, Clean Acc={acc:.2f}, RobustAcc={racc:.2f}")
         else:
             raise ValueError(f"Unknown loss type: {train_loss_type}")
         
@@ -83,6 +98,11 @@ def train_epoch(
 
         with GpuMemoryTracker(logger):
             optimizer.step()
+        
+        for name, param in model_train.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                delta = param.grad.detach().norm().item()
+                logger.info(f"[GradNorm] {name}: {delta:.6f}")
         
         with GpuMemoryTracker(logger):
             scheduler.step()
@@ -93,11 +113,12 @@ def train_epoch(
         model_train.eval()
         lr = optimizer.param_groups[0]['lr']
 
-        #  del inp, lbl, inp_unorm, adv_inp, emb_adv, emb_orig, loss_val
-
         with torch.no_grad():
             if train_loss_type == 'l2':
-                cos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
+                with GpuMemoryTracker(logger):
+                    final_emb_adv = model_train.encode(adv_inp)
+
+                cos_sim = F.cosine_similarity(final_emb_adv, emb_orig, dim=1).mean()
                 cos_sim_meter.update(cos_sim.item(), n_samples)
                 logger.info(f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}")
 
@@ -108,20 +129,21 @@ def train_epoch(
                 del emb_adv, emb_orig, cos_sim
             elif train_loss_type == 'ce':
                 with GpuMemoryTracker(logger):
-                    logits_clean, _ = model_train.logits(inp)
+                    final_logits_adv, _ = model_train.logits(adv_inp)
+                    final_logits_clean, _ = model_train.logits(inp)
                 
-                racc = compute_acc(logits_adv, lbl)
-                acc = compute_acc(logits_clean, lbl)
-                acc_meter.update(acc, n_samples)
-                racc_meter.update(racc, n_samples)
+                final_racc = compute_acc(final_logits_adv, lbl)
+                final_acc = compute_acc(final_logits_clean, lbl)
+                acc_meter.update(final_acc, n_samples)
+                racc_meter.update(final_racc, n_samples)
                 logger.info(
-                    f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, "
-                    f"Acc={acc:.2f}, RAcc={racc:.2f}, AvgAcc={acc_meter.avg:.2f}, AvgRAcc={racc_meter.avg:.2f}"
+                    f"[TRAIN] (Final) Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, "
+                    f"Acc={final_acc:.2f}, RobustAcc={final_racc:.2f}, AvgAcc={acc_meter.avg:.2f}, AvgRobustAcc={racc_meter.avg:.2f}"
                 )
 
                 writer.add_scalar("train/loss", loss_val.item(), step_total)
-                writer.add_scalar("train/clean_acc", acc, step_total)
-                writer.add_scalar("train/robust_acc", racc, step_total)
+                writer.add_scalar("train/clean_acc", final_acc, step_total)
+                writer.add_scalar("train/robust_acc", final_racc, step_total)
                 writer.add_scalar("train/lr", lr, step_total)
                 
                 del logits_clean, logits_adv

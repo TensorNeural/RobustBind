@@ -1,7 +1,8 @@
 import time
 import torch
+from attack import AttackModel
 from autoattack.autopgd_base import APGDAttack
-from attack import attack_adapter, two_stage_attack
+from attack import two_stage_attack
 from model import UniBindModel
 from transform import unnormalize_inplace, normalize_inplace
 
@@ -44,8 +45,9 @@ def evaluate_two_stage(logger, device, model: UniBindModel, data_loader, attack_
     logger.info(f"Running two-stage robust evaluation: iteration_count={iteration_count}, eps={(epsilon * 255):.0f}/255")
     eval_start_time = time.time()
 
+    attack_model = AttackModel(model, mean, std)
     stage1_attack = APGDAttack(
-        predict=attack_adapter(model.logits, mean, std),
+        predict=attack_model.logits,
         norm='Linf',
         n_restarts=1,
         n_iter=iteration_count,
@@ -56,7 +58,7 @@ def evaluate_two_stage(logger, device, model: UniBindModel, data_loader, attack_
         verbose=True,
     )
     stage2_attack = APGDAttack(
-        predict=attack_adapter(model.logits, mean, std),
+        predict=attack_model.logits,
         norm='Linf',
         n_restarts=1,
         n_iter=iteration_count,

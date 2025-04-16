@@ -4,18 +4,15 @@ import os
 import time
 from datetime import datetime
 import torch
-from enum import Enum
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
-from autoattack.autopgd_base import APGDAttack
+from attack import PGDAttack, APGDAttack, AttackModel
 from datasets.datasets import ImageNetDataset
 from utils.data_transform import IMAGE_TRANSFORM, IMAGE_MEAN, IMAGE_STD
 from utils.utils import load_centre_embeddings
 from model import UniBindModel
-from attack import attack_adapter
 from meter import AverageMeter
 from training import train_epoch
 from eval import evaluate_robust_one_stage, evaluate_two_stage, evaluate_clean
@@ -52,7 +49,7 @@ def train_and_evaluate(
     out_dir,
     epsilon,
 ):
-    writer = SummaryWriter(log_dir=os.path.join(out_dir, "tensorBoard"))
+    writer = SummaryWriter(log_dir=os.path.join(out_dir, "tensorBoard2"))
     logger.info("Initializing original + training models ...")
     model_original = UniBindModel(
         device=device,
@@ -64,8 +61,7 @@ def train_and_evaluate(
         index_to_label=idx_to_lbl,
         logger=logger,
         use_flash_attention=use_flash_attention,
-        fine_tuned_weights=None,
-        
+        fine_tuned_weights=None,       
     )
     model_train = UniBindModel(
         device=device,
@@ -87,6 +83,7 @@ def train_and_evaluate(
     steps_per_epoch = len(train_loader)
 
     trainable_params = [p for p in model_train.parameters() if p.requires_grad]
+
     optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     scheduler = OneCycleLR(
         optimizer=optimizer,
@@ -99,29 +96,27 @@ def train_and_evaluate(
         final_div_factor=1e4       # End at ~1.2e-8
     )
 
-    # Attack configs (training uses 10-step APGD)
-    train_attack = APGDAttack(
-        predict=attack_adapter(model_train.logits, train_mean, train_std),  # we do manual unnormalize
-        norm='Linf',
-        n_restarts=1,
-        n_iter=10,
-        eps=epsilon,
-        loss=attack_loss_type,
-        device=device,
+    train_attack = PGDAttack(
         logger=logger,
-        verbose=True
+        model=AttackModel(model_train, train_mean, train_std),
+        epsilon=epsilon,
+        alpha=1/255,
+        steps=10,
+        norm='linf',
+        random_start=True,
+        clamp_min=0.0,
+        clamp_max=1.0,
+        loss_type=attack_loss_type
     )
-    # Validation uses 50-step APGD
     eval_attack = APGDAttack(
-        predict=attack_adapter(model_train.logits, val_mean, val_std),  # we do manual unnormalize
+        predict=AttackModel(model_train, train_mean, train_std).logits,
         norm='Linf',
         n_restarts=1,
         n_iter=50,
         eps=epsilon,
         loss=attack_loss_type,
         device=device,
-        logger=logger,
-        verbose=True
+        logger=logger
     )
 
     loss_meter = AverageMeter()
@@ -129,6 +124,7 @@ def train_and_evaluate(
     acc_meter = AverageMeter()
     racc_meter = AverageMeter()
 
+    model_original.eval()
     best_acc = 0.0
     for ep in range(epochs):
         logger.info(f"Epoch {ep+1}/{epochs} -----------------------------------------")
@@ -192,8 +188,8 @@ def main():
                         help="Use flash attention for training")
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--attack_loss", type=str, default="ce")
-    parser.add_argument("--train_loss", type=str, default="ce")
+    parser.add_argument("--attack_loss", type=str, default="l2")
+    parser.add_argument("--train_loss", type=str, default="l2")
     parser.add_argument("--epsilon", type=float, default=2/255)
     parser.add_argument("--lr_finder", action='store_true', default=False,
                         help="runs the LR Finder instead of the main training")
@@ -331,6 +327,8 @@ def main():
             centre_labels=raw_lbls,
             label_to_index=lbl_to_idx,
             index_to_label=idx_to_lbl,
+            mean=mean_t,
+            std=std_t,
             logger=logger,
             use_flash_attention=args.use_flash_attention,
             fine_tuned_weights=best_fine_tuned_ckpt_path
