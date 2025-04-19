@@ -256,9 +256,8 @@ class UniBindModel(Model):
         with GpuMemoryTracker(self.logger):
             similarity = embeddings @ self.centre_embeddings.t()
         with GpuMemoryTracker(self.logger):
-            expanded_idx = self.centre_label_indices.expand(similarity.shape[0], -1)
-        with GpuMemoryTracker(self.logger):
-            class_scores, _ = torch_scatter.scatter_max(similarity, expanded_idx, dim=1)
+            # [B, C]
+            class_scores = torch_scatter.scatter_logsumexp(similarity, self.centre_label_indices, dim=1)
         return class_scores, similarity
 
     def encode(self, x):

@@ -31,6 +31,7 @@ class RelativePathFormatter(logging.Formatter):
 
 def train_and_evaluate(
     logger,
+    writer,
     raw_emb,
     raw_lbls,
     lbl_to_idx,
@@ -49,7 +50,7 @@ def train_and_evaluate(
     out_dir,
     epsilon,
 ):
-    writer = SummaryWriter(log_dir=os.path.join(out_dir, "tensorBoard2"))
+    
     logger.info("Initializing original + training models ...")
     model_original = UniBindModel(
         device=device,
@@ -84,7 +85,7 @@ def train_and_evaluate(
 
     trainable_params = [p for p in model_train.parameters() if p.requires_grad]
 
-    optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
+    optimizer = AdamW(trainable_params, lr=3e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     scheduler = OneCycleLR(
         optimizer=optimizer,
         max_lr=3e-3,               # Sweet spot from LR finder
@@ -188,13 +189,14 @@ def main():
                         help="Use flash attention for training")
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--attack_loss", type=str, default="l2")
-    parser.add_argument("--train_loss", type=str, default="l2")
+    parser.add_argument("--attack_loss", type=str, default="ce")
+    parser.add_argument("--train_loss", type=str, default="ce")
     parser.add_argument("--epsilon", type=float, default=2/255)
     parser.add_argument("--lr_finder", action='store_true', default=False,
                         help="runs the LR Finder instead of the main training")
     parser.add_argument("--lr_finder_steps", type=int, default=200,
                         help="Max steps for LR finder")
+    parser.add_argument("--tensorboard_data_dir", type=str, default="tensorboard",)
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -293,9 +295,11 @@ def main():
         num_workers=4,
         pin_memory=True
     )
-
+    
+    writer = SummaryWriter(log_dir=os.path.join(args.output_dir, args.tensorboard_data_dir, timestamp))
     train_and_evaluate(
         logger=logger,
+        writer=writer,
         raw_emb=raw_emb,
         raw_lbls=raw_lbls,
         lbl_to_idx=lbl_to_idx,

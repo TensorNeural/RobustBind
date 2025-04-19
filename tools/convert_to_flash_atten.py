@@ -332,7 +332,6 @@ def unibind_end_to_end_test(
         vision_old, vision_new, dim=-1
     ).mean().item()
 
-    print(f"\n=== UniBind end-to-end check (modality={model_old.args.modality}) ===")
     print(f"Vision embedding diff: {vision_diff:.6f}")
     print(f"Vision cosine similarity: {cosine_sim:.6f}")
 
@@ -348,7 +347,7 @@ def main():
         raise FileNotFoundError(f"Could not find {OLD_CHECKPOINT_PATH}")
 
     # A) Load old checkpoint
-    old_ckpt = torch.load(OLD_CHECKPOINT_PATH, map_location="cpu")
+    old_ckpt = torch.load(OLD_CHECKPOINT_PATH, weights_only=True, map_location="cpu")
     if "state_dict" in old_ckpt:
         old_sd = old_ckpt["state_dict"]
     else:

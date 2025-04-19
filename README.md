@@ -24,6 +24,8 @@ The source code for ["UniBind: LLM-Augmented Unified and Balanced Representation
 
    conda install cartopy
 
+   conda install -c conda-forge libstdcxx-ng
+
    pip install -r requirements.txt
    ```
 
