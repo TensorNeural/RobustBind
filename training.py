@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from attack import Attack
 from perf.profiling import GpuMemoryTracker, ProfileModelMemory
-from model import Model
+from model import Model, ForwardMode
 from meter import AverageMeter
 from transform import unnormalize_inplace, normalize_inplace
 from loss import l2_loss, ce_loss
@@ -35,7 +35,7 @@ def train_epoch(
     for batch_idx, (inp, lbl) in enumerate(data_loader):
         batch_start_time = time.time()
         step_total = step_base + batch_idx + 1
-        logger.info(f"[TRAIN] Epoch {epoch+1}/{total_epochs}, batch {batch_idx+1}/{len(data_loader)}")
+        logger.info(f"[TRAIN] Epoch {epoch+1}/{total_epochs}, batch {batch_idx+1}/{len(data_loader)}, batch size={inp.size(0)}")
 
         with GpuMemoryTracker(logger):
             inp = inp.to(device)
@@ -62,11 +62,11 @@ def train_epoch(
         
         if train_loss_type == 'l2':
             with GpuMemoryTracker(logger):
-                emb_adv = model_train.encode(adv_inp)
+                emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
 
             with torch.no_grad():
                 with GpuMemoryTracker(logger):
-                    emb_orig = model_original.encode(inp)
+                    emb_orig = model_original(inp, mode=ForwardMode.EMBEDDINGS)
 
             with GpuMemoryTracker(logger):
                 loss_val = l2_loss(emb_adv, emb_orig)
@@ -78,14 +78,14 @@ def train_epoch(
                 logger.info(f"[TRAIN] (Initial) Step={step_total}, CosSim={cos_sim.item():.4f}")
         elif train_loss_type == 'ce':
             with ProfileModelMemory(model_train, logger):
-                logits_adv, _ = model_train.logits(adv_inp)
+                logits_adv, _ = model_train(adv_inp, mode=ForwardMode.LOGITS)
                 
             with GpuMemoryTracker(logger):
                 loss_val = ce_loss(logits_adv, lbl)
 
             with torch.no_grad():
                 with GpuMemoryTracker(logger):
-                    logits_clean, _ = model_train.logits(inp)
+                    logits_clean, _ = model_train(inp, mode=ForwardMode.LOGITS)
     
                 acc = compute_acc(logits_clean, lbl)
                 racc = compute_acc(logits_adv, lbl)
@@ -116,7 +116,7 @@ def train_epoch(
         with torch.no_grad():
             if train_loss_type == 'l2':
                 with GpuMemoryTracker(logger):
-                    final_emb_adv = model_train.encode(adv_inp)
+                    final_emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
 
                 cos_sim = F.cosine_similarity(final_emb_adv, emb_orig, dim=1).mean()
                 cos_sim_meter.update(cos_sim.item(), n_samples)
@@ -129,8 +129,8 @@ def train_epoch(
                 del emb_adv, emb_orig, cos_sim
             elif train_loss_type == 'ce':
                 with GpuMemoryTracker(logger):
-                    final_logits_adv, _ = model_train.logits(adv_inp)
-                    final_logits_clean, _ = model_train.logits(inp)
+                    final_logits_adv, _ = model_train(adv_inp, mode=ForwardMode.LOGITS)
+                    final_logits_clean, _ = model_train(inp, mode=ForwardMode.LOGITS)
                 
                 final_racc = compute_acc(final_logits_adv, lbl)
                 final_acc = compute_acc(final_logits_clean, lbl)

@@ -18,13 +18,21 @@ from training import train_epoch
 from eval import evaluate_robust_one_stage, evaluate_two_stage, evaluate_clean
 from params import find_lr
 import json
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 class RelativePathFormatter(logging.Formatter):
+    def __init__(self, rank, fmt=None, datefmt=None, style='%', validate=True):
+        super().__init__(fmt=fmt, datefmt=datefmt, style=style, validate=validate)
+        self.rank = rank
+
     def format(self, record):
         run_dir = os.getcwd()
         abs_path = os.path.abspath(record.pathname)
         try:
             record.relativepath = os.path.relpath(abs_path, run_dir)
+            record.rank = self.rank
         except ValueError:
             record.relativepath = record.pathname  # fallback
         return super().format(record)
@@ -32,6 +40,7 @@ class RelativePathFormatter(logging.Formatter):
 def train_and_evaluate(
     logger,
     writer,
+    device,
     raw_emb,
     raw_lbls,
     lbl_to_idx,
@@ -46,11 +55,12 @@ def train_and_evaluate(
     val_loader,
     attack_loss_type,
     train_loss_type,
-    device,
     out_dir,
     epsilon,
 ):
-    
+    logger.info("Starting training and evaluation ...")
+    is_main = not dist.is_initialized() or dist.get_rank() == 0
+
     logger.info("Initializing original + training models ...")
     model_original = UniBindModel(
         device=device,
@@ -64,6 +74,8 @@ def train_and_evaluate(
         use_flash_attention=use_flash_attention,
         fine_tuned_weights=None,       
     )
+    model_original.to(device)
+
     model_train = UniBindModel(
         device=device,
         pretrain_weights=pretrain_weights,
@@ -76,10 +88,11 @@ def train_and_evaluate(
         use_flash_attention=use_flash_attention,
         fine_tuned_weights=None
     )
+    model_train.to(device)
+    model_train = DDP(model_train, device_ids=[device.index], output_device=device.index)
 
     logger.info(f"Starting training for 2 epochs with epsilon={(epsilon * 255):.0f}/255")
 
-    # 2 epochs, OneCycleLR
     epochs = 2
     steps_per_epoch = len(train_loader)
 
@@ -88,13 +101,13 @@ def train_and_evaluate(
     optimizer = AdamW(trainable_params, lr=3e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     scheduler = OneCycleLR(
         optimizer=optimizer,
-        max_lr=3e-3,               # Sweet spot from LR finder
+        max_lr=3e-3,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
-        pct_start=0.1,             # 10% warmup (default and ideal)
-        anneal_strategy='cos',     # Cosine decay after warmup
-        div_factor=25.0,           # Start at max_lr / 25 = 1.2e-4
-        final_div_factor=1e4       # End at ~1.2e-8
+        pct_start=0.1,
+        anneal_strategy='cos',
+        div_factor=25.0,
+        final_div_factor=1e4
     )
 
     train_attack = PGDAttack(
@@ -110,7 +123,7 @@ def train_and_evaluate(
         loss_type=attack_loss_type
     )
     eval_attack = APGDAttack(
-        predict=AttackModel(model_train, train_mean, train_std).logits,
+        model=AttackModel(model_train, train_mean, train_std),
         norm='Linf',
         n_restarts=1,
         n_iter=50,
@@ -127,11 +140,9 @@ def train_and_evaluate(
 
     model_original.eval()
     best_acc = -1.0
-    for ep in range(epochs):
-        logger.info(f"Epoch {ep+1}/{epochs} -----------------------------------------")
-        epoch_start_time = time.time()
-
-        # Train
+    for epoch in range(epochs):
+        logger.info(f"Epoch {epoch+1}/{epochs} -----------------------------------------")
+        train_loader.sampler.set_epoch(epoch)
         train_epoch(
             logger=logger,
             device=device,
@@ -144,7 +155,7 @@ def train_and_evaluate(
             scheduler=scheduler,
             attack=train_attack,
             train_loss_type=train_loss_type,
-            epoch=ep,
+            epoch=epoch,
             total_epochs=epochs,
             loss_meter=loss_meter,
             cos_sim_meter=cos_sim_meter,
@@ -153,8 +164,8 @@ def train_and_evaluate(
             writer=writer
         )
 
-        # Evaluate robust accuracy (one-stage, 50 steps)
-        logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {ep+1}")
+        
+        logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {epoch+1}")
         robust_acc = evaluate_robust_one_stage(
             logger,
             device,
@@ -164,16 +175,16 @@ def train_and_evaluate(
             val_mean, 
             val_std
         )
-        logger.info(f"[Epoch {ep+1}] robust acc (one-stage 50 iter) = {robust_acc:.4f}")
+        logger.info(f"[Epoch {epoch+1}] robust acc (one-stage 50 iter) = {robust_acc:.4f}")
+        logger.info(f"Epoch {epoch+1} total time (training+eval): {time.time() - time.time():.2f} seconds")
 
-        epoch_end_time = time.time()
-        logger.info(f"Epoch {ep+1} total time (training+eval): {epoch_end_time - epoch_start_time:.2f} seconds")
-
-        # Best checkpoint
         if robust_acc > best_acc:
             best_acc = robust_acc
-            logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving fine-tuned weights ...")
-            model_train.save_fine_tuned_weights(os.path.join(out_dir, "best_fine_tuned_weights.pt"))
+            
+            if is_main:
+                logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving fine-tuned weights ...")
+                model_train.module.save_fine_tuned_weights(os.path.join(out_dir, "best_fine_tuned_weights.pt"))
+    
     
     writer.close()
     logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
@@ -185,76 +196,129 @@ def main():
     parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
     parser.add_argument("--val_json", type=str, default="./datasets/ImageNet-1K/val_data.json")
     parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
-    parser.add_argument("--use_flash_attention", action="store_true", default=True, 
-                        help="Use flash attention for training")
+    parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--attack_loss", type=str, default="ce")
-    parser.add_argument("--train_loss", type=str, default="ce")
+    parser.add_argument("--train_batch_size", type=int, default=128)
+    parser.add_argument("--val_batch_size", type=int, default=25)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--train_max_samples", type=int, default=50)
+    parser.add_argument("--val_max_samples", type=int, default=20)
+    parser.add_argument("--attack_loss", type=str, default="l2")
+    parser.add_argument("--train_loss", type=str, default="l2")
     parser.add_argument("--epsilon", type=float, default=2/255)
-    parser.add_argument("--lr_finder", action='store_true', default=False,
-                        help="runs the LR Finder instead of the main training")
-    parser.add_argument("--lr_finder_steps", type=int, default=200,
-                        help="Max steps for LR finder")
-    parser.add_argument("--tensorboard_data_dir", type=str, default="tensorboard",)
+    parser.add_argument("--lr_finder", action='store_true', default=False)
+    parser.add_argument("--lr_finder_steps", type=int, default=200)
+    parser.add_argument("--tensorboard_data_dir", type=str, default="tensorboard")
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    try:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_filename = f"training_{timestamp}.log"
+        dist.init_process_group(backend="nccl")
+        rank = dist.get_rank()
 
-    formatter = RelativePathFormatter('%(asctime)s - %(relativepath)s:%(lineno)d - [%(levelname)s] - %(message)s')
+        os.makedirs(args.output_dir, exist_ok=True)
 
-    file_handler = logging.FileHandler(os.path.join(args.output_dir, log_filename), mode='w')
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        log_filename = f"training_{timestamp}_rank{rank}.log"
 
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
+        formatter = RelativePathFormatter(rank=rank, fmt='[RANK %(rank)d] %(asctime)s - %(relativepath)s:%(lineno)d - [%(levelname)s] - %(message)s')
 
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    logger.handlers = [console_handler, file_handler]
+        file_handler = logging.FileHandler(os.path.join(args.output_dir, log_filename), mode='w')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Using device: {device}")
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
 
-    # 1) Load center embeddings
-    logger.info("Loading center embeddings ...")
-    raw_emb, raw_lbls = load_centre_embeddings(args.center_emb, device)
-    raw_emb = raw_emb / raw_emb.norm(dim=-1, keepdim=True)
-    unique_lbls = sorted(list(set(raw_lbls)))
-    lbl_to_idx = {l: i for i, l in enumerate(unique_lbls)}
-    idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        logger.handlers = [console_handler, file_handler]
 
-    mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
-    std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
+        
+        logger.info(f"Rank: {rank}, Local rank: {local_rank}")
+        logger.info(f"Using device: {device}")
 
-    # 2) Datasets
-    logger.info("Loading train dataset ...")
-    train_ds = ImageNetDataset(
-        dataset_root=args.dataset_root,
-        data_json_path=args.train_json,
-        transform=IMAGE_TRANSFORM,
-        max_samples=10,
-        debug=False,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl
-    )
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
+        logger.info("Loading center embeddings ...")
+        raw_emb, raw_lbls = load_centre_embeddings(args.center_emb, device)
+        raw_emb = raw_emb / raw_emb.norm(dim=-1, keepdim=True)
+        unique_lbls = sorted(list(set(raw_lbls)))
+        lbl_to_idx = {l: i for i, l in enumerate(unique_lbls)}
+        idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
 
-    if args.lr_finder:
-        logger.info("Running LR finder ...")
-        lrs, losses, smoothed_losses = find_lr(
+        mean_t = torch.tensor(IMAGE_MEAN, device=device).view(1, -1, 1, 1)
+        std_t = torch.tensor(IMAGE_STD, device=device).view(1, -1, 1, 1)
+
+        logger.info("Loading train dataset ...")
+        train_ds = ImageNetDataset(
+            dataset_root=args.dataset_root,
+            data_json_path=args.train_json,
+            transform=IMAGE_TRANSFORM,
+            max_samples=args.train_max_samples,
+            debug=False,
+            label_to_index=lbl_to_idx,
+            index_to_label=idx_to_lbl
+        )
+        train_sampler = DistributedSampler(train_ds, shuffle=True)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.train_batch_size,
+            sampler=train_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            persistent_workers=True
+        )
+
+        if args.lr_finder:
+            logger.info("Running LR finder ...")
+            lrs, losses, smoothed_losses = find_lr(
+                logger=logger,
+                device=device,
+                raw_emb=raw_emb,
+                raw_lbls=raw_lbls,
+                lbl_to_idx=lbl_to_idx,
+                idx_to_lbl=idx_to_lbl,
+                pretrain_weights=args.pretrain_weights,
+                use_flash_attention=args.use_flash_attention,
+                train_mean=mean_t,
+                train_std=std_t,
+                train_loader=train_loader,
+                attack_loss_type=args.attack_loss,
+                train_loss_type=args.train_loss,
+                epsilon=args.epsilon,
+                steps=args.lr_finder_steps
+            )
+            with open(os.path.join(args.output_dir, "lr_finder_results.json"), "w") as f:
+                json.dump({"lrs": lrs, "losses": losses, "smoothed_losses": smoothed_losses}, f)
+            return
+
+        logger.info("Loading val dataset ...")
+        val_ds = ImageNetDataset(
+            dataset_root=args.dataset_root,
+            data_json_path=args.val_json,
+            transform=IMAGE_TRANSFORM,
+            max_samples=args.val_max_samples,
+            debug=False,
+            label_to_index=lbl_to_idx,
+            index_to_label=idx_to_lbl
+        )
+        val_sampler = DistributedSampler(val_ds, shuffle=True)
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.val_batch_size,
+            sampler=val_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            persistent_workers=True
+        )
+
+        writer = SummaryWriter(log_dir=os.path.join(args.output_dir, args.tensorboard_data_dir, f"rank{rank}", timestamp))
+        train_and_evaluate(
             logger=logger,
+            writer=writer,
             device=device,
             raw_emb=raw_emb,
             raw_lbls=raw_lbls,
@@ -265,94 +329,51 @@ def main():
             train_mean=mean_t,
             train_std=std_t,
             train_loader=train_loader,
+            val_mean=mean_t,
+            val_std=std_t,
+            val_loader=val_loader,
             attack_loss_type=args.attack_loss,
             train_loss_type=args.train_loss,
-            epsilon=args.epsilon,
-            steps=args.lr_finder_steps
-        )
-        with open(os.path.join(args.output_dir, "lr_finder_results.json"), "w") as f:
-            json.dump({
-                "lrs": lrs, 
-                "losses": losses, 
-                "smoothed_losses": smoothed_losses
-            }, f)
-        return
-
-    logger.info("Loading val dataset ...")
-    val_ds = ImageNetDataset(
-        dataset_root=args.dataset_root,
-        data_json_path=args.val_json,
-        transform=IMAGE_TRANSFORM,
-        max_samples=2,
-        debug=False,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    writer = SummaryWriter(log_dir=os.path.join(args.output_dir, args.tensorboard_data_dir, timestamp))
-    train_and_evaluate(
-        logger=logger,
-        writer=writer,
-        raw_emb=raw_emb,
-        raw_lbls=raw_lbls,
-        lbl_to_idx=lbl_to_idx,
-        idx_to_lbl=idx_to_lbl,
-        pretrain_weights=args.pretrain_weights,
-        use_flash_attention=args.use_flash_attention,
-        train_mean=mean_t,
-        train_std=std_t,
-        train_loader=train_loader,
-        val_mean=mean_t,
-        val_std=std_t,
-        val_loader=val_loader,
-        attack_loss_type=args.attack_loss,
-        train_loss_type=args.train_loss,
-        device=device,
-        out_dir=args.output_dir,
-        epsilon=args.epsilon
-    )
-
-    # 5) Final two-stage + clean checks (optional)
-    best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
-    if os.path.exists(best_fine_tuned_ckpt_path):
-        logger.info("Loading best fine tuned weights for final two-stage & clean evaluations ...")
-        final_model = UniBindModel(
-            device=device,
-            pretrain_weights=args.pretrain_weights,
-            modality="image",
-            centre_embeddings=raw_emb,
-            centre_labels=raw_lbls,
-            label_to_index=lbl_to_idx,
-            index_to_label=idx_to_lbl,
-            logger=logger,
-            use_flash_attention=args.use_flash_attention,
-            fine_tuned_weights=best_fine_tuned_ckpt_path
+            out_dir=args.output_dir,
+            epsilon=args.epsilon
         )
 
-        final_robust_acc = evaluate_two_stage(
-            logger,
-            device,
-            final_model, 
-            val_loader,
-            attack_loss_type=args.attack_loss,
-            iteration_count=100, 
-            epsilon=args.epsilon,
-            mean=mean_t, 
-            std=std_t
-        )
-        logger.info(f"Final two-stage robust accuracy = {final_robust_acc:.4f}")
+        best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
+        if os.path.exists(best_fine_tuned_ckpt_path):
+            logger.info("Loading best fine tuned weights for final two-stage & clean evaluations ...")
+            final_model = UniBindModel(
+                device=device,
+                pretrain_weights=args.pretrain_weights,
+                modality="image",
+                centre_embeddings=raw_emb,
+                centre_labels=raw_lbls,
+                label_to_index=lbl_to_idx,
+                index_to_label=idx_to_lbl,
+                logger=logger,
+                use_flash_attention=args.use_flash_attention,
+                fine_tuned_weights=best_fine_tuned_ckpt_path
+            )
+            final_model.to(device)
 
-        final_clean_acc = evaluate_clean(logger, device, final_model, val_loader)
-        logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
-    else:
-        logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
+            final_robust_acc = evaluate_two_stage(
+                logger,
+                device,
+                final_model,
+                val_loader,
+                attack_loss_type=args.attack_loss,
+                iteration_count=100,
+                epsilon=args.epsilon,
+                mean=mean_t,
+                std=std_t
+            )
+            logger.info(f"Final two-stage robust accuracy = {final_robust_acc:.4f}")
+
+            final_clean_acc = evaluate_clean(logger, device, final_model, val_loader)
+            logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
+        else:
+            logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
+    finally:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
