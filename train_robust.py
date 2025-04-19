@@ -126,7 +126,7 @@ def train_and_evaluate(
     racc_meter = AverageMeter()
 
     model_original.eval()
-    best_acc = 0.0
+    best_acc = -1.0
     for ep in range(epochs):
         logger.info(f"Epoch {ep+1}/{epochs} -----------------------------------------")
         epoch_start_time = time.time()
@@ -238,7 +238,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.train_json,
         transform=IMAGE_TRANSFORM,
-        # max_samples=5000,
+        max_samples=10,
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -283,7 +283,7 @@ def main():
         dataset_root=args.dataset_root,
         data_json_path=args.val_json,
         transform=IMAGE_TRANSFORM,
-        max_samples=5000,
+        max_samples=2,
         debug=False,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl
@@ -331,8 +331,6 @@ def main():
             centre_labels=raw_lbls,
             label_to_index=lbl_to_idx,
             index_to_label=idx_to_lbl,
-            mean=mean_t,
-            std=std_t,
             logger=logger,
             use_flash_attention=args.use_flash_attention,
             fine_tuned_weights=best_fine_tuned_ckpt_path

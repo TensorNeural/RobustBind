@@ -168,7 +168,7 @@ class UniBind(nn.Module):
         Loads MLP submodules from a single .pt file (created by save_modality_mlps()).
         Only updates MLPs that already exist on this object. 
         """
-        mlps_dict = torch.load(checkpoint_path, map_location=map_location)
+        mlps_dict = torch.load(checkpoint_path, weights_only=True, map_location=map_location)
 
         for mlp_attr, state_dict in mlps_dict.items():
             # If this model actually has that submodule, load it:
