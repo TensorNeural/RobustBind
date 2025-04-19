@@ -1,7 +1,6 @@
 import time
 import torch
-from attack import AttackModel
-from autoattack.autopgd_base import APGDAttack
+from attack import AttackModel, APGDAttack
 from attack import two_stage_attack
 from model import UniBindModel
 from transform import unnormalize_inplace, normalize_inplace

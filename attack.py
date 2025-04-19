@@ -654,6 +654,8 @@ class APGDAttack(Attack):
         if self.loss == 'ce' and y is None:
             raise ValueError("Must provide labels y when loss='ce'.")
         
+        self.init_hyperparam(x)
+        
         # Make sure x,y are on correct device
         x = x.detach().clone().float()
         if self.device is None:
