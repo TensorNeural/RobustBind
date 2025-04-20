@@ -53,7 +53,8 @@ def train_and_evaluate(
     val_mean,
     val_std,
     val_loader,
-    attack_loss_type,
+    train_attack_loss_type,
+    val_attack_loss_type,
     train_loss_type,
     out_dir,
     epsilon,
@@ -120,7 +121,7 @@ def train_and_evaluate(
         random_start=True,
         clamp_min=0.0,
         clamp_max=1.0,
-        loss_type=attack_loss_type
+        loss_type=train_attack_loss_type
     )
     eval_attack = APGDAttack(
         model=AttackModel(model_train, train_mean, train_std),
@@ -128,13 +129,14 @@ def train_and_evaluate(
         n_restarts=1,
         n_iter=50,
         eps=epsilon,
-        loss=attack_loss_type,
+        loss=val_attack_loss_type,
         device=device,
         logger=logger
     )
 
     loss_meter = AverageMeter()
     cos_sim_meter = AverageMeter()
+    rcos_sim_meter = AverageMeter()
     acc_meter = AverageMeter()
     racc_meter = AverageMeter()
 
@@ -159,6 +161,7 @@ def train_and_evaluate(
             total_epochs=epochs,
             loss_meter=loss_meter,
             cos_sim_meter=cos_sim_meter,
+            rcos_sim_meter=rcos_sim_meter,
             acc_meter=acc_meter,
             racc_meter=racc_meter,
             writer=writer
@@ -199,11 +202,12 @@ def main():
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
     parser.add_argument("--train_batch_size", type=int, default=128)
-    parser.add_argument("--val_batch_size", type=int, default=25)
+    parser.add_argument("--val_batch_size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--train_max_samples", type=int, default=50)
-    parser.add_argument("--val_max_samples", type=int, default=20)
-    parser.add_argument("--attack_loss", type=str, default="l2")
+    parser.add_argument("--val_max_samples", type=int, default=10)
+    parser.add_argument("--train_attack_loss", type=str, default="l2")
+    parser.add_argument("--val_attack_loss", type=str, default="ce")
     parser.add_argument("--train_loss", type=str, default="l2")
     parser.add_argument("--epsilon", type=float, default=2/255)
     parser.add_argument("--lr_finder", action='store_true', default=False)
@@ -286,7 +290,7 @@ def main():
                 train_mean=mean_t,
                 train_std=std_t,
                 train_loader=train_loader,
-                attack_loss_type=args.attack_loss,
+                attack_loss_type=args.train_attack_loss,
                 train_loss_type=args.train_loss,
                 epsilon=args.epsilon,
                 steps=args.lr_finder_steps
@@ -332,7 +336,8 @@ def main():
             val_mean=mean_t,
             val_std=std_t,
             val_loader=val_loader,
-            attack_loss_type=args.attack_loss,
+            train_attack_loss_type=args.train_attack_loss,
+            val_attack_loss_type=args.val_attack_loss,
             train_loss_type=args.train_loss,
             out_dir=args.output_dir,
             epsilon=args.epsilon
@@ -360,7 +365,7 @@ def main():
                 device,
                 final_model,
                 val_loader,
-                attack_loss_type=args.attack_loss,
+                attack_loss_type=args.val_attack_loss,
                 iteration_count=100,
                 epsilon=args.epsilon,
                 mean=mean_t,

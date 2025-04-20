@@ -25,6 +25,7 @@ def train_epoch(
     total_epochs: int,
     loss_meter: AverageMeter,
     cos_sim_meter: AverageMeter,
+    rcos_sim_meter: AverageMeter,
     acc_meter: AverageMeter,
     racc_meter: AverageMeter,
     writer: SummaryWriter,
@@ -73,9 +74,11 @@ def train_epoch(
             
             with torch.no_grad():
                 with GpuMemoryTracker(logger):
-                    cos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
+                    emd_clean = model_train(inp, mode=ForwardMode.EMBEDDINGS)
+                    cos_sim = F.cosine_similarity(emd_clean, emb_orig, dim=1).mean()
+                    rcos_sim = F.cosine_similarity(emb_adv, emb_orig, dim=1).mean()
 
-                logger.info(f"[TRAIN] (Initial) Step={step_total}, CosSim={cos_sim.item():.4f}")
+                logger.info(f"[TRAIN] (Initial) Step={step_total}, CosSim={cos_sim.item():.4f}, RobustCosSim={rcos_sim.item():.4f}")
         elif train_loss_type == 'ce':
             with ProfileModelMemory(model_train, logger):
                 logits_adv, _ = model_train(adv_inp, mode=ForwardMode.LOGITS)
@@ -117,13 +120,22 @@ def train_epoch(
             if train_loss_type == 'l2':
                 with GpuMemoryTracker(logger):
                     final_emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
+                    final_emb_clean = model_train(inp, mode=ForwardMode.EMBEDDINGS)
 
-                cos_sim = F.cosine_similarity(final_emb_adv, emb_orig, dim=1).mean()
+                cos_sim = F.cosine_similarity(final_emb_clean, emb_orig, dim=1).mean()
+                rcos_sim = F.cosine_similarity(final_emb_adv, emb_orig, dim=1).mean()
                 cos_sim_meter.update(cos_sim.item(), n_samples)
-                logger.info(f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}")
+                rcos_sim_meter.update(rcos_sim.item(), n_samples)
+                # logger.info(f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}")
+                logger.info(
+                    f"[TRAIN] (Final) Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, "
+                    f"CosSim={cos_sim.item():.4f}, RobustCosSim={rcos_sim.item():.4f}, "
+                    f"AvgCosSim={cos_sim_meter.avg:.4f}, AvgRobustCosSim={rcos_sim_meter.avg:.4f}"
+                )
 
                 writer.add_scalar("train/loss", loss_val.item(), step_total)
                 writer.add_scalar("train/cos_sim", cos_sim.item(), step_total)
+                writer.add_scalar("train/robust_cos_sim", rcos_sim.item(), step_total)
                 writer.add_scalar("train/lr", lr, step_total)
 
                 del emb_adv, emb_orig, cos_sim

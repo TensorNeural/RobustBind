@@ -62,11 +62,15 @@ class PGDAttack(Attack):
         if self.loss_type == "ce":
             if y is None:
                 raise ValueError("Cross-entropy loss requires labels.")
-            acc = self._acc(x, y)
+            
+            with torch.no_grad():
+                acc = self._acc(x, y)
             self.logger.info(f"[PGDAttack] Initial accuracy: {acc.item() * 100:.2f}%")
         elif self.loss_type == "l2":
             original_emb = self.model(x, mode=ForwardMode.EMBEDDINGS)
-            cos_sim = self._cos_sim(x, original_emb)
+
+            with torch.no_grad():
+                cos_sim = self._cos_sim(x, original_emb)
             self.logger.info(f"[PGDAttack] Initial cosine similarity: {cos_sim.item():.2f}")
         else:
             raise ValueError(f"Invalid loss type: {self.loss_type}")
@@ -85,12 +89,16 @@ class PGDAttack(Attack):
             if self.loss_type == "ce":
                 logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
                 loss = ce_loss(logits, y)
-                acc = self._acc(x_adv, y)
+
+                with torch.no_grad():
+                    acc = self._acc(x_adv, y)
                 self.logger.debug(f"[PGDAttack] Step{step} accuracy: {acc.item() * 100:.2f}%")
             elif self.loss_type == "l2":
                 x_adv_emb = self.model(x_adv, mode=ForwardMode.EMBEDDINGS)
                 loss = l2_loss(x_adv_emb, original_emb)
-                cos_sim = self._cos_sim(x_adv, original_emb)
+
+                with torch.no_grad():
+                    cos_sim = self._cos_sim(x_adv, original_emb)
                 self.logger.debug(f"[PGDAttack] Step{step} cosine similarity: {cos_sim.item():.2f}")
             else:
                 raise ValueError(f"Invalid loss type: {self.loss_type}")
@@ -110,10 +118,12 @@ class PGDAttack(Attack):
             x_adv = x_adv.clamp(self.clamp_min, self.clamp_max)
 
         if self.loss_type == "ce":
-            acc = self._acc(x_adv, y)
+            with torch.no_grad():
+                acc = self._acc(x_adv, y)
             self.logger.info(f"[PGDAttack] Final accuracy: {acc.item() * 100:.2f}%")
         elif self.loss_type == "l2":
-            cos_sim = self._cos_sim(x_adv, original_emb)
+            with torch.no_grad():
+                cos_sim = self._cos_sim(x_adv, original_emb)
             self.logger.info(f"[PGDAttack] Final cosine similarity: {cos_sim.item():.2f}")
 
         return x_adv
@@ -192,6 +202,17 @@ class APGDAttack(Attack):
 
         adv_best = x.clone()
 
+        if self.loss == "ce":
+            with torch.no_grad():
+                acc = self._acc(x, y)
+            self.logger.info(f"[APGDAttack] Initial accuracy: {acc.item() * 100:.2f}%")
+        elif self.loss == "l2":
+            with torch.no_grad():
+                cos_sim = F.cosine_similarity(x_emb, x_emb, dim=1).mean()
+            self.logger.info(f"[APGDAttack] Initial cosine similarity: {cos_sim.item():.2f}")
+        else:
+            raise ValueError(f"Invalid loss: {self.loss}")
+
         for _ in range(self.n_restarts):
             x_adv = x.clone().detach()
             delta = (2 * torch.rand_like(x) - 1) if self.norm == "Linf" else torch.randn_like(x)
@@ -210,13 +231,15 @@ class APGDAttack(Attack):
                         if self.loss == "ce":
                             logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
                             loss = F.cross_entropy(logits, y, reduction="none").sum()
-                            acc = self._acc(x_adv, y)
+                            with torch.no_grad():
+                                acc = self._acc(x_adv, y)
                             self.logger.debug(f"[APGDAttack] Iteration {iteration}, accuracy: {acc.item() * 100:.2f}%")
                         elif self.loss == "l2":
                             x_adv_emb = self.model(x_adv, mode=ForwardMode.EMBEDDINGS)
                             diff = (x_adv_emb - x_emb).view(x.shape[0], -1)
                             loss = (diff ** 2).sum()
-                            cos_sim = F.cosine_similarity(x_adv_emb, x_emb, dim=1).mean()
+                            with torch.no_grad():
+                                cos_sim = F.cosine_similarity(x_adv_emb, x_emb, dim=1).mean()
                             self.logger.debug(f"[APGDAttack] Iteration {iteration}, cosine similarity: {cos_sim.item():.2f}")
                         else:
                             raise ValueError(f"Invalid loss: {self.loss}")
@@ -255,6 +278,18 @@ class APGDAttack(Attack):
                         self.logger.debug(f"[APGDAttack] Reduced step size to {step_size:.6f} at iteration {iteration}")
 
                 adv_best = x_adv
+
+        if self.loss == "ce":
+            with torch.no_grad():
+                acc = self._acc(adv_best, y)
+            self.logger.info(f"[APGDAttack] Final accuracy: {acc.item() * 100:.2f}%")
+        elif self.loss == "l2":
+            with torch.no_grad():
+                adv_best_emb = self.model(adv_best, mode=ForwardMode.EMBEDDINGS)
+                cos_sim = F.cosine_similarity(adv_best_emb, x_emb, dim=1).mean()
+            self.logger.info(f"[APGDAttack] Final cosine similarity: {cos_sim.item():.2f}")
+        else:
+            raise ValueError(f"Invalid loss: {self.loss}")
 
         return adv_best
 
