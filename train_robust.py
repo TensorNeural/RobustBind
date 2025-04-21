@@ -167,6 +167,9 @@ def train_and_evaluate(
             writer=writer
         )
 
+        if is_main:
+            logger.info(f"Saving fine-tuned weights for epoch {epoch+1} ...")
+            model_train.module.save_fine_tuned_weights(os.path.join(out_dir, f"epoch_{epoch+1}_fine_tuned_weights.pt"))
         
         logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {epoch+1}")
         robust_acc = evaluate_robust_one_stage(
@@ -204,8 +207,8 @@ def main():
     parser.add_argument("--train_batch_size", type=int, default=128)
     parser.add_argument("--val_batch_size", type=int, default=128)
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--train_max_samples", type=int, default=50)
-    parser.add_argument("--val_max_samples", type=int, default=10)
+    parser.add_argument("--train_max_samples", type=int, default=None)
+    parser.add_argument("--val_max_samples", type=int, default=5000)
     parser.add_argument("--train_attack_loss", type=str, default="l2")
     parser.add_argument("--val_attack_loss", type=str, default="ce")
     parser.add_argument("--train_loss", type=str, default="l2")
