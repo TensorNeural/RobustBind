@@ -40,7 +40,7 @@ def evaluate(args, model, val_data_loader, device):
     for batch_idx, batch in enumerate(tqdm(val_data_loader)):
         with torch.no_grad():
             logger.info(f"[Batch {batch_idx}] Generating visual embeddings...")
-            embeddings = model.encode_vision(batch["inputs"]).to(device)
+            embeddings = model.encode_vision_with_mlp(batch["inputs"]).to(device)
             embeddings /= embeddings.norm(dim=-1, keepdim=True)
 
             # Save embeddings and labels for this batch
@@ -99,7 +99,7 @@ if __name__ == '__main__':
     val_data_reader = DataLoader(dataset=val_data, sampler=val_sampler, num_workers=args.num_workers,
                                 batch_size=args.val_batch_size, collate_fn=val_data.Collector, drop_last=False)
     
-    model = UniBind(args)
+    model = UniBind(args, use_flash_attention=True)
     model.to(device)
     acc = evaluate(args, model, val_data_reader, device)
     logger.info(f"top 1 Acc: {acc}")

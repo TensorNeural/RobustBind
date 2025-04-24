@@ -223,9 +223,9 @@ class APGDAttack():
         if not x_init is None:
             x_adv = x_init.clone()
             if self.norm == 'L1' and self.verbose:
-                print('[custom init] L1 perturbation {:.5f}'.format(
+                self.logger.info('[custom init] L1 perturbation {:.5f}'.format(
                     (x_adv - x).abs().view(x.shape[0], -1).sum(1).max()))
-            
+
         
         x_adv = x_adv.clamp(0., 1.)
         x_best = x_adv.clone()
@@ -383,11 +383,11 @@ class APGDAttack():
             acc_steps[i + 1] = acc + 0
             ind_pred = (pred == 0).nonzero().squeeze()
             x_best_adv[ind_pred] = x_adv[ind_pred] + 0.
-            if self.verbose:
-                str_stats = ' - step size: {:.5f} - topk: {:.2f}'.format(
-                    step_size.mean(), topk.mean() * n_fts) if self.norm in ['L1'] else ''
-                print('[m] iteration: {} - best loss: {:.6f} - robust accuracy: {:.2%}{}'.format(
-                    i, loss_best.sum(), acc.float().mean(), str_stats))
+            # if self.verbose:
+            #     str_stats = ' - step size: {:.5f} - topk: {:.2f}'.format(
+            #         step_size.mean(), topk.mean() * n_fts) if self.norm in ['L1'] else ''
+            #     print('[m] iteration: {} - best loss: {:.6f} - robust accuracy: {:.2%}{}'.format(
+            #         i, loss_best.sum(), acc.float().mean(), str_stats))
                 #print('pert {}'.format((x - x_best_adv).abs().view(x.shape[0], -1).sum(-1).max()))
             
             ### check step size
@@ -439,7 +439,7 @@ class APGDAttack():
                   #k = max(k - self.size_decr, self.n_iter_min)
 
         #
-        
+
         return (x_best, acc, loss_best, x_best_adv)
 
     def perturb(self, x, y=None, best_loss=False, x_init=None):
@@ -476,11 +476,9 @@ class APGDAttack():
             acc = y_pred != y
         loss = -1e10 * torch.ones_like(acc).float()
         if self.verbose:
-            print('-------------------------- ',
-                'running {}-attack with epsilon {:.5f}'.format(
-                self.norm, self.eps),
-                '--------------------------')
-            print('initial accuracy: {:.2%}'.format(acc.float().mean()))
+            self.logger.info('-------------------------- running {}-attack with epsilon {:.5f} --------------------------'.format(
+                self.norm, self.eps))
+            self.logger.info('initial accuracy: {:.2%}'.format(acc.float().mean()))
 
         
         
@@ -491,7 +489,7 @@ class APGDAttack():
             iters = [math.ceil(c) for c in iters]
             iters[-1] = self.n_iter_orig - sum(iters[:-1]) # make sure to use the given iterations
             if self.verbose:
-                print('using schedule [{}x{}]'.format('+'.join([str(c
+                self.logger.info('using schedule [{}x{}]'.format('+'.join([str(c
                     ) for c in epss]), '+'.join([str(c) for c in iters])))
         
         startt = time.time()
@@ -518,10 +516,8 @@ class APGDAttack():
                     acc[ind_to_fool[ind_curr]] = 0
                     adv[ind_to_fool[ind_curr]] = adv_curr[ind_curr].clone()
                     if self.verbose:
-                        print('restart {} - robust accuracy: {:.2%}'.format(
-                            counter, acc.float().mean()),
-                            '- cum. time: {:.1f} s'.format(
-                            time.time() - startt))
+                        self.logger.info('restart {} - robust accuracy: {:.2%} - cum. time: {:.1f} s'.format(
+                            counter, acc.float().mean(), time.time() - startt))
 
             return adv
 
@@ -536,7 +532,7 @@ class APGDAttack():
                 loss_best[ind_curr] = loss_curr[ind_curr] + 0.
 
                 if self.verbose:
-                    print('restart {} - loss: {:.5f}'.format(
+                    self.logger.info('restart {} - loss: {:.5f}'.format(
                         counter, loss_best.sum()))
 
             return adv_best
@@ -552,10 +548,10 @@ class APGDAttack():
             x_init += L1_projection(x, x_init - x, 1. * float(epss[0]))
         eps_target = float(epss[-1])
         if self.verbose:
-            print('total iter: {}'.format(sum(iters)))
+            self.logger.info('total iter: {}'.format(sum(iters)))
         for eps, niter in zip(epss, iters):
             if self.verbose:
-                print('using eps: {:.2f}'.format(eps))
+                self.logger.info('using eps: {:.2f}'.format(eps))
             self.n_iter = niter + 0
             self.eps = eps + 0.
             #
@@ -631,11 +627,9 @@ class APGDAttack_targeted(APGDAttack):
         adv = x.clone()
         acc = y_pred == y
         if self.verbose:
-            print('-------------------------- ',
-                'running {}-attack with epsilon {:.5f}'.format(
-                self.norm, self.eps),
-                '--------------------------')
-            print('initial accuracy: {:.2%}'.format(acc.float().mean()))
+            self.logger.info('-------------------------- running {}-attack with epsilon {:.5f} --------------------------'.format(
+                self.norm, self.eps))
+            self.logger.info('initial accuracy: {:.2%}'.format(acc.float().mean()))
 
         startt = time.time()
 
@@ -643,7 +637,7 @@ class APGDAttack_targeted(APGDAttack):
         torch.cuda.random.manual_seed(self.seed)
 
         #
-        
+
         if self.use_largereps:
             epss = [3. * self.eps_orig, 2. * self.eps_orig, 1. * self.eps_orig]
             iters = [.3 * self.n_iter_orig, .3 * self.n_iter_orig,
@@ -672,18 +666,16 @@ class APGDAttack_targeted(APGDAttack):
                     if not self.use_largereps:
                         res_curr = self.attack_single_run(x_to_fool, y_to_fool)
                     else:
-                        res_curr = self.decr_eps_pgd(x_to_fool, y_to_fool, epss, iters)
+                        res_curr = self.decr_eps_pgd(x_to_fool, y_to_fool, [3. * self.eps_orig, 2. * self.eps_orig, 1. * self.eps_orig],
+                                                     [.3 * self.n_iter_orig, .3 * self.n_iter_orig, .4 * self.n_iter_orig])
                     best_curr, acc_curr, loss_curr, adv_curr = res_curr
                     ind_curr = (acc_curr == 0).nonzero().squeeze()
 
                     acc[ind_to_fool[ind_curr]] = 0
                     adv[ind_to_fool[ind_curr]] = adv_curr[ind_curr].clone()
                     if self.verbose:
-                        print('target class {}'.format(target_class),
-                            '- restart {} - robust accuracy: {:.2%}'.format(
-                            counter, acc.float().mean()),
-                            '- cum. time: {:.1f} s'.format(
-                            time.time() - startt))
+                        self.logger.info('target class {} - restart {} - robust accuracy: {:.2%} - cum. time: {:.1f} s'.format(
+                            target_class, counter, acc.float().mean(), time.time() - startt))
 
         return adv
 

@@ -8,3 +8,5 @@ results/
 *.json
 *.pth
 *.png
+*.log
+output
