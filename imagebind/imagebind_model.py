@@ -6,11 +6,9 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import os
 from functools import partial
 from types import SimpleNamespace
 
-import torch
 import torch.nn as nn
 
 from imagebind.helpers import (EinOpsRearrange, LearnableLogitScaling, Normalize,
@@ -71,6 +69,9 @@ class ImageBindModel(nn.Module):
         imu_num_heads=8,
         imu_drop_path=0.7,
         use_flash_attn=False,
+        use_lora=False,
+        lora_rank=4,
+        lora_alpha=8.0,
     ):
         super().__init__()
         self.use_flash_attn = use_flash_attn
@@ -115,6 +116,10 @@ class ImageBindModel(nn.Module):
             imu_num_blocks,
             imu_num_heads,
             imu_drop_path,
+            use_flash_attn=use_flash_attn,
+            use_lora=use_lora,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
         )
 
         self.modality_heads = self._create_modality_heads(
@@ -141,7 +146,9 @@ class ImageBindModel(nn.Module):
             Normalize(dim=-1),
             LearnableLogitScaling(logit_scale_init=1.0, learnable=False),
         )
-        ######
+        self.use_lora = use_lora
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
 
     def _create_modality_preprocessors(
         self,
@@ -301,11 +308,15 @@ class ImageBindModel(nn.Module):
         imu_num_blocks=6,
         imu_num_heads=8,
         imu_drop_path=0.7,
+        use_flash_attn=False,
+        use_lora=False,
+        lora_rank=4,
+        lora_alpha=8.0,
     ):
         def instantiate_trunk(
-            embed_dim, num_blocks, num_heads, pre_transformer_ln, add_bias_kv, drop_path
+            embed_dim, num_blocks, num_heads, pre_transformer_ln, add_bias_kv, drop_path,
         ):
-            attention = FlashAttention2 if self.use_flash_attn else MultiheadAttention
+            attention = FlashAttention2 if use_flash_attn else MultiheadAttention
             return SimpleTransformer(
                 embed_dim=embed_dim,
                 num_blocks=num_blocks,
@@ -317,6 +328,9 @@ class ImageBindModel(nn.Module):
                     num_heads=num_heads,
                     bias=True,
                     add_bias_kv=add_bias_kv,
+                    use_lora=use_lora,
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
                 ),
                 pre_transformer_layer=nn.Sequential(
                     nn.LayerNorm(embed_dim, eps=1e-6)
@@ -325,6 +339,9 @@ class ImageBindModel(nn.Module):
                     EinOpsRearrange("b l d -> l b d"),
                 ),
                 post_transformer_layer=EinOpsRearrange("l b d -> b l d"),
+                use_lora=use_lora,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
             )
 
         modality_trunks = {}
@@ -492,7 +509,11 @@ class ImageBindModel(nn.Module):
         return outputs
 
 
-def imagebind_huge(use_flash_attn=False):
+def imagebind_huge(
+        use_flash_attn=False, 
+        use_lora=False, 
+        lora_rank=4, 
+        lora_alpha=8.0):
     return ImageBindModel(
         vision_embed_dim=1280,
         vision_num_blocks=32,
@@ -503,5 +524,8 @@ def imagebind_huge(use_flash_attn=False):
         out_embed_dim=1024,
         audio_drop_path=0.1,
         imu_drop_path=0.7,
-        use_flash_attn=use_flash_attn
+        use_flash_attn=use_flash_attn,
+        use_lora=use_lora,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
     )

@@ -62,22 +62,8 @@ def train_and_evaluate(
     logger.info("Starting training and evaluation ...")
     is_main = not dist.is_initialized() or dist.get_rank() == 0
 
-    logger.info("Initializing original + training models ...")
+    logger.info("Initializing original model ...")
     model_original = UniBindModel(
-        device=device,
-        pretrain_weights=pretrain_weights,
-        modality="image",
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
-        logger=logger,
-        use_flash_attention=use_flash_attention,
-        fine_tuned_weights=None,       
-    )
-    model_original.to(device)
-
-    model_train = UniBindModel(
         device=device,
         pretrain_weights=pretrain_weights,
         modality="image",
@@ -89,8 +75,25 @@ def train_and_evaluate(
         use_flash_attention=use_flash_attention,
         fine_tuned_weights=None
     )
+    model_original.to(device)
+
+    logger.info("Initializing training model ...")
+    model_train = UniBindModel(
+        device=device,
+        pretrain_weights=pretrain_weights,
+        modality="image",
+        centre_embeddings=raw_emb,
+        centre_labels=raw_lbls,
+        label_to_index=lbl_to_idx,
+        index_to_label=idx_to_lbl,
+        logger=logger,
+        use_flash_attention=use_flash_attention,
+        use_lora=True,
+        use_fine_tune=False,
+        fine_tuned_weights=None,
+    )
     model_train.to(device)
-    model_train = DDP(model_train, device_ids=[device.index], output_device=device.index)
+    model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
 
     logger.info(f"Starting training for 2 epochs with epsilon={(epsilon * 255):.0f}/255")
 
@@ -116,7 +119,7 @@ def train_and_evaluate(
         model=AttackModel(model_train, train_mean, train_std),
         epsilon=epsilon,
         alpha=1/255,
-        steps=10,
+        steps=2,
         norm='linf',
         random_start=True,
         clamp_min=0.0,
@@ -167,33 +170,33 @@ def train_and_evaluate(
             writer=writer
         )
 
-        if is_main:
-            logger.info(f"Saving fine-tuned weights for epoch {epoch+1} ...")
-            model_train.module.save_fine_tuned_weights(os.path.join(out_dir, f"epoch_{epoch+1}_fine_tuned_weights.pt"))
+    #     if is_main:
+    #         logger.info(f"Saving lora weights for epoch {epoch+1} ...")
+    #         model_train.module.save_lora_weights(os.path.join(out_dir, f"epoch_{epoch+1}_lora_weights.pt"))
         
-        logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {epoch+1}")
-        robust_acc = evaluate_robust_one_stage(
-            logger,
-            device,
-            model_train, 
-            val_loader, 
-            eval_attack,
-            val_mean, 
-            val_std
-        )
-        logger.info(f"[Epoch {epoch+1}] robust acc (one-stage 50 iter) = {robust_acc:.4f}")
-        logger.info(f"Epoch {epoch+1} total time (training+eval): {time.time() - time.time():.2f} seconds")
+    #     logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {epoch+1}")
+    #     robust_acc = evaluate_robust_one_stage(
+    #         logger,
+    #         device,
+    #         model_train, 
+    #         val_loader, 
+    #         eval_attack,
+    #         val_mean, 
+    #         val_std
+    #     )
+    #     logger.info(f"[Epoch {epoch+1}] robust acc (one-stage 50 iter) = {robust_acc:.4f}")
+    #     logger.info(f"Epoch {epoch+1} total time (training+eval): {time.time() - time.time():.2f} seconds")
 
-        if robust_acc > best_acc:
-            best_acc = robust_acc
+    #     if robust_acc > best_acc:
+    #         best_acc = robust_acc
             
-            if is_main:
-                logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving fine-tuned weights ...")
-                model_train.module.save_fine_tuned_weights(os.path.join(out_dir, "best_fine_tuned_weights.pt"))
+    #         if is_main:
+    #             logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving lora weights ...")
+    #             model_train.module.save_lora_weights(os.path.join(out_dir, f"best_lora_weights.pt"))
     
     
-    writer.close()
-    logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
+    # writer.close()
+    # logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -204,11 +207,11 @@ def main():
     parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
-    parser.add_argument("--train_batch_size", type=int, default=128)
-    parser.add_argument("--val_batch_size", type=int, default=128)
+    parser.add_argument("--train_batch_size", type=int, default=2)
+    parser.add_argument("--val_batch_size", type=int, default=2)
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--train_max_samples", type=int, default=None)
-    parser.add_argument("--val_max_samples", type=int, default=5000)
+    parser.add_argument("--train_max_samples", type=int, default=2)
+    parser.add_argument("--val_max_samples", type=int, default=2)
     parser.add_argument("--train_attack_loss", type=str, default="l2")
     parser.add_argument("--val_attack_loss", type=str, default="ce")
     parser.add_argument("--train_loss", type=str, default="l2")
@@ -219,7 +222,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        local_rank = int(os.environ["LOCAL_RANK"])
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
 
@@ -346,9 +349,9 @@ def main():
             epsilon=args.epsilon
         )
 
-        best_fine_tuned_ckpt_path = os.path.join(args.output_dir, "best_fine_tuned_weights.pt")
-        if os.path.exists(best_fine_tuned_ckpt_path):
-            logger.info("Loading best fine tuned weights for final two-stage & clean evaluations ...")
+        best_lora_weights_path = os.path.join(args.output_dir, "best_lora_weights.pt")
+        if os.path.exists(best_lora_weights_path):
+            logger.info("Loading best lora weights for final two-stage & clean evaluations ...")
             final_model = UniBindModel(
                 device=device,
                 pretrain_weights=args.pretrain_weights,
@@ -359,9 +362,11 @@ def main():
                 index_to_label=idx_to_lbl,
                 logger=logger,
                 use_flash_attention=args.use_flash_attention,
-                fine_tuned_weights=best_fine_tuned_ckpt_path
+                use_lora=True,
+                lora_weights=best_lora_weights_path
             )
             final_model.to(device)
+            final_model = DDP(final_model, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
 
             final_robust_acc = evaluate_two_stage(
                 logger,
@@ -379,7 +384,7 @@ def main():
             final_clean_acc = evaluate_clean(logger, device, final_model, val_loader)
             logger.info(f"Final clean accuracy = {final_clean_acc:.4f}")
         else:
-            logger.warning("No best_fine_tuned_weights.pt found. Skipping final evaluations.")
+            logger.warning("No best_lora_weights.pt found. Skipping final evaluations.")
     finally:
         dist.destroy_process_group()
 
