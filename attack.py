@@ -107,16 +107,19 @@ class PGDAttack(Attack):
                 raise ValueError(f"Invalid loss type: {self.loss_type}")
 
             grad = torch.autograd.grad(loss, x_adv)[0]
+            if grad is None:
+                raise RuntimeError("Gradient is None — check model connectivity or input.")
+            
             x_adv = x_adv.detach()
 
             if self.norm == "linf":
                 x_adv = project_linf(x_adv + self.alpha * grad.sign(), x, self.epsilon)
             elif self.norm == "l2":
-                step = self.alpha * grad / (L2_norm(grad, keepdim=True) + 1e-12)
-                x_adv = project_l2(x_adv + step, x, self.epsilon)
+                step_dir = self.alpha * grad / (L2_norm(grad, keepdim=True) + 1e-12)
+                x_adv = project_l2(x_adv + step_dir, x, self.epsilon)
             elif self.norm == "l1":
-                step = self.alpha * grad / (L1_norm(grad, keepdim=True) + 1e-12)
-                x_adv = x + project_l1(x_adv + step - x, self.epsilon)
+                step_dir = self.alpha * grad / (L1_norm(grad, keepdim=True) + 1e-12)
+                x_adv = x + project_l1(x_adv + step_dir - x, self.epsilon)
 
             x_adv = x_adv.clamp(self.clamp_min, self.clamp_max)
 
@@ -218,7 +221,10 @@ class APGDAttack(Attack):
         else:
             raise ValueError(f"Invalid loss: {self.loss}")
 
-        for _ in range(self.n_restarts):
+        for restart in range(self.n_restarts):
+            torch.manual_seed(self.seed + restart)
+            torch.cuda.manual_seed(self.seed + restart)
+
             x_adv = x.clone().detach()
             delta = (2 * torch.rand_like(x) - 1) if self.norm == "Linf" else torch.randn_like(x)
             x_adv = (x + self.eps * self.normalize(delta)).clamp(0, 1)
@@ -226,8 +232,10 @@ class APGDAttack(Attack):
             step_size = self.eps
             cos_sim_prev = 1.0
             oscillation_counter = 0
+            best_acc, best_cos_sim = 1.0, float("inf")
 
             for iteration in range(self.n_iter):
+                x_adv = x_adv.detach()
                 x_adv.requires_grad_(True)
                 grad = torch.zeros_like(x_adv)
 
@@ -251,17 +259,16 @@ class APGDAttack(Attack):
                         grad += torch.autograd.grad(loss, [x_adv])[0].detach()
 
                 grad /= self.eot_iter
-                x_adv = x_adv.detach()
 
                 # Step
                 if self.norm == "Linf":
                     x_adv = project_linf(x_adv + step_size * grad.sign(), x, self.eps)
                 elif self.norm == "L2":
-                    step = step_size * grad / (L2_norm(grad, keepdim=True) + 1e-12)
-                    x_adv = project_l2(x_adv + step, x, self.eps)
+                    step_dir = step_size * grad / (L2_norm(grad, keepdim=True) + 1e-12)
+                    x_adv = project_l2(x_adv + step_dir, x, self.eps)
                 elif self.norm == "L1":
-                    step = step_size * grad / (L1_norm(grad, keepdim=True) + 1e-12)
-                    x_adv = x + project_l1(x_adv + step - x, self.eps)
+                    step_dir = step_size * grad / (L1_norm(grad, keepdim=True) + 1e-12)
+                    x_adv = x + project_l1(x_adv + step_dir - x, self.eps)
                     x_adv = x_adv.clamp(0.0, 1.0)
 
                 # Cosine oscillation handling
@@ -281,8 +288,15 @@ class APGDAttack(Attack):
                         step_size *= 0.5
                         oscillation_counter = 0
                         self.logger.debug(f"[APGDAttack] Reduced step size to {step_size:.6f} at iteration {iteration}")
-
-                adv_best = x_adv
+                
+                if self.loss == "ce":
+                    if acc.item() < best_acc:
+                        best_acc = acc.item()
+                        adv_best = x_adv.clone()
+                elif self.loss == "l2":
+                    if cos_sim.item() < best_cos_sim:
+                        best_cos_sim = cos_sim.item()
+                        adv_best = x_adv.clone()
 
         if self.loss == "ce":
             with torch.no_grad():
