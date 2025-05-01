@@ -312,7 +312,8 @@ def two_stage_attack(logger, model, inputs, labels, attack_stage1, attack_stage2
     inputs_unorm = inputs.clone()
     unnormalize_inplace(inputs_unorm, mean, std)
 
-    adv_stage1 = attack_stage1.perturb(inputs_unorm, labels)
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        adv_stage1 = attack_stage1.perturb(inputs_unorm, labels)
     normalize_inplace(adv_stage1, mean, std)
 
     logits_stage1, _ = model(adv_stage1, mode=ForwardMode.LOGITS)

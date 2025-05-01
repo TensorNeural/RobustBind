@@ -19,7 +19,8 @@ def evaluate_robust_one_stage(logger, device, model: UniBindModel, data_loader, 
         inp, lbl = inp.to(device), lbl.to(device)
         inp_unorm = inp.clone().detach()
         unnormalize_inplace(inp_unorm, mean, std)
-        adv_inp = one_attack.perturb(inp_unorm, lbl)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            adv_inp = one_attack.perturb(inp_unorm, lbl)
         normalize_inplace(adv_inp, mean, std)
 
         logits_adv, _ = model(adv_inp, mode=ForwardMode.LOGITS)

@@ -119,7 +119,7 @@ def train_and_evaluate(
         model=AttackModel(model_train, train_mean, train_std),
         epsilon=epsilon,
         alpha=1/255,
-        steps=2,
+        steps=10,
         norm='linf',
         random_start=True,
         clamp_min=0.0,
@@ -170,33 +170,33 @@ def train_and_evaluate(
             writer=writer
         )
 
-    #     if is_main:
-    #         logger.info(f"Saving lora weights for epoch {epoch+1} ...")
-    #         model_train.module.save_lora_weights(os.path.join(out_dir, f"epoch_{epoch+1}_lora_weights.pt"))
+        if is_main:
+            logger.info(f"Saving lora weights for epoch {epoch+1} ...")
+            model_train.module.save_lora_weights(os.path.join(out_dir, f"epoch_{epoch+1}_lora_weights.pt"))
         
-    #     logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {epoch+1}")
-    #     robust_acc = evaluate_robust_one_stage(
-    #         logger,
-    #         device,
-    #         model_train, 
-    #         val_loader, 
-    #         eval_attack,
-    #         val_mean, 
-    #         val_std
-    #     )
-    #     logger.info(f"[Epoch {epoch+1}] robust acc (one-stage 50 iter) = {robust_acc:.4f}")
-    #     logger.info(f"Epoch {epoch+1} total time (training+eval): {time.time() - time.time():.2f} seconds")
+        logger.info(f"Evaluating robust accuracy with 50-iter one-stage attack, epoch {epoch+1}")
+        robust_acc = evaluate_robust_one_stage(
+            logger,
+            device,
+            model_train, 
+            val_loader, 
+            eval_attack,
+            val_mean, 
+            val_std
+        )
+        logger.info(f"[Epoch {epoch+1}] robust acc (one-stage 50 iter) = {robust_acc:.4f}")
+        logger.info(f"Epoch {epoch+1} total time (training+eval): {time.time() - time.time():.2f} seconds")
 
-    #     if robust_acc > best_acc:
-    #         best_acc = robust_acc
+        if robust_acc > best_acc:
+            best_acc = robust_acc
             
-    #         if is_main:
-    #             logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving lora weights ...")
-    #             model_train.module.save_lora_weights(os.path.join(out_dir, f"best_lora_weights.pt"))
+            if is_main:
+                logger.info(f"New best checkpoint: robust acc={best_acc:.4f}. Saving lora weights ...")
+                model_train.module.save_lora_weights(os.path.join(out_dir, f"best_lora_weights.pt"))
     
     
-    # writer.close()
-    # logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
+    writer.close()
+    logger.info(f"Training complete! Best robust (one-stage) accuracy was {best_acc:.4f}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -207,17 +207,15 @@ def main():
     parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
-    parser.add_argument("--train_batch_size", type=int, default=2)
-    parser.add_argument("--val_batch_size", type=int, default=2)
+    parser.add_argument("--train_batch_size", type=int, default=80)
+    parser.add_argument("--val_batch_size", type=int, default=80)
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--train_max_samples", type=int, default=2)
-    parser.add_argument("--val_max_samples", type=int, default=2)
+    parser.add_argument("--train_max_samples", type=int, default=None)
+    parser.add_argument("--val_max_samples", type=int, default=3000)
     parser.add_argument("--train_attack_loss", type=str, default="l2")
     parser.add_argument("--val_attack_loss", type=str, default="ce")
     parser.add_argument("--train_loss", type=str, default="l2")
     parser.add_argument("--epsilon", type=float, default=2/255)
-    parser.add_argument("--lr_finder", action='store_true', default=False)
-    parser.add_argument("--lr_finder_steps", type=int, default=200)
     parser.add_argument("--tensorboard_data_dir", type=str, default="tensorboard")
     args = parser.parse_args()
 
@@ -281,29 +279,6 @@ def main():
             pin_memory=True,
             persistent_workers=True
         )
-
-        if args.lr_finder:
-            logger.info("Running LR finder ...")
-            lrs, losses, smoothed_losses = find_lr(
-                logger=logger,
-                device=device,
-                raw_emb=raw_emb,
-                raw_lbls=raw_lbls,
-                lbl_to_idx=lbl_to_idx,
-                idx_to_lbl=idx_to_lbl,
-                pretrain_weights=args.pretrain_weights,
-                use_flash_attention=args.use_flash_attention,
-                train_mean=mean_t,
-                train_std=std_t,
-                train_loader=train_loader,
-                attack_loss_type=args.train_attack_loss,
-                train_loss_type=args.train_loss,
-                epsilon=args.epsilon,
-                steps=args.lr_finder_steps
-            )
-            with open(os.path.join(args.output_dir, "lr_finder_results.json"), "w") as f:
-                json.dump({"lrs": lrs, "losses": losses, "smoothed_losses": smoothed_losses}, f)
-            return
 
         logger.info("Loading val dataset ...")
         val_ds = ImageNetDataset(

@@ -1,9 +1,9 @@
-from model import UniBindModel
-from autoattack.autopgd_base import APGDAttack
+from model import UniBindModel, ForwardMode
 from loss import l2_loss, ce_loss
 import torch
 from torch.optim import AdamW
 from transform import unnormalize_inplace, normalize_inplace
+from attack import APGDAttack, AttackModel
 
 def find_lr(
     logger,
@@ -23,7 +23,7 @@ def find_lr(
     steps=100,
 ):
     logger.info("Finding learning rate ...")
-    logger.info("Initializing original + training models ...")
+    logger.info("Initializing original model ...")
     model_original = UniBindModel(
         device=device,
         pretrain_weights=pretrain_weights,
@@ -32,12 +32,13 @@ def find_lr(
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
-        mean=train_mean,
-        std=train_std,
         logger=logger,
         use_flash_attention=use_flash_attention,
         fine_tuned_weights=None
     )
+    model_original.to(device)
+
+    logger.info("Initializing training model ...")
     model_train = UniBindModel(
         device=device,
         pretrain_weights=pretrain_weights,
@@ -46,25 +47,25 @@ def find_lr(
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
         index_to_label=idx_to_lbl,
-        mean=train_mean,
-        std=train_std,
         logger=logger,
         use_flash_attention=use_flash_attention,
-        fine_tuned_weights=None
+        use_lora=True,
+        use_fine_tune=False,
+        fine_tuned_weights=None,
     )
+    model_train.to(device)
 
     trainable_params = [p for p in model_train.parameters() if p.requires_grad]
     optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     attack = APGDAttack(
-        predict=model_train,
+        model=AttackModel(model_train, train_mean, train_std),
         norm='Linf',
         n_restarts=1,
         n_iter=10,
         eps=epsilon,
         loss=attack_loss_type,
         device=device,
-        logger=logger,
-        verbose=True
+        logger=logger
     )
     model_train.train()
     model_original.eval()
@@ -102,21 +103,24 @@ def find_lr(
         inp_unorm = inp.clone().detach()
         unnormalize_inplace(inp_unorm, train_mean, train_std)
 
-        adv_inp = attack.perturb(inp_unorm, lbl)
+        emb_orig = None
+        if train_loss_type == 'l2':
+            with torch.no_grad():
+                emb_orig = model_original(inp, mode=ForwardMode.EMBEDDINGS)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            adv_inp = attack.perturb(inp_unorm, lbl, emb_orig)
         normalize_inplace(adv_inp, train_mean, train_std)
 
         model_train.train()
         optimizer.zero_grad()
 
         if train_loss_type == 'l2':
-            with torch.no_grad():
-                emb_orig = model_original.encode(inp)
-
-            emb_adv = model_train.encode(adv_inp)
+            emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
             loss = l2_loss(emb_orig, emb_adv)
             del emb_orig, emb_adv
         elif train_loss_type == 'ce':
-            logits_adv, _ = model_train.logits(adv_inp)
+            logits_adv, _ = model_train(adv_inp, mode=ForwardMode.LOGITS)
             loss = ce_loss(logits_adv, lbl)
             del logits_adv
         else: 
