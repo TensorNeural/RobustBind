@@ -99,7 +99,7 @@ if __name__ == '__main__':
     val_data_reader = DataLoader(dataset=val_data, sampler=val_sampler, num_workers=args.num_workers,
                                 batch_size=args.val_batch_size, collate_fn=val_data.Collector, drop_last=False)
     
-    model = UniBind(args, use_flash_attention=True)
+    model = UniBind(args, use_flash_attention=True, use_lora=True)
     model.to(device)
     acc = evaluate(args, model, val_data_reader, device)
     logger.info(f"top 1 Acc: {acc}")

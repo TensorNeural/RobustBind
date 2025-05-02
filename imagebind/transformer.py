@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, trunc_normal_
-
+from imagebind.lora import LoRALinear
 
 class Attention(nn.Module):
     def __init__(
@@ -29,7 +29,7 @@ class Attention(nn.Module):
         qkv_bias=False,
         qk_scale=None,
         attn_drop=0.0,
-        proj_drop=0.0,
+        proj_drop=0.0
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -83,6 +83,9 @@ class FlashAttention2(nn.Module):
         dropout: float = 0.0,
         bias: bool = True,
         add_bias_kv: bool = False,
+        use_lora=False,
+        lora_rank=4,
+        lora_alpha=8.0
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -95,10 +98,37 @@ class FlashAttention2(nn.Module):
         assert self.head_dim * num_heads == embed_dim, "embed_dim must divide num_heads"
 
         # Q, K, V, out projections
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        if use_lora:
+            self.q_proj = LoRALinear(
+                q_proj,
+                rank=lora_rank,
+                alpha=lora_alpha
+            )
+            self.k_proj = LoRALinear(
+                k_proj,
+                rank=lora_rank,
+                alpha=lora_alpha
+            )
+            self.v_proj = LoRALinear(
+                v_proj,
+                rank=lora_rank,
+                alpha=lora_alpha
+            )
+            self.out_proj = LoRALinear(
+                out_proj,
+                rank=lora_rank,
+                alpha=lora_alpha
+            )
+        else:
+            self.q_proj = q_proj
+            self.k_proj = k_proj
+            self.v_proj = v_proj
+            self.out_proj = out_proj
 
         if self.add_bias_kv:
             self.bias_k = nn.Parameter(torch.empty(1, 1, embed_dim))
@@ -175,13 +205,36 @@ class Mlp(nn.Module):
         out_features=None,
         act_layer=nn.GELU,
         drop=0.0,
+        use_lora=False,
+        lora_rank=4,
+        lora_alpha=8.0
     ):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
+
+        fc1 = nn.Linear(in_features, hidden_features)
+        if use_lora:
+            self.fc1 = LoRALinear(
+                fc1,
+                rank=lora_rank,
+                alpha=lora_alpha
+            )
+        else:
+            self.fc1 = fc1
+
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+
+        fc2 = nn.Linear(hidden_features, out_features)
+        if use_lora:
+            self.fc2 = LoRALinear(
+                fc2,
+                rank=lora_rank,
+                alpha=lora_alpha
+            )
+        else:
+            self.fc2 = fc2
+
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
@@ -216,6 +269,9 @@ class BlockWithMasking(nn.Module):
         drop_path: float = 0.0,
         layer_scale_type: Optional[str] = None,
         layer_scale_init_value: float = 1e-4,
+        use_lora: bool = False,
+        lora_rank: int = 4,
+        lora_alpha: float = 8.0,
     ):
         super().__init__()
 
@@ -234,6 +290,9 @@ class BlockWithMasking(nn.Module):
             hidden_features=mlp_hidden_dim,
             act_layer=act_layer,
             drop=ffn_dropout_rate,
+            use_lora=use_lora,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
         )
         self.norm_2 = norm_layer(dim)
         self.layer_scale_type = layer_scale_type
@@ -291,6 +350,9 @@ class SimpleTransformer(nn.Module):
         layer_scale_type: Optional[str] = None,  # from cait; possible values are None, "per_channel", "scalar"
         layer_scale_init_value: float = 1e-4,  # from cait; float
         weight_init_style: str = "jax",  # possible values jax or pytorch
+        use_lora: bool = False,
+        lora_rank: int = 4,
+        lora_alpha: float = 8.0,
     ):
         """
         Simple Transformer with the following features
@@ -320,6 +382,9 @@ class SimpleTransformer(nn.Module):
                     norm_layer=norm_layer,
                     layer_scale_type=layer_scale_type,
                     layer_scale_init_value=layer_scale_init_value,
+                    use_lora=use_lora,
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
                 )
                 for i in range(num_blocks)
             ]

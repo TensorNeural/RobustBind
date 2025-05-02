@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from attack import Attack
 from perf.profiling import GpuMemoryTracker, ProfileModelMemory
+from perf.debug import register_forward_hooks, register_backward_hooks, log_grad
 from model import Model, ForwardMode
 from meter import AverageMeter
 from transform import unnormalize_inplace, normalize_inplace
@@ -49,25 +50,26 @@ def train_epoch(
         with GpuMemoryTracker(logger):
             inp_unorm = inp.clone().detach()
             unnormalize_inplace(inp_unorm, mean, std)
+        
+        emb_orig = None
+        if train_loss_type == 'l2':
+            with torch.no_grad():
+                with GpuMemoryTracker(logger):
+                    emb_orig = model_original(inp, mode=ForwardMode.EMBEDDINGS)
 
         with GpuMemoryTracker(logger):
-            adv_inp = attack.perturb(inp_unorm, lbl)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                adv_inp = attack.perturb(inp_unorm, lbl, emb_orig)
             normalize_inplace(adv_inp, mean, std)
-
-        with GpuMemoryTracker(logger):
-            torch.cuda.empty_cache()
-
+        
         model_train.train()
         with GpuMemoryTracker(logger):
             optimizer.zero_grad()
         
         if train_loss_type == 'l2':
-            with GpuMemoryTracker(logger):
+            with ProfileModelMemory(model_train, logger):
+                # register_forward_hooks(model_train, logger)
                 emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
-
-            with torch.no_grad():
-                with GpuMemoryTracker(logger):
-                    emb_orig = model_original(inp, mode=ForwardMode.EMBEDDINGS)
 
             with GpuMemoryTracker(logger):
                 loss_val = l2_loss(emb_adv, emb_orig)
@@ -92,20 +94,17 @@ def train_epoch(
     
                 acc = compute_acc(logits_clean, lbl)
                 racc = compute_acc(logits_adv, lbl)
-                logger.info(f"[TRAIN] (Initial) Step={step_total}, Clean Acc={acc:.2f}, RobustAcc={racc:.2f}")
+                logger.info(f"[TRAIN] (Initial) Step={step_total}, Clean Acc={acc:.2f}, RobustAcc={racc:.4f}")
         else:
             raise ValueError(f"Unknown loss type: {train_loss_type}")
-        
+
         with GpuMemoryTracker(logger):
             loss_val.backward()
 
         with GpuMemoryTracker(logger):
             optimizer.step()
         
-        for name, param in model_train.named_parameters():
-            if param.requires_grad and param.grad is not None:
-                delta = param.grad.detach().norm().item()
-                logger.info(f"[GradNorm] {name}: {delta:.6f}")
+        log_grad(model_train, logger)
         
         with GpuMemoryTracker(logger):
             scheduler.step()
@@ -126,7 +125,6 @@ def train_epoch(
                 rcos_sim = F.cosine_similarity(final_emb_adv, emb_orig, dim=1).mean()
                 cos_sim_meter.update(cos_sim.item(), n_samples)
                 rcos_sim_meter.update(rcos_sim.item(), n_samples)
-                # logger.info(f"[TRAIN] Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, CosSim={cos_sim.item():.4f}")
                 logger.info(
                     f"[TRAIN] (Final) Step={step_total}, LR={lr:.6f}, Loss={loss_val.item():.6f}, "
                     f"CosSim={cos_sim.item():.4f}, RobustCosSim={rcos_sim.item():.4f}, "
@@ -160,12 +158,12 @@ def train_epoch(
                 
                 del logits_clean, logits_adv
 
-        del inp, lbl, inp_unorm, adv_inp, loss_val
-        with GpuMemoryTracker(logger):
-            torch.cuda.empty_cache()
+            del inp, lbl, inp_unorm, adv_inp, loss_val
+            with GpuMemoryTracker(logger):
+                torch.cuda.empty_cache()
 
-        batch_end_time = time.time()
-        logger.info(f"Batch {batch_idx+1} time: {batch_end_time - batch_start_time:.2f} seconds")
+            batch_end_time = time.time()
+            logger.info(f"Batch {batch_idx+1} time: {batch_end_time - batch_start_time:.2f} seconds")
 
     epoch_end_time = time.time()
     logger.info(f"Epoch {epoch+1}/{total_epochs} training time: {epoch_end_time - epoch_start_time:.2f} seconds")

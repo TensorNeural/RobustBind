@@ -71,10 +71,15 @@ class Transformer(nn.Module):
         return self.resblocks(x)
 
 class POINTBIND(nn.Module):
-    def __init__(self, point_encoder, pc_feat_dims, use_flash_attention=False):
+    def __init__(self, point_encoder, pc_feat_dims, use_flash_attention=False, 
+                 use_lora=False, lora_rank=4, lora_alpha=8.0):
         super().__init__()
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        self.bind = imagebind_model.imagebind_huge(use_flash_attention).eval().cuda()
+        self.bind = imagebind_model.imagebind_huge(
+            use_flash_attention,
+            use_lora=use_lora,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha).eval().cuda()
 
         self.point_encoder = point_encoder
         self.pc_projection = nn.Parameter(torch.empty(pc_feat_dims, 512))
@@ -104,15 +109,23 @@ class POINTBIND(nn.Module):
                 'image_embed': image_embed,
                 'logit_scale': self.logit_scale.exp()}
 
-def PointBind_PointBERT(args):
+def PointBind_PointBERT(args,
+                        use_flash_attention=False,
+                        use_lora=False, lora_rank=4, lora_alpha=8.0):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
     config = cfg_from_yaml_file(POINTBERT_CONFIG)
     point_encoder = PointTransformer_BIND(config.model, args=args)
-    model = POINTBIND(point_encoder, pc_feat_dims=768)
+    model = POINTBIND(point_encoder, pc_feat_dims=768, 
+                       use_flash_attention=use_flash_attention,
+                       use_lora=use_lora, lora_rank=lora_rank, lora_alpha=lora_alpha)
     return model
 
-def PointBind_I2PMAE(args=None, use_flash_attention=False):
+def PointBind_I2PMAE(args=None, 
+                     use_flash_attention=False,
+                     use_lora=False, lora_rank=4, lora_alpha=8.0):
     vision_model = timm.create_model('vit_base_patch16_224', num_classes=0)
     point_encoder = I2P_MAE_BIND()
-    model = POINTBIND(point_encoder, pc_feat_dims=384, use_flash_attention=use_flash_attention)
+    model = POINTBIND(point_encoder, pc_feat_dims=384, 
+                      use_flash_attention=use_flash_attention,
+                      use_lora=use_lora, lora_rank=lora_rank, lora_alpha=lora_alpha)
     return model
