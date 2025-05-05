@@ -55,6 +55,8 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
         logger=logger,
         use_flash_attention=args.use_flash_attention,
         use_lora=True,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
         use_fine_tune=False,
     ).to(device)
 
@@ -147,6 +149,8 @@ def main():
     parser.add_argument("--train_attack_loss", default="l2")
     parser.add_argument("--val_attack_loss", default="ce")
     parser.add_argument("--train_loss", default="l2")
+    parser.add_argument("--lora_rank", type=int, default=4)
+    parser.add_argument("--lora_alpha", type=float, default=8)
     parser.add_argument("--epsilon", type=int, default=4)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
     parser.add_argument("--tensorboard_data_dir", default="tensorboard")
@@ -176,7 +180,7 @@ def main():
     logger.setLevel(logging.INFO)
     logger.handlers = [ch, fh]
 
-    logger.info(f"Training {args.modality.upper()} on {args.dataset_name.upper()}")
+    logger.info(f"Training {args.modality.upper()} on {args.dataset_name.upper()} with epsilon {args.epsilon:.4f}, lora rank {args.lora_rank}, lora alpha {args.lora_alpha}")
 
     raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl = load_label_mapping(args.center_emb, device)
 

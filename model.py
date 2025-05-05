@@ -258,6 +258,7 @@ class UniBindModel(Model):
         super().__init__()
         self.logger = logger if logger else logging.getLogger(__name__)
         self.logger.info("Initializing UniBindModel...")
+        self.logger.info(f"Use LoRa: {use_lora}, LoRa rank: {lora_rank}, LoRa alpha: {lora_alpha}")
 
         self.unibind = UniBind(
             SimpleNamespace(pretrain_weights=pretrain_weights, modality=modality),

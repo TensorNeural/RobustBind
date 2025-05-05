@@ -65,6 +65,8 @@ for dataset in "${!MODALITY_MAP[@]}"; do
     --train_attack_loss "l2" \
     --val_attack_loss "ce" \
     --train_loss "l2" \
+    --lora_rank 5 \
+    --lora_alpha 10 \
     --epsilon "$EPSILON" \
     --tensorboard_data_dir "$TENSORBOARD_DATA_DIR"
 done
