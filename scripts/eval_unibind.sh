@@ -33,7 +33,7 @@ declare -A EMB_SUFFIX_MAP=(
 
 # Common configuration
 OUTPUT_DIR=output
-VAL_BATCH_SIZE=200
+VAL_BATCH_SIZE=70
 NUM_WORKERS=2
 VAL_MAX_SAMPLES=3000
 EPSILONS="2,4"
@@ -52,7 +52,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
     --dataset_name "$dataset" \
     --output_dir "$OUTPUT_DIR" \
     --dataset_root "/home/user/datasets/$dataset" \
-    --val_json "./datasets/$dataset/val_data_1000.json" \
+    --val_json "./datasets/$dataset/val_data_3000.json" \
     --pretrain_weights "$PRETRAIN_WEIGHTS" \
     --center_emb "./centre_embs/${modality}_${suffix}_center_embeddings.pkl" \
     --lora_weights_list $LORA_WEIGHTS_LIST \
