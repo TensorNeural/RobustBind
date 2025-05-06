@@ -174,8 +174,8 @@ class UniBind(nn.Module):
                 vision_embeddings = outputs[ModalityType.VISION]
         elif self.modality == "point":
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
-            pc_embeddings = self.backbone.modality_head_point(pc_embeddings)
-            pc_embeddings = self.backbone.modality_postprocessor_point(pc_embeddings)
+            pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
+            pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_point(pc_embeddings)
             else:

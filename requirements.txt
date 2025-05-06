@@ -27,4 +27,5 @@ transformers
 timm
 tensorboard
 KNN-CUDA@https://github.com/unlimblue/KNN_CUDA/releases/download/0.2/KNN_CUDA-0.2-py3-none-any.whl#sha256=809a43da2eed950c65ba15e355e8cdbf975b6a948dced1f02414f26aba586cd0
-pointnet2-ops@git+https://github.com/TensorNeural/Pointnet2_PyTorch.git@2ba37f1ed5c90666e717a06b5f09209214c11ad9#subdirectory=pointnet2_ops_libtorch_scatter==2.1.2
+pointnet2-ops@git+https://github.com/TensorNeural/Pointnet2_PyTorch.git@2ba37f1ed5c90666e717a06b5f09209214c11ad9#subdirectory=pointnet2_ops_lib
+torch_scatter==2.1.2

@@ -34,8 +34,8 @@ def sample_data(data, sample_size, uniform_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Randomly sample entries from a JSON file.")
-    parser.add_argument("--input_file", type=str, default="./Places365/val_data.json", help="Path to the JSON file.")
-    parser.add_argument("--output_dir", type=str, default="./Places365", help="Directory to save output files.")
+    parser.add_argument("--input_file", type=str, default="./ModelNet40/val_data.json", help="Path to the JSON file.")
+    parser.add_argument("--output_dir", type=str, default="./ModelNet40", help="Directory to save output files.")
     parser.add_argument("--sample_sizes", type=int, nargs='+', default=[500, 1000, 3000, 5000, 8000], help="List of sample sizes.")
     parser.add_argument("--uniform_label", action="store_true", default=False, help="Enable equal sampling from each label.")
     

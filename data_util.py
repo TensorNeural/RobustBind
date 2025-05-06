@@ -23,7 +23,7 @@ MEAN_MAP = {
     "thermal": [0.5],
     "video": [0.48145466, 0.4578275, 0.40821073],
     "audio": [-4.268],
-    "point": [0.0],
+    "point": [0.0, 0.0, 0.0],
 }
 
 STD_MAP = {
@@ -32,7 +32,7 @@ STD_MAP = {
     "thermal": [0.5],
     "video": [0.26862954, 0.26130258, 0.27577711],
     "audio": [9.138],
-    "point": [1.0],
+    "point": [1.0, 1.0, 1.0],
 }
 
 # ===================
@@ -196,6 +196,12 @@ def val_data_loader(
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
 def get_normalization_tensors(modality, device):
-    mean = torch.tensor(MEAN_MAP[modality], device=device).view(1, -1, 1, 1)
-    std = torch.tensor(STD_MAP[modality], device=device).view(1, -1, 1, 1)
-    return mean, std
+    mean = torch.tensor(MEAN_MAP[modality], device=device)
+    std = torch.tensor(STD_MAP[modality], device=device)
+
+    if modality == "point":
+        return mean.view(1, 1, 3), std.view(1, 1, 3)
+    elif modality == "thermal":
+        return mean.view(1, 1, 1), std.view(1, 1, 1)
+    else:
+        return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)

@@ -98,25 +98,25 @@ def evaluate_all_models(args):
         )
         logger.info(f"[ORIGINAL] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}")
 
-    # Robust models (LoRA)
-    for lora_path in args.lora_weights_list:
-        logger.info(f"Evaluating robust model: {lora_path}")
-        model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl, lora_weights=lora_path)
+    # # Robust models (LoRA)
+    # for lora_path in args.lora_weights_list:
+    #     logger.info(f"Evaluating robust model: {lora_path}")
+    #     model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl, lora_weights=lora_path)
 
-        if args.run_clean_eval:
-            acc = evaluate_clean(logger, device, model, val_loader)
-            logger.info(f"[{os.path.basename(lora_path)}] Clean acc = {acc:.4f}")
+    #     if args.run_clean_eval:
+    #         acc = evaluate_clean(logger, device, model, val_loader)
+    #         logger.info(f"[{os.path.basename(lora_path)}] Clean acc = {acc:.4f}")
 
-        for eps in eps_list:
-            acc = evaluate_two_stage(
-                logger, device, model, val_loader,
-                attack_loss_type=args.val_attack_loss,
-                iteration_count=args.two_stage_iters,
-                epsilon=eps,
-                mean=mean,
-                std=std
-            )
-            logger.info(f"[{os.path.basename(lora_path)}] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}")
+    #     for eps in eps_list:
+    #         acc = evaluate_two_stage(
+    #             logger, device, model, val_loader,
+    #             attack_loss_type=args.val_attack_loss,
+    #             iteration_count=args.two_stage_iters,
+    #             epsilon=eps,
+    #             mean=mean,
+    #             std=std
+    #         )
+    #         logger.info(f"[{os.path.basename(lora_path)}] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}")
 
     dist.destroy_process_group()
 

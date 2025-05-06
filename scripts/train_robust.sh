@@ -2,8 +2,8 @@
 set -e
 
 declare -A MODALITY_MAP=(
-#   [ImageNet-1K]=image
-  [Places365]=image
+  [ImageNet-1K]=image
+#   [Places365]=image
 #   [ModalNet40]=point
 #   [ShapeNet]=point
 #   [ESC-50]=audio
@@ -60,7 +60,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
     --train_batch_size "$TRAIN_BATCH_SIZE" \
     --val_batch_size "$VAL_BATCH_SIZE" \
     --num_workers "$NUM_WORKERS" \
-    # --train_max_samples "$TRAIN_MAX_SAMPLES" \
+    --train_max_samples "$TRAIN_MAX_SAMPLES" \
     --val_max_samples "$VAL_MAX_SAMPLES" \
     --train_attack_loss "l2" \
     --val_attack_loss "ce" \

@@ -58,6 +58,7 @@ class PGDAttack(Attack):
         assert self.loss_type in ("ce", "l2")
 
     def perturb(self, x, y=None, emb_orig=None):
+        # torch.autograd.set_detect_anomaly(True)
         x_adv = x.clone().detach()
 
         if self.loss_type == "ce":
@@ -86,21 +87,29 @@ class PGDAttack(Attack):
                 x_adv = random_start_l1(x, self.epsilon, self.clamp_min, self.clamp_max)
 
         for step in range(self.steps):
+            # x_adv = x_adv.detach().clone().requires_grad_(True)
+            # model_input = x_adv.clone().detach()
+            # assert not model_input.requires_grad
             x_adv.requires_grad_(True)
 
             if self.loss_type == "ce":
+                # logits, _ = self.model(model_input, mode=ForwardMode.LOGITS)
                 logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
+
                 loss = ce_loss(logits, y)
 
                 with torch.no_grad():
+                    # acc = self._acc(model_input, y)
                     acc = self._acc(x_adv, y)
                 self.logger.debug(f"[PGDAttack] Step{step} accuracy: {acc.item() * 100:.4f}%")
             elif self.loss_type == "l2":
                 with ProfileModelMemory(self.model, self.logger):
+                    # x_adv_emb = self.model(model_input, mode=ForwardMode.EMBEDDINGS)
                     x_adv_emb = self.model(x_adv, mode=ForwardMode.EMBEDDINGS)
                 loss = l2_loss(x_adv_emb, emb_orig)
 
                 with torch.no_grad():
+                    # cos_sim = self._cos_sim(model_input, emb_orig)
                     cos_sim = self._cos_sim(x_adv, emb_orig)
                 self.logger.debug(f"[PGDAttack] Step{step} cosine similarity: {cos_sim.item():.4f}")
             else:
