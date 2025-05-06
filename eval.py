@@ -69,7 +69,8 @@ def evaluate_two_stage(logger, device, model: UniBindModel, data_loader, attack_
         eps=epsilon,
         loss=attack_loss_type,
         device=device,
-        logger=logger
+        logger=logger,
+        verbose=True,
     )
 
     model.eval()
