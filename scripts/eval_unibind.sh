@@ -3,7 +3,7 @@ set -e
 
 declare -A MODALITY_MAP=(
   [ImageNet-1K]=image
-#   [Places365]=image
+  [Places365]=image
 #   [ModalNet40]=point
 #   [ShapeNet]=point
 #   [ESC-50]=audio
@@ -33,9 +33,9 @@ declare -A EMB_SUFFIX_MAP=(
 
 # Common configuration
 OUTPUT_DIR=output
-VAL_BATCH_SIZE=64
+VAL_BATCH_SIZE=70
 NUM_WORKERS=2
-VAL_MAX_SAMPLES=10
+VAL_MAX_SAMPLES=3000
 EPSILONS="2,4"
 TWO_STAGE_ITERS=100
 PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten.pt"
@@ -52,7 +52,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
     --dataset_name "$dataset" \
     --output_dir "$OUTPUT_DIR" \
     --dataset_root "/home/user/datasets/$dataset" \
-    --val_json "./datasets/$dataset/val_data.json" \
+    --val_json "./datasets/$dataset/val_data_3000.json" \
     --pretrain_weights "$PRETRAIN_WEIGHTS" \
     --center_emb "./centre_embs/${modality}_${suffix}_center_embeddings.pkl" \
     --lora_weights_list $LORA_WEIGHTS_LIST \

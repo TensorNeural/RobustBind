@@ -294,13 +294,11 @@ class UniBindModel(Model):
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-    def _logits(self, x):
+    def _logits(self, x, temperature=1000.0):
         embeddings = self._encode(x)
-        with GpuMemoryTracker(self.logger):
-            similarity = embeddings @ self.centre_embeddings.t()
-        with GpuMemoryTracker(self.logger):
-            class_scores = torch_scatter.scatter_logsumexp(similarity, self.centre_label_indices, dim=1)
-        return class_scores, similarity
+        similarity = embeddings @ self.centre_embeddings.t()
+        class_raw_scores = torch_scatter.scatter_logsumexp(similarity * temperature, self.centre_label_indices, dim=1)
+        return class_raw_scores / temperature, similarity
 
     def _encode(self, x):
         modality = MODALITY_MAP[self.modality]
