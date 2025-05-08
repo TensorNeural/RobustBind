@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
+
 import os
 import torch
 from tqdm import tqdm
 import argparse
+
 
 def parse_off(path):
     with open(path, "r") as f:
@@ -10,6 +13,7 @@ def parse_off(path):
         lines = lines[1:]
     else:
         lines[0] = lines[0][3:]
+
     try:
         n_vertices = int(lines[0].split()[0])
         vertices = [list(map(float, line.strip().split())) for line in lines[1:1 + n_vertices]]
@@ -17,25 +21,27 @@ def parse_off(path):
     except Exception as e:
         raise ValueError(f"Error parsing {path}: {e}")
 
-def normalize_pointcloud(pc: torch.Tensor, num_points: int = 8192) -> torch.Tensor:
-    if pc.shape[0] == num_points:
+
+def normalize_pointcloud(pc: torch.Tensor, num_points: int = 8192):
+    n = pc.shape[0]
+    if n == num_points:
         return pc
-    elif pc.shape[0] > num_points:
-        indices = torch.randperm(pc.shape[0])[:num_points]
+    elif n > num_points:
+        indices = torch.randperm(n)[:num_points]
         return pc[indices]
     else:
-        pad = num_points - pc.shape[0]
-        extra = pc[torch.randint(0, pc.shape[0], (pad,))]
-        return torch.cat([pc, extra], dim=0)
+        padding = torch.zeros((num_points - n, 3), dtype=pc.dtype)
+        return torch.cat([pc, padding], dim=0)
 
-def convert_off_to_pt(dataset_root: str):
+
+def convert_off_to_pt(dataset_root: str, num_points: int = 8192):
     source_root = os.path.join(dataset_root, "ModelNet40")
     output_train = os.path.join(dataset_root, "train")
     output_val = os.path.join(dataset_root, "val")
     os.makedirs(output_train, exist_ok=True)
     os.makedirs(output_val, exist_ok=True)
 
-    print(f"📦 Converting .off → .pt (shape: [8192, 3])")
+    print(f"📦 Converting .off → .pt (shape: [{num_points}, 3])")
 
     for class_name in sorted(os.listdir(source_root)):
         class_path = os.path.join(source_root, class_name)
@@ -49,23 +55,27 @@ def convert_off_to_pt(dataset_root: str):
 
             files = sorted(f for f in os.listdir(input_split) if f.endswith(".off"))
             count = 0
-            for i, file in enumerate(tqdm(files, desc=f"{class_name}/{split}", leave=False)):
+            for file in tqdm(files, desc=f"{class_name}/{split}", leave=False):
                 input_path = os.path.join(input_split, file)
                 try:
                     pc_tensor = parse_off(input_path)
-                    pc_tensor = normalize_pointcloud(pc_tensor, num_points=8192)
+                    pc_tensor = normalize_pointcloud(pc_tensor, num_points=num_points)
+
                     out_name = f"{class_name}_{count:04d}.pt"
                     torch.save(pc_tensor, os.path.join(output_split, out_name))
                     count += 1
                 except Exception as e:
                     print(f"⚠️ Skipped {input_path}: {e}")
 
-            print(f"✅ {split} - {class_name}: saved {count} .pt files")
+            print(f"✅ {split} - {class_name}: saved {count} samples")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_root", type=str, required=True,
                         help="Path to directory containing ModelNet40/")
+    parser.add_argument("--num_points", type=int, default=8192,
+                        help="Number of points to normalize to")
     args = parser.parse_args()
 
-    convert_off_to_pt(args.dataset_root)
+    convert_off_to_pt(args.dataset_root, args.num_points)

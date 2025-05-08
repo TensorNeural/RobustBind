@@ -4,6 +4,7 @@ import torch
 import logging
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from datetime import datetime
 
 from model import UniBindModel
 from eval import evaluate_clean, evaluate_two_stage
@@ -56,9 +57,11 @@ def evaluate_all_models(args):
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, args.modality, args.dataset_name)
+    args.output_dir = os.path.join(args.output_dir, args.modality, args.dataset_name, "eval")
     os.makedirs(args.output_dir, exist_ok=True)
-    log_path = os.path.join(args.output_dir, f"eval_rank{rank}.log")
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
 
     logger = setup_logger(rank, log_path)
     logger.info(f"Evaluating {args.modality.upper()} on {args.dataset_name.upper()}")

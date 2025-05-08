@@ -317,12 +317,15 @@ class ImageBindModel(nn.Module):
             embed_dim, num_blocks, num_heads, pre_transformer_ln, add_bias_kv, drop_path,
         ):
             attention = FlashAttention2 if use_flash_attn else MultiheadAttention
-            return SimpleTransformer(
+            attn_target = partial(
+                attention,
                 embed_dim=embed_dim,
-                num_blocks=num_blocks,
-                ffn_dropout_rate=0.0,
-                drop_path_rate=drop_path,
-                attn_target=partial(
+                num_heads=num_heads,
+                bias=True,
+                add_bias_kv=add_bias_kv,
+            )
+            if use_flash_attn:
+                attn_target = partial(
                     attention,
                     embed_dim=embed_dim,
                     num_heads=num_heads,
@@ -331,7 +334,13 @@ class ImageBindModel(nn.Module):
                     use_lora=use_lora,
                     lora_rank=lora_rank,
                     lora_alpha=lora_alpha,
-                ),
+                )
+            return SimpleTransformer(
+                embed_dim=embed_dim,
+                num_blocks=num_blocks,
+                ffn_dropout_rate=0.0,
+                drop_path_rate=drop_path,
+                attn_target=attn_target,
                 pre_transformer_layer=nn.Sequential(
                     nn.LayerNorm(embed_dim, eps=1e-6)
                     if pre_transformer_ln

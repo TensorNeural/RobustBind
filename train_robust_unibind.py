@@ -164,11 +164,11 @@ def main():
     dist.init_process_group("nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, args.modality, args.dataset_name)
+    args.output_dir = os.path.join(args.output_dir, args.modality, args.dataset_name, "train")
     os.makedirs(args.output_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(args.output_dir, f"train_rank{rank}_{timestamp}.log")
+    log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
 
     formatter = RelativePathFormatter(rank, '[RANK %(rank)d] %(asctime)s - %(relativepath)s:%(lineno)d - [%(levelname)s] - %(message)s')
     fh = logging.FileHandler(log_path)

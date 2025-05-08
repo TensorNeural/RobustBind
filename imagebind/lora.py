@@ -1,7 +1,7 @@
 import math
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 class LoRALinear(nn.Module):
     def __init__(self, base_layer: nn.Linear, rank: int = 4, alpha: float = 8.0):
@@ -17,7 +17,7 @@ class LoRALinear(nn.Module):
 
     def forward(self, x):
         base_out = self.base_layer(x)
-        with autocast(enabled=False):
+        with autocast('cuda', enabled=False):
             lora_x = x.to(torch.float32)
             lora_down_out = self.lora_down(lora_x)
             lora_down_out.requires_grad_(True)

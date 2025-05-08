@@ -66,9 +66,11 @@ def train_epoch(
         with GpuMemoryTracker(logger):
             optimizer.zero_grad()
         
+        adv_inp.requires_grad = True
         if train_loss_type == 'l2':
             with ProfileModelMemory(model_train, logger):
                 # register_forward_hooks(model_train, logger)
+                # register_backward_hooks(model_train, logger)
                 emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
 
             with GpuMemoryTracker(logger):
