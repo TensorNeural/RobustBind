@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 from models.pointbert.dvae import Group
 from models.pointbert.dvae import Encoder
 from models.pointbert.logger import print_log

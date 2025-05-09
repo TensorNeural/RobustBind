@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 
 from .checkpoint import get_missing_parameters_message, get_unexpected_parameters_message
 from utils.logger import *

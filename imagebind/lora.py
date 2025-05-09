@@ -1,7 +1,7 @@
 import math
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 class LoRALinear(nn.Module):
     def __init__(self, base_layer: nn.Linear, rank: int = 4, alpha: float = 8.0):
@@ -17,7 +17,7 @@ class LoRALinear(nn.Module):
 
     def forward(self, x):
         base_out = self.base_layer(x)
-        with autocast(enabled=False):
+        with autocast('cuda', enabled=False):
             lora_x = x.to(torch.float32)
             lora_down_out = self.lora_down(lora_x)
             lora_down_out.requires_grad_(True)
@@ -88,6 +88,28 @@ def lora_load_state_dict(model, state_dict, allow_missing_substrings=("lora_", "
     for k in missing_keys:
         if not any(substr in k for substr in allow_missing_substrings):
             raise ValueError(f"Unexpected missing key: {k}")
+
+def load_lora_weights(model, checkpoint_path):
+    """
+    Loads LoRA adapter weights into the model.
+    Ensures all expected LoRA weights are present, and no unexpected keys exist.
+
+    Args:
+        model (nn.Module): Model with LoRA layers already initialized.
+        checkpoint_path (str): Path to checkpoint containing only lora_up / lora_down weights.
+    """
+    lora_state = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
+    missing_keys, unexpected_keys = model.load_state_dict(lora_state, strict=False)
+
+    # Expected LoRA keys in the model
+    expected_lora_keys = [k for k in model.state_dict().keys() if "lora_" in k]
+    missing_lora_keys = [k for k in expected_lora_keys if k in missing_keys]
+
+    if missing_lora_keys:
+        raise ValueError(f"Missing expected LoRA keys: {missing_lora_keys}")
+    if unexpected_keys:
+        raise ValueError(f"Unexpected keys in LoRA checkpoint: {unexpected_keys}")
+
 
 def save_lora_weights(model, path, allowed_substrings=("lora_up", "lora_down")):
     """

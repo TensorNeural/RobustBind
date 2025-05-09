@@ -1,3 +1,5 @@
+import torch
+
 def register_forward_hooks(model, logger):
     def make_hook(name):
         def hook(module, input, output):

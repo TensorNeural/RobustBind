@@ -9,6 +9,7 @@ from model import Model, ForwardMode
 from meter import AverageMeter
 from transform import unnormalize_inplace, normalize_inplace
 from loss import l2_loss, ce_loss
+import torch.distributed as dist
 
 def train_epoch(
     logger,
@@ -33,8 +34,10 @@ def train_epoch(
 ):
     epoch_start_time = time.time()
     step_base = epoch * len(data_loader)
+    total_samples = 0
 
     for batch_idx, (inp, lbl) in enumerate(data_loader):
+        total_samples += inp.size(0)
         batch_start_time = time.time()
         step_total = step_base + batch_idx + 1
         logger.info(f"[TRAIN] Epoch {epoch+1}/{total_epochs}, batch {batch_idx+1}/{len(data_loader)}, batch size={inp.size(0)}")
@@ -66,9 +69,11 @@ def train_epoch(
         with GpuMemoryTracker(logger):
             optimizer.zero_grad()
         
+        adv_inp.requires_grad = True
         if train_loss_type == 'l2':
             with ProfileModelMemory(model_train, logger):
                 # register_forward_hooks(model_train, logger)
+                # register_backward_hooks(model_train, logger)
                 emb_adv = model_train(adv_inp, mode=ForwardMode.EMBEDDINGS)
 
             with GpuMemoryTracker(logger):
@@ -164,9 +169,14 @@ def train_epoch(
 
             batch_end_time = time.time()
             logger.info(f"Batch {batch_idx+1} time: {batch_end_time - batch_start_time:.2f} seconds")
+            logger.info(f"Samples processed: {total_samples}")
+
+    sample_tensor = torch.tensor(total_samples, dtype=torch.float64, device=device)
+    dist.all_reduce(sample_tensor, op=dist.ReduceOp.SUM)
 
     epoch_end_time = time.time()
     logger.info(f"Epoch {epoch+1}/{total_epochs} training time: {epoch_end_time - epoch_start_time:.2f} seconds")
+    logger.info(f"Total samples processed: {sample_tensor.item()}")
 
 def predict(logits):
     return logits.argmax(dim=1)

@@ -1,16 +1,14 @@
 import torch
 from torch import nn
 import torch.nn.init as init
-import torch.nn.functional as F
 from models import PointBind_models
 from imagebind.imagebind_model import ModalityType
 import logging
 from types import SimpleNamespace
 import torch_scatter
 import abc
-from perf.profiling import GpuMemoryTracker
 from enum import Enum, auto
-from imagebind.lora import lora_load_state_dict, save_lora_weights
+from imagebind.lora import lora_load_state_dict, save_lora_weights, load_lora_weights
 
 MODALITY_TO_MLP = {
     "image":   "mlp_for_image",
@@ -174,8 +172,8 @@ class UniBind(nn.Module):
                 vision_embeddings = outputs[ModalityType.VISION]
         elif self.modality == "point":
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
-            pc_embeddings = self.backbone.modality_head_point(pc_embeddings)
-            pc_embeddings = self.backbone.modality_postprocessor_point(pc_embeddings)
+            pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
+            pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_point(pc_embeddings)
             else:
@@ -204,6 +202,11 @@ class UniBind(nn.Module):
                 self.logger.info(f"[load_fine_tuned_weights] Loaded '{mlp_attr}' from '{checkpoint_path}'.")
             else:
                 self.logger.warning(f"[load_fine_tuned_weights] This model has no '{mlp_attr}' attribute. Skipping.")
+
+    def load_lora_weights(self, checkpoint_path: str):
+        self.logger.info(f"[load_lora_weights] Loading LoRA weights from '{checkpoint_path}'...")
+        load_lora_weights(self.backbone, checkpoint_path)
+        self.logger.info("[load_lora_weights] Loaded LoRA weights.")
 
     def save_lora_weights(self, checkpoint_path: str):
         self.logger.info(f"[save_lora_weights] Saving LoRA weights to '{checkpoint_path}'...")
@@ -245,7 +248,6 @@ class UniBindModel(Model):
         centre_embeddings,
         centre_labels,
         label_to_index,
-        index_to_label,
         logger=None,
         use_flash_attention=False,
         use_lora=False,
@@ -274,7 +276,6 @@ class UniBindModel(Model):
 
         self.modality = modality
         self.label_to_index_map = label_to_index
-        self.index_to_label_map = index_to_label
 
         self.logger.info("Storing centre embeddings on device...")
         self.centre_embeddings = centre_embeddings.to(device)
@@ -309,6 +310,10 @@ class UniBindModel(Model):
     def save_lora_weights(self, path: str):
         self.logger.info(f"[save_lora_weights] Saving LoRA weights to '{path}'...")
         self.unibind.save_lora_weights(path)
+
+    def load_lora_weights(self, path: str):
+        self.logger.info(f"[load_lora_weights] Loading LoRA weights from '{path}'...")
+        self.unibind.load_lora_weights(path)
 
     def save_fine_tuned_weights(self, path: str):
         self.logger.info(f"[save_fine_tuned_weights] Saving fine tuned weights to '{path}'...")

@@ -16,7 +16,7 @@ from pytorchvideo import transforms as pv_transforms
 from pytorchvideo.data.clip_sampling import ConstantClipsPerVideoSampler
 from pytorchvideo.data.encoded_video import EncodedVideo
 from torchvision import transforms
-from torchvision.transforms._transforms_video import NormalizeVideo
+from pytorchvideo.transforms import Normalize
 
 from imagebind.multimodal_preprocessors import SimpleTokenizer
 
@@ -326,7 +326,7 @@ def load_and_transform_video_data(
     video_transform = transforms.Compose(
         [
             pv_transforms.ShortSideScale(224),
-            NormalizeVideo(
+            Normalize(
                 mean=(0.48145466, 0.4578275, 0.40821073),
                 std=(0.26862954, 0.26130258, 0.27577711),
             ),

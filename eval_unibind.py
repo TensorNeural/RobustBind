@@ -4,6 +4,8 @@ import torch
 import logging
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from datetime import datetime
+import gc
 
 from model import UniBindModel
 from eval import evaluate_clean, evaluate_two_stage
@@ -31,7 +33,7 @@ def setup_logger(rank, output_path):
     return logger
 
 
-def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl, lora_weights=None):
+def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=False):
     model = UniBindModel(
         device=device,
         pretrain_weights=args.pretrain_weights,
@@ -39,11 +41,9 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl,
         centre_embeddings=raw_emb,
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
-        use_lora=(lora_weights is not None),
-        lora_weights=lora_weights
+        use_lora=use_lora
     )
     model.to(device)
     return model
@@ -56,67 +56,106 @@ def evaluate_all_models(args):
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, args.modality, args.dataset_name)
+    args.output_dir = os.path.join(args.output_dir, "eval", args.modality, args.dataset_name)
     os.makedirs(args.output_dir, exist_ok=True)
-    log_path = os.path.join(args.output_dir, f"eval_rank{rank}.log")
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
 
     logger = setup_logger(rank, log_path)
     logger.info(f"Evaluating {args.modality.upper()} on {args.dataset_name.upper()}")
 
-    raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl = load_label_mapping(args.center_emb, device)
+    raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
 
-    val_loader = val_data_loader(
+    # Load clean val loader if requested
+    clean_loader = None
+    if args.run_clean_eval:
+        clean_loader = val_data_loader(
+            modality=args.modality,
+            dataset_root=args.dataset_root,
+            val_json=args.clean_val_json,
+            label_to_index=lbl_to_idx,
+            batch_size=args.clean_val_batch_size,
+            num_workers=args.num_workers,
+            max_samples=args.clean_val_max_samples
+        )
+
+    # Load attack val loader
+    attack_loader = val_data_loader(
         modality=args.modality,
         dataset_root=args.dataset_root,
-        val_json=args.val_json,
+        val_json=args.attack_val_json,
         label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
-        batch_size=args.val_batch_size,
+        batch_size=args.attack_val_batch_size,
         num_workers=args.num_workers,
-        max_samples=args.val_max_samples
+        max_samples=args.attack_val_max_samples
     )
 
     mean, std = get_normalization_tensors(args.modality, device)
     eps_list = [float(e.strip()) / 255.0 for e in args.epsilons.split(",")]
 
+    final_results = []
+
     # Original model (no LoRA)
     logger.info("Evaluating original (pretrained-only) model ...")
-    model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl)
+    model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx)
 
     if args.run_clean_eval:
-        acc = evaluate_clean(logger, device, model, val_loader)
-        logger.info(f"[ORIGINAL] Clean acc = {acc:.4f}")
+        acc = evaluate_clean(logger, device, model, clean_loader)
+        entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
+        logger.info(entry)
+        final_results.append(entry)
 
     for eps in eps_list:
         acc = evaluate_two_stage(
-            logger, device, model, val_loader,
+            logger, device, model, attack_loader,
             attack_loss_type=args.val_attack_loss,
             iteration_count=args.two_stage_iters,
             epsilon=eps,
             mean=mean,
             std=std
         )
-        logger.info(f"[ORIGINAL] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}")
+        entry = f"[ORIGINAL] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}"
+        logger.info(entry)
+        final_results.append(entry)
 
+    del model
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    model_attack = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=True)
     # Robust models (LoRA)
     for lora_path in args.lora_weights_list:
         logger.info(f"Evaluating robust model: {lora_path}")
-        model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl, lora_weights=lora_path)
+        model_attack.load_lora_weights(lora_path)
 
         if args.run_clean_eval:
-            acc = evaluate_clean(logger, device, model, val_loader)
-            logger.info(f"[{os.path.basename(lora_path)}] Clean acc = {acc:.4f}")
+            acc = evaluate_clean(logger, device, model_attack, clean_loader)
+            entry = f"[{os.path.basename(lora_path)}] Clean acc = {acc:.4f}"
+            logger.info(entry)
+            final_results.append(entry)
 
         for eps in eps_list:
             acc = evaluate_two_stage(
-                logger, device, model, val_loader,
+                logger, device, model_attack, attack_loader,
                 attack_loss_type=args.val_attack_loss,
                 iteration_count=args.two_stage_iters,
                 epsilon=eps,
                 mean=mean,
                 std=std
             )
-            logger.info(f"[{os.path.basename(lora_path)}] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}")
+            entry = f"[{os.path.basename(lora_path)}] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}"
+            logger.info(entry)
+            final_results.append(entry)
+
+    # Gather and save final results on rank 0
+    all_results = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(all_results, final_results)
+    
+    logger.info("Final results:")
+    for rank_results in all_results:
+        for line in rank_results:
+            logger.info(line)
 
     dist.destroy_process_group()
 
@@ -127,13 +166,16 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_name", required=True)
     parser.add_argument("--output_dir", default="output")
     parser.add_argument("--dataset_root", required=True)
-    parser.add_argument("--val_json", required=True)
+    parser.add_argument("--clean_val_json", required=True)
+    parser.add_argument("--attack_val_json", required=True)
+    parser.add_argument("--clean_val_batch_size", type=int, default=64)
+    parser.add_argument("--attack_val_batch_size", type=int, default=64)
+    parser.add_argument("--clean_val_max_samples", type=int, default=3000)
+    parser.add_argument("--attack_val_max_samples", type=int, default=3000)
     parser.add_argument("--pretrain_weights", required=True)
     parser.add_argument("--center_emb", required=True)
     parser.add_argument("--lora_weights_list", nargs="+", default=[])
-    parser.add_argument("--val_batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--val_max_samples", type=int, default=3000)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
     parser.add_argument("--val_attack_loss", type=str, default="ce")
     parser.add_argument("--epsilons", type=str, default="2,4", help="Comma-separated epsilon values (e.g. 2,4)")
