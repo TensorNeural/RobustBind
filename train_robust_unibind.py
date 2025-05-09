@@ -1,4 +1,4 @@
-import argparse, os, time, logging
+import argparse, os, logging
 from datetime import datetime
 import torch
 import torch.distributed as dist
@@ -6,6 +6,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
+import shutil
 
 from model import UniBindModel
 from training import train_epoch
@@ -31,27 +32,30 @@ class RelativePathFormatter(logging.Formatter):
         return super().format(record)
 
 
-def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl, train_loader, val_loader, mean, std):
+def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader):
+    train_mean, train_std = get_normalization_tensors(args.train_modality, device)
+    val_mean, val_std = get_normalization_tensors(args.val_modality, device)
+
+    logger.info(f"Loading model for training: {args.train_modality.upper()}")
     model_original = UniBindModel(
         device=device,
         pretrain_weights=args.pretrain_weights,
-        modality=args.modality,
+        modality=args.train_modality,
         centre_embeddings=raw_emb,
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
     ).to(device)
+    model_original.eval()
 
     model_train = UniBindModel(
         device=device,
         pretrain_weights=args.pretrain_weights,
-        modality=args.modality,
+        modality=args.train_modality,
         centre_embeddings=raw_emb,
         centre_labels=raw_lbls,
         label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
         use_lora=True,
@@ -62,11 +66,27 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
 
     model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
 
+    model_val = UniBindModel(
+        device=device,
+        pretrain_weights=args.pretrain_weights,
+        modality=args.val_modality,
+        centre_embeddings=raw_emb,
+        centre_labels=raw_lbls,
+        label_to_index=lbl_to_idx,
+        logger=logger,
+        use_flash_attention=args.use_flash_attention,
+        use_lora=True,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        use_fine_tune=False
+    ).to(device)
+    model_val.eval()
+
     train_attack = PGDAttack(
         logger,
-        AttackModel(model_train, mean, std),
+        AttackModel(model_train, train_mean, train_std),
         epsilon=args.epsilon,
-        alpha=1/255,
+        alpha=1 / 255,
         steps=10,
         norm='linf',
         random_start=True,
@@ -76,7 +96,7 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
     )
 
     eval_attack = APGDAttack(
-        AttackModel(model_train, mean, std),
+        AttackModel(model_val, val_mean, val_std),
         norm='Linf',
         n_restarts=1,
         n_iter=50,
@@ -87,13 +107,22 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
     )
 
     optimizer = AdamW([p for p in model_train.parameters() if p.requires_grad], lr=3e-3, weight_decay=1e-4)
-    scheduler = OneCycleLR(optimizer, max_lr=3e-3, steps_per_epoch=len(train_loader), epochs=2, pct_start=0.1, div_factor=25.0, final_div_factor=1e4)
+    logger.info("Steps per epoch: %d", len(train_loader))
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=3e-3,
+        steps_per_epoch=len(train_loader),
+        epochs=2,
+        pct_start=0.1,
+        div_factor=25.0,
+        final_div_factor=1e4
+    )
 
     best_acc = -1.0
     meters = {k: AverageMeter() for k in ["loss", "cos_sim", "rcos_sim", "acc", "racc"]}
 
     for epoch in range(2):
-        logger.info(f"Epoch {epoch+1}/2")
+        logger.info(f"Epoch {epoch + 1}/2")
         train_loader.sampler.set_epoch(epoch)
 
         train_epoch(
@@ -101,8 +130,8 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
             device=device,
             model_train=model_train,
             model_original=model_original,
-            mean=mean,
-            std=std,
+            mean=train_mean,
+            std=train_std,
             data_loader=train_loader,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -118,14 +147,25 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
             writer=writer
         )
 
-        acc = evaluate_robust_one_stage(logger, device, model_train, val_loader, eval_attack, mean, std)
-        logger.info(f"[Epoch {epoch+1}] robust acc = {acc:.4f}")
-
+        # === Save LoRA weights (rank 0 only)
+        lora_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_lora.pt")
         if dist.get_rank() == 0:
-            model_train.module.save_lora_weights(os.path.join(args.output_dir, f"epoch_{epoch+1}_lora.pt"))
-            if acc > best_acc:
-                best_acc = acc
-                model_train.module.save_lora_weights(os.path.join(args.output_dir, "best_lora_weights.pt"))
+            model_train.module.save_lora_weights(lora_path)
+        
+        torch.cuda.empty_cache()
+        dist.barrier()
+
+        # === Reinitialize model for validation modality and load weights
+        logger.info(f"[EPOCH {epoch + 1}] Loading LoRA weights for validation: {args.val_modality.upper()}")
+        model_val.load_lora_weights(lora_path)
+
+        acc = evaluate_robust_one_stage(logger, device, model_val, val_loader, eval_attack, val_mean, val_std)
+        logger.info(f"[Epoch {epoch + 1}] robust acc on {args.val_modality.upper()} = {acc:.4f}")
+
+        if dist.get_rank() == 0 and acc > best_acc:
+            best_acc = acc
+            best_lora_path = os.path.join(args.output_dir, "best_lora_weights.pt")
+            shutil.copyfile(lora_path, best_lora_path)
 
     writer.close()
     logger.info(f"Best robust accuracy: {best_acc:.4f}")
@@ -133,10 +173,13 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
 
 def main():
     parser = argparse.ArgumentParser("UniBind Training")
-    parser.add_argument("--modality", required=True)
-    parser.add_argument("--dataset_name", required=True)
-    parser.add_argument("--output_dir", default="output")
-    parser.add_argument("--dataset_root", required=True)
+    parser.add_argument("--model_type", required=True)
+    parser.add_argument("--train_modality", required=True)
+    parser.add_argument("--val_modality", required=True)
+    parser.add_argument("--train_dataset_name", required=True)
+    parser.add_argument("--val_dataset_name", required=True)
+    parser.add_argument("--train_dataset_root", required=True)
+    parser.add_argument("--val_dataset_root", required=True)
     parser.add_argument("--train_json", required=True)
     parser.add_argument("--val_json", required=True)
     parser.add_argument("--pretrain_weights", required=True)
@@ -154,9 +197,8 @@ def main():
     parser.add_argument("--epsilon", type=int, default=4)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
     parser.add_argument("--tensorboard_data_dir", default="tensorboard")
+    parser.add_argument("--output_dir", default="output")
     args = parser.parse_args()
-
-    args.epsilon = args.epsilon / 255.0
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
@@ -164,8 +206,10 @@ def main():
     dist.init_process_group("nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, args.modality, args.dataset_name, "train")
+    args.output_dir = os.path.join(args.output_dir, "train", args.model_type, f"{args.train_dataset_name}__{args.val_dataset_name}", f"eps{args.epsilon}")
     os.makedirs(args.output_dir, exist_ok=True)
+
+    args.epsilon = args.epsilon / 255.0
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
@@ -180,37 +224,37 @@ def main():
     logger.setLevel(logging.INFO)
     logger.handlers = [ch, fh]
 
-    logger.info(f"Training {args.modality.upper()} on {args.dataset_name.upper()} with epsilon {args.epsilon:.4f}, lora rank {args.lora_rank}, lora alpha {args.lora_alpha}")
+    logger.info(f"[Train: {args.train_modality.upper()} | {args.train_dataset_name}] => [Val: {args.val_modality.upper()} | {args.val_dataset_name}]")
 
-    raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl = load_label_mapping(args.center_emb, device)
+    raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
+    train_lbl_to_idx = None
+    if args.train_loss == "ce":
+        train_lbl_to_idx = lbl_to_idx
 
     train_loader = train_data_loader(
-        modality=args.modality,
-        dataset_root=args.dataset_root,
+        modality=args.train_modality,
+        dataset_root=args.train_dataset_root,
         train_json=args.train_json,
-        label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
+        label_to_index=train_lbl_to_idx,
         batch_size=args.train_batch_size,
         num_workers=args.num_workers,
         max_samples=args.train_max_samples
     )
 
     val_loader = val_data_loader(
-        modality=args.modality,
-        dataset_root=args.dataset_root,
+        modality=args.val_modality,
+        dataset_root=args.val_dataset_root,
         val_json=args.val_json,
         label_to_index=lbl_to_idx,
-        index_to_label=idx_to_lbl,
         batch_size=args.val_batch_size,
         num_workers=args.num_workers,
         max_samples=args.val_max_samples
     )
 
-    mean, std = get_normalization_tensors(args.modality, device)
     tb_path = os.path.join(args.output_dir, args.tensorboard_data_dir, f"rank{rank}", timestamp)
     writer = SummaryWriter(log_dir=tb_path)
 
-    train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl, train_loader, val_loader, mean, std)
+    train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader)
 
     dist.destroy_process_group()
 

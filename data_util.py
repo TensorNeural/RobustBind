@@ -42,11 +42,10 @@ NUM_FRAMES = 2
 # Dataset
 # ===================
 class JsonDataset(Dataset):
-    def __init__(self, dataset_root, data_json_path, transform, label_to_index=None, index_to_label=None, max_samples=None, debug=False):
+    def __init__(self, dataset_root, data_json_path, transform, label_to_index=None, max_samples=None, debug=False):
         self.root_dir = dataset_root
         self.transform = transform
         self.label_to_index_fn = label_to_index
-        self.index_to_label_fn = index_to_label
 
         with open(data_json_path, "r") as f:
             self.samples = [(item["data"], item["label"]) for item in json.load(f)]
@@ -363,22 +362,22 @@ def load_label_mapping(center_emb_path, device):
     return raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl
 
 def train_data_loader(
-    modality, dataset_root, train_json, label_to_index, index_to_label,
+    modality, dataset_root, train_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False
 ):
     transform = get_transform_fn(modality)
-    dataset = JsonDataset(dataset_root, train_json, transform, label_to_index, index_to_label, max_samples, debug)
+    dataset = JsonDataset(dataset_root, train_json, transform, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=True)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
 
 def val_data_loader(
-    modality, dataset_root, val_json, label_to_index, index_to_label,
+    modality, dataset_root, val_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False
 ):
     transform = get_transform_fn(modality)
-    dataset = JsonDataset(dataset_root, val_json, transform, label_to_index, index_to_label, max_samples, debug)
+    dataset = JsonDataset(dataset_root, val_json, transform, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=False)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
 
 def get_normalization_tensors(modality, device):
     mean = torch.tensor(MEAN_MAP[modality], device=device)

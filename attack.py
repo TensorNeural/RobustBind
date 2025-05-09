@@ -63,14 +63,12 @@ class PGDAttack(Attack):
         if self.loss_type == "ce":
             if y is None:
                 raise ValueError("Cross-entropy loss requires labels.")
-            
             with torch.no_grad():
                 acc = self._acc_with_x(x, y)
             self.logger.info(f"[PGDAttack] Initial accuracy: {acc.item() * 100:.4f}%")
         elif self.loss_type == "l2":
             if emb_orig is None:
                 raise ValueError("L2 loss requires original embeddings.")
-            
             with torch.no_grad():
                 cos_sim = self._cos_sim_with_x(x, emb_orig)
             self.logger.info(f"[PGDAttack] Initial cosine similarity: {cos_sim.item():.4f}")
@@ -107,7 +105,7 @@ class PGDAttack(Attack):
             else:
                 raise ValueError(f"Invalid loss type: {self.loss_type}")
 
-            grad = torch.autograd.grad(loss, x_adv)[0]
+            grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
             if grad is None:
                 raise RuntimeError("Gradient is None — check model connectivity or input.")
             
@@ -209,11 +207,10 @@ class APGDAttack(Attack):
         torch.manual_seed(self.seed)
         torch.cuda.manual_seed(self.seed)
 
+        x_emb = None
         if self.loss == "l2":
             with torch.no_grad():
                 x_emb = self.model(x, mode=ForwardMode.EMBEDDINGS)
-        else:
-            x_emb = None
 
         adv_best = x.clone()
 
