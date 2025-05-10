@@ -4,8 +4,8 @@ set -e
 # === Model type to modalities ===
 declare -A MODEL_TYPE_TO_MODALITIES=(
   # [vision]="image video event"
-  [audio]="audio"
-  # [thermal]="thermal"
+  # [audio]="audio"
+  [thermal]="thermal"
   # [point]="point"
 )
 
@@ -72,7 +72,7 @@ declare -A DATASET_TO_BATCH_SIZE=(
   [UrbanSound8K]=2
 
   # --- Thermal ---
-  [LLVIP]=16
+  [LLVIP]=280
   [RGB-T]=16
 
   # --- Point ---
@@ -96,7 +96,7 @@ declare -A TRAIN_MAX_SAMPLES_MAP=(
   [UrbanSound8K]=7079
 
   # --- Thermal ---
-  [LLVIP]=15000
+  [LLVIP]=67900
   [RGB-T]=800
 
   # --- Point ---
@@ -120,7 +120,7 @@ declare -A VAL_MAX_SAMPLES_MAP=(
   [UrbanSound8K]=1653
 
   # --- Thermal ---
-  [LLVIP]=21354
+  [LLVIP]=16974
   [RGB-T]=500
 
   # --- Point ---

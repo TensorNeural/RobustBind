@@ -3,22 +3,22 @@ set -e
 
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
-  # [ImageNet-1K]=image
-  # [Places365]=image
+  [ImageNet-1K]=image
+  [Places365]=image
 
   # [ModelNet40]=point
   # [ShapeNet]=point
 
-  [ESC-50]=audio
-  [UrbanSound8K]=audio
+  # [ESC-50]=audio
+  # [UrbanSound8K]=audio
 
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
-  # [MSR-VTT]=video
-  # [UCF-101]=video
+  [MSR-VTT]=video
+  [UCF-101]=video
 
-  # [N-Caltech-101]=event
+  [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
 )
 
@@ -66,8 +66,8 @@ declare -A CLEAN_VAL_JSON_MAP=(
 
 # === Attack Validation JSON Mapping ===
 declare -A ATTACK_VAL_JSON_MAP=(
-  [ImageNet-1K]="./datasets/ImageNet-1K/val_data_3000.json"
-  [Places365]="./datasets/Places365/val_data_3000.json"
+  [ImageNet-1K]="./datasets/ImageNet-1K/val_data.json"
+  [Places365]="./datasets/Places365/val_data.json"
 
   [ModelNet40]="./datasets/ModelNet40/val_data.json"
   [ShapeNet]="./datasets/ShapeNet/val_data.json"
@@ -81,71 +81,71 @@ declare -A ATTACK_VAL_JSON_MAP=(
   [MSR-VTT]="./datasets/MSR-VTT/val_data.json"
   [UCF-101]="./datasets/UCF-101/val_data.json"
 
-  [N-Caltech-101]="./datasets/N-Caltech-101/val_data_3000.json"
-  [N-ImageNet-1K]="./datasets/N-ImageNet-1K/val_data_3000.json"
+  [N-Caltech-101]="./datasets/N-Caltech-101/val_data.json"
+  [N-ImageNet-1K]="./datasets/N-ImageNet-1K/val_data.json"
 )
 
 # === Clean Validation Batch Size Mapping ===
 declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
-  [ImageNet-1K]=100
-  [Places365]=70
+  [ImageNet-1K]=1000
+  [Places365]=1000
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
   [UrbanSound8K]=90
-  [LLVIP]=16
+  [LLVIP]=1000
   [RGB-T]=16
-  [MSR-VTT]=16
-  [UCF-101]=6
-  [N-Caltech-101]=70
-  [N-ImageNet-1K]=70
+  [MSR-VTT]=40
+  [UCF-101]=40
+  [N-Caltech-101]=1000
+  [N-ImageNet-1K]=1000
 )
 
 # === Attack Validation Batch Size Mapping ===
 declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
-  [ImageNet-1K]=2
+  [ImageNet-1K]=70
   [Places365]=70
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
   [UrbanSound8K]=90
-  [LLVIP]=16
+  [LLVIP]=70
   [RGB-T]=16
-  [MSR-VTT]=16
-  [UCF-101]=6
+  [MSR-VTT]=10
+  [UCF-101]=10
   [N-Caltech-101]=70
   [N-ImageNet-1K]=70
 )
 
 # === Clean Validation Max Samples Mapping ===
 declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=5
-  [Places365]=2
+  [ImageNet-1K]=50000
+  [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048
   [ESC-50]=400
   [UrbanSound8K]=1653
-  [LLVIP]=2
+  [LLVIP]=16974
   [RGB-T]=500
-  [MSR-VTT]=2
-  [UCF-101]=2
-  [N-Caltech-101]=3000
+  [MSR-VTT]=2990
+  [UCF-101]=3783
+  [N-Caltech-101]=2613
   [N-ImageNet-1K]=3000
 )
 
 # === Attack Validation Max Samples Mapping ===
 declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=12
-  [Places365]=2
+  [ImageNet-1K]=50000
+  [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048
   [ESC-50]=400
   [UrbanSound8K]=1653
-  [LLVIP]=2
+  [LLVIP]=16974
   [RGB-T]=500
-  [MSR-VTT]=2
-  [UCF-101]=2
-  [N-Caltech-101]=3000
+  [MSR-VTT]=2990
+  [UCF-101]=3783
+  [N-Caltech-101]=2613
   [N-ImageNet-1K]=3000
 )
 
