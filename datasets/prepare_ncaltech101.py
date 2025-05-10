@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 
 import os
-import random
 import argparse
-from tqdm import tqdm
+import random
+import shutil
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+from tqdm import tqdm
 
 def read_events_from_bin(file_path):
     with open(file_path, "rb") as f:
         raw_bytes = f.read()
     byte_array = np.frombuffer(raw_bytes, dtype=np.uint8)
     event_bytes = byte_array.reshape((-1, 5))
+
     x = event_bytes[:, 0].astype(np.uint32)
     y = event_bytes[:, 1].astype(np.uint32)
     polarity = (event_bytes[:, 2] >> 7) & 0x01
+
     timestamp = (
         ((event_bytes[:, 2] & 0x7F).astype(np.uint32) << 16) |
         (event_bytes[:, 3].astype(np.uint32) << 8) |
@@ -23,38 +25,32 @@ def read_events_from_bin(file_path):
     )
     return x, y, polarity, timestamp
 
-def create_unibind_style_event_image(x, y, polarity, timestamp, num_samples=50000):
-    if len(x) == 0:
-        raise ValueError("Empty event stream")
+def plot_event_image(x, y, polarity, output_path):
+    try:
+        x_min, x_max = x.min(), x.max()
+        y_min, y_max = y.min(), y.max()
+        xs = ((x - x_min) / max(x_max - x_min, 1e-5)) * 223
+        ys = ((y - y_min) / max(y_max - y_min, 1e-5)) * 223
 
-    np.random.seed(42)
-    sample_indices = np.random.choice(len(x), size=min(num_samples, len(x)), replace=False)
+        fig = plt.figure(figsize=(2.24, 2.24), dpi=100)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, 224)
+        ax.set_ylim(0, 224)
+        ax.axis('off')
+        ax.set_facecolor((0, 0, 0, 0))
+        ax.invert_yaxis()
 
-    x_sample = x[sample_indices]
-    y_sample = y[sample_indices]
-    pol_sample = polarity[sample_indices]
-    ts_sample = timestamp[sample_indices]
+        pos_mask = polarity > 0
+        neg_mask = ~pos_mask
+        ax.scatter(xs[pos_mask], ys[pos_mask], c='blue', s=1.0, alpha=0.35, edgecolors='none')
+        ax.scatter(xs[neg_mask], ys[neg_mask], c='red', s=1.0, alpha=0.35, edgecolors='none')
 
-    ts_norm = (ts_sample - ts_sample.min()) / (ts_sample.max() - ts_sample.min() + 1e-8)
-
-    hsv = np.zeros((len(x_sample), 3))
-    hsv[:, 0] = ts_norm
-    hsv[:, 1] = 1.0
-    hsv[:, 2] = np.where(pol_sample == 1, 1.0, 0.6)
-
-    rgb = mcolors.hsv_to_rgb(hsv)
-    return x_sample, y_sample, rgb
-
-def save_event_image_scatter(x, y, rgb, output_path):
-    plt.figure(figsize=(6, 6), dpi=300)
-    plt.scatter(x, y, c=rgb, s=0.5, edgecolors='none')
-    plt.gca().invert_yaxis()
-    plt.axis('equal')
-    plt.axis('off')
-    plt.gca().set_facecolor((0, 0, 0, 0))
-    plt.tight_layout(pad=0)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)
-    plt.close()
+        plt.savefig(output_path, dpi=100, transparent=True, pad_inches=0, bbox_inches='tight')
+        plt.close()
+        return True
+    except Exception as e:
+        print(f"❌ Failed to render {output_path}: {e}")
+        return False
 
 def gather_all_bin_paths(data_root):
     bin_paths = []
@@ -68,62 +64,66 @@ def gather_all_bin_paths(data_root):
                 bin_paths.append(rel_path)
     return bin_paths
 
-def save_split_file(path_list, output_txt):
-    with open(output_txt, "w") as f:
-        for path in path_list:
-            f.write(f"{path}\n")
+def split_and_copy(all_paths, data_root, output_root, train_ratio=0.7):
+    random.seed(42)
+    random.shuffle(all_paths)
+    train_count = int(len(all_paths) * train_ratio)
+    train_split = all_paths[:train_count]
+    val_split = all_paths[train_count:]
 
-def convert_split(txt_file, split_name, data_root, output_root):
-    with open(txt_file, "r") as f:
-        rel_paths = [line.strip() for line in f.readlines()]
+    for split_name, split_paths in [('train', train_split), ('val', val_split)]:
+        for rel_path in split_paths:
+            src = os.path.join(data_root, rel_path)
+            dst = os.path.join(output_root, split_name, rel_path)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
 
-    for rel_path in tqdm(rel_paths, desc=f"Processing {split_name}"):
-        class_name = rel_path.split("/")[0]
-        file_stem = os.path.splitext(os.path.basename(rel_path))[0]
-        src_path = os.path.join(data_root, rel_path)
-        dst_dir = os.path.join(output_root, split_name, class_name)
-        dst_path = os.path.join(dst_dir, file_stem + ".png")
-        os.makedirs(dst_dir, exist_ok=True)
+    print(f"✅ Split complete: {len(train_split)} train, {len(val_split)} val")
 
-        try:
-            x, y, p, t = read_events_from_bin(src_path)
-            xs, ys, rgb = create_unibind_style_event_image(x, y, p, t)
-            save_event_image_scatter(xs, ys, rgb, dst_path)
-        except Exception as e:
-            print(f"Failed: {src_path} — {e}")
+def convert_bin_dir(split_dir):
+    print(f"🎨 Converting .bin → .png in: {split_dir}")
+    for class_name in sorted(os.listdir(split_dir)):
+        class_dir = os.path.join(split_dir, class_name)
+        if not os.path.isdir(class_dir):
+            continue
+        for fname in tqdm(os.listdir(class_dir), desc=class_name):
+            if fname.endswith(".bin"):
+                bin_path = os.path.join(class_dir, fname)
+                png_path = bin_path.replace(".bin", ".png")
+                try:
+                    x, y, p, _ = read_events_from_bin(bin_path)
+                    if plot_event_image(x, y, p, png_path):
+                        os.remove(bin_path)
+                except Exception as e:
+                    print(f"❌ Failed: {bin_path} — {e}")
+    print(f"✅ Finished rendering for: {split_dir}\n")
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("DATASET_ROOT", help="Path to dataset (must contain data/)")
-    parser.add_argument("--train-ratio", type=float, default=0.7, help="Proportion of data to use for training (default: 0.7)")
+    parser = argparse.ArgumentParser(description="Prepare N-Caltech101-style dataset (split + render .bin → .png)")
+    parser.add_argument("--dataset_root", required=True, help="Path to root folder (must contain data/CLASS/*.bin)")
+    parser.add_argument("--train_ratio", type=float, default=0.7, help="Train/val split ratio (default: 0.7)")
     args = parser.parse_args()
 
-    data_root = os.path.join(args.DATASET_ROOT, "data")
-    train_txt = os.path.join(args.DATASET_ROOT, "train.txt")
-    test_txt = os.path.join(args.DATASET_ROOT, "test.txt")
+    raw_data_root = os.path.join(args.dataset_root, "data")
+    if not os.path.exists(raw_data_root):
+        raise FileNotFoundError(f"❌ Expected directory: {raw_data_root}")
 
-    if not os.path.exists(train_txt) or not os.path.exists(test_txt):
-        all_paths = gather_all_bin_paths(data_root)
-        total = len(all_paths)
-        if total == 0:
-            raise ValueError("No .bin files found.")
+    all_paths = gather_all_bin_paths(raw_data_root)
+    if not all_paths:
+        raise ValueError("❌ No .bin files found under data/")
 
-        random.seed(42)
-        random.shuffle(all_paths)
+    # Step 1: Split .bin files into train/ and val/
+    split_and_copy(all_paths, raw_data_root, args.dataset_root, train_ratio=args.train_ratio)
 
-        train_count = int(total * args.train_ratio)
-        train_split = all_paths[:train_count]
-        test_split = all_paths[train_count:]
+    # Step 2: Convert .bin to .png and delete .bin
+    for split in ["train", "val"]:
+        split_dir = os.path.join(args.dataset_root, split)
+        if os.path.isdir(split_dir):
+            convert_bin_dir(split_dir)
+        else:
+            print(f"❌ Missing split directory: {split_dir}")
 
-        save_split_file(train_split, train_txt)
-        save_split_file(test_split, test_txt)
-
-        print(f"Generated splits: train={len(train_split)}, test={len(test_split)}")
-
-    convert_split(train_txt, "train", data_root, args.DATASET_ROOT)
-    convert_split(test_txt, "test", data_root, args.DATASET_ROOT)
-
-    print("All conversions complete.")
+    print("🎉 Done: All .bin files split and rendered to PNGs.")
 
 if __name__ == "__main__":
     main()

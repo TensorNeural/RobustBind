@@ -4,7 +4,7 @@ set -e
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
   [ImageNet-1K]=image
-  [Places365]=image
+  # [Places365]=image
 
   # [ModelNet40]=point
   # [ShapeNet]=point
@@ -15,10 +15,10 @@ declare -A MODALITY_MAP=(
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
-  [MSR-VTT]=video
-  [UCF-101]=video
+  # [MSR-VTT]=video
+  # [UCF-101]=video
 
-  [N-Caltech-101]=event
+  # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
 )
 
@@ -95,8 +95,8 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=1000
   [RGB-T]=16
-  [MSR-VTT]=40
-  [UCF-101]=40
+  [MSR-VTT]=30
+  [UCF-101]=30
   [N-Caltech-101]=1000
   [N-ImageNet-1K]=1000
 )
@@ -111,8 +111,8 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=70
   [RGB-T]=16
-  [MSR-VTT]=10
-  [UCF-101]=10
+  [MSR-VTT]=6
+  [UCF-101]=6
   [N-Caltech-101]=70
   [N-ImageNet-1K]=70
 )
