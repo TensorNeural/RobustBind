@@ -34,3 +34,4 @@ torchvision
 decord
 tqdm
 torchmetrics
+open-flamingo
