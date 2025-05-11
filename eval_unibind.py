@@ -3,7 +3,6 @@ import os
 import torch
 import logging
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from datetime import datetime
 import gc
 

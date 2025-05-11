@@ -3,7 +3,7 @@ set -e
 
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
-  [ImageNet-1K]=image
+  # [ImageNet-1K]=image
   # [Places365]=image
 
   # [ModelNet40]=point
@@ -15,8 +15,8 @@ declare -A MODALITY_MAP=(
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
-  # [MSR-VTT]=video
-  # [UCF-101]=video
+  [MSR-VTT]=video
+  [UCF-101]=video
 
   # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
@@ -95,10 +95,10 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=1000
   [RGB-T]=16
-  [MSR-VTT]=30
-  [UCF-101]=30
-  [N-Caltech-101]=1000
-  [N-ImageNet-1K]=1000
+  [MSR-VTT]=80
+  [UCF-101]=80
+  [N-Caltech-101]=2000
+  [N-ImageNet-1K]=2000
 )
 
 # === Attack Validation Batch Size Mapping ===
@@ -112,9 +112,9 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [LLVIP]=70
   [RGB-T]=16
   [MSR-VTT]=6
-  [UCF-101]=6
-  [N-Caltech-101]=70
-  [N-ImageNet-1K]=70
+  [UCF-101]=10
+  [N-Caltech-101]=80
+  [N-ImageNet-1K]=80
 )
 
 # === Clean Validation Max Samples Mapping ===
@@ -130,7 +130,7 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [MSR-VTT]=2990
   [UCF-101]=3783
   [N-Caltech-101]=2613
-  [N-ImageNet-1K]=3000
+  [N-ImageNet-1K]=50000
 )
 
 # === Attack Validation Max Samples Mapping ===
@@ -146,7 +146,7 @@ declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [MSR-VTT]=2990
   [UCF-101]=3783
   [N-Caltech-101]=2613
-  [N-ImageNet-1K]=3000
+  [N-ImageNet-1K]=50000
 )
 
 # === LoRA Weights List Mapping by Modality ===

@@ -32,10 +32,9 @@ def generate_metadata(dataset_root, split_dir, output_name):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate metadata for N-Caltech-101 (train/val → JSON).")
-    parser.add_argument("--dataset_root", type=str, required=True, help="Path to dataset root with train/ and val/")
+    parser = argparse.ArgumentParser(description="Generate metadata for N-Caltech-101 (val only → JSON).")
+    parser.add_argument("--dataset_root", type=str, required=True, help="Path to dataset root with val/")
     args = parser.parse_args()
 
-    generate_metadata(args.dataset_root, "train", "train_data.json")
     generate_metadata(args.dataset_root, "val", "val_data.json")
     print("🎉 Metadata generation complete.")

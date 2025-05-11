@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import torch.nn.init as init
 from models import PointBind_models
 from imagebind.imagebind_model import ModalityType
@@ -256,6 +257,7 @@ class UniBindModel(Model):
         use_fine_tune=False,
         lora_weights=None,
         fine_tuned_weights=None,
+        use_masked_logsumexp=False,
     ):
         super().__init__()
         self.logger = logger if logger else logging.getLogger(__name__)
@@ -276,16 +278,24 @@ class UniBindModel(Model):
 
         self.modality = modality
         self.label_to_index_map = label_to_index
+        self.use_masked_logsumexp = use_masked_logsumexp
 
-        self.logger.info("Storing centre embeddings on device...")
-        self.centre_embeddings = centre_embeddings.to(device)
+        if centre_embeddings is not None:
+            self.logger.info("Storing centre embeddings on device...")
+            self.centre_embeddings = centre_embeddings.to(device)
 
-        self.logger.info("Building centre_label_indices...")
-        self.centre_label_indices = torch.tensor(
-            [self.label_to_index_map[lbl] for lbl in centre_labels],
-            dtype=torch.int64,
-            device=device
-        )
+        if centre_labels is not None:
+            self.logger.info("Building centre_label_indices...")
+            self.centre_label_indices = torch.tensor(
+                [self.label_to_index_map[lbl] for lbl in centre_labels],
+                dtype=torch.int64,
+                device=device
+            )
+
+            # Precompute and store the (C, N) binary mask
+            self.num_classes = len(self.label_to_index_map)
+            mask = F.one_hot(self.centre_label_indices, num_classes=self.num_classes).T.bool()
+            self.register_buffer("centre_class_mask", mask)
     
     def forward(self, x, mode: ForwardMode):
         if mode == ForwardMode.EMBEDDINGS:
@@ -298,8 +308,8 @@ class UniBindModel(Model):
     def _logits(self, x, temperature=1000.0):
         embeddings = self._encode(x)
         similarity = embeddings @ self.centre_embeddings.t()
-        class_raw_scores = torch_scatter.scatter_logsumexp(similarity * temperature, self.centre_label_indices, dim=1)
-        return class_raw_scores / temperature, similarity
+        logits = self._compute_class_logits(similarity, temperature)
+        return logits, similarity
 
     def _encode(self, x):
         modality = MODALITY_MAP[self.modality]
@@ -322,3 +332,26 @@ class UniBindModel(Model):
     def load_fine_tuned_weights(self, path: str):
         self.logger.info(f"[load_fine_tuned_weights] Loading fine tuned weights from '{path}'...")
         self.unibind.load_fine_tuned_weights(path)
+    
+    def _compute_class_logits(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
+        if self.use_masked_logsumexp:
+            return self._masked_logsumexp(similarity, temperature)
+        else:
+            return self._scatter_logsumexp(similarity, temperature)
+    
+    def _masked_logsumexp(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
+        B, N = similarity.shape
+        C = self.num_classes
+        mask = self.centre_class_mask  # (C, N) precomputed
+
+        similarity_exp = similarity.unsqueeze(1)             # (B, 1, N)
+        mask_exp = mask.unsqueeze(0).expand(B, C, N)         # (B, C, N)
+        masked = similarity_exp.masked_fill(~mask_exp, -1e9) # (B, C, N)
+        return torch.logsumexp(masked * temperature, dim=2) / temperature  # (B, C)
+
+    def _scatter_logsumexp(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
+        return torch_scatter.scatter_logsumexp(
+            similarity * temperature,
+            self.centre_label_indices,
+            dim=1
+        ) / temperature  # (B, C)
