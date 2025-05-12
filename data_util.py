@@ -3,6 +3,7 @@ import json
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import logging
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
@@ -12,6 +13,7 @@ from pytorchvideo.data.encoded_video import EncodedVideo
 from pytorchvideo.data.clip_sampling import ConstantClipsPerVideoSampler
 from pytorchvideo.transforms import Normalize, UniformTemporalSubsample, ShortSideScale
 import torchaudio
+import numpy as np
 
 from utils.utils import load_centre_embeddings
 
@@ -67,12 +69,13 @@ class JsonDataset(Dataset):
 # ===================
 # Transforms
 # ===================
-def get_transform_fn(modality):
+def get_transform_fn(modality, minSample=False):
     return {
         "image": load_and_transform_vision_data,
+        # "event": load_and_transform_event_data,
         "event": load_and_transform_vision_data,
         "thermal": load_and_transform_thermal_data,
-        "video": load_and_transform_video_data,
+        "video": load_and_transform_video_data(minSample=minSample),
         "audio": load_and_transform_audio_data,
         "point": load_and_transform_point_data
     }[modality]
@@ -288,59 +291,65 @@ class SpatialCrop(nn.Module):
         return res
 
 def load_and_transform_video_data(
-    video_paths,
-    device,
-    clip_duration=2,
-    clips_per_video=5,
-    sample_rate=16000,
+    minSample=False,
 ):
-    if video_paths is None:
-        return None
+    def transform(
+        video_paths,
+        device,
+        clip_duration=2,
+        clips_per_video=5,
+        sample_rate=16000):
+        if video_paths is None:
+            return None
 
-    video_outputs = []
-    video_transform = transforms.Compose(
-        [
-            ShortSideScale(224),
-            Normalize(
-                mean=MEAN_MAP["video"],
-                std=STD_MAP["video"],
-            ),
-        ]
-    )
-
-    clip_sampler = ConstantClipsPerVideoSampler(
-        clip_duration=clip_duration, clips_per_video=clips_per_video
-    )
-    frame_sampler = UniformTemporalSubsample(num_samples=clip_duration)
-
-    for video_path in video_paths:
-        video = EncodedVideo.from_path(
-            video_path,
-            decoder="decord",
-            decode_audio=False,
-            **{"sample_rate": sample_rate},
+        video_outputs = []
+        video_transform = transforms.Compose(
+            [
+                ShortSideScale(224),
+                Normalize(
+                    mean=MEAN_MAP["video"],
+                    std=STD_MAP["video"],
+                ),
+            ]
         )
 
-        all_clips_timepoints = get_clip_timepoints(clip_sampler, video.duration)
+        clip_sampler = ConstantClipsPerVideoSampler(
+            clip_duration=clip_duration, clips_per_video=clips_per_video
+        )
+        frame_sampler = UniformTemporalSubsample(num_samples=clip_duration)
 
-        all_video = []
-        for clip_timepoints in all_clips_timepoints:
-            # Read the clip, get frames
-            clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
-            if clip is None:
-                raise ValueError("No clip found")
-            video_clip = frame_sampler(clip["video"])
-            video_clip = video_clip / 255.0  # since this is float, need 0-1
+        for video_path in video_paths:
+            video = EncodedVideo.from_path(
+                video_path,
+                decoder="decord",
+                decode_audio=False,
+                **{"sample_rate": sample_rate},
+            )
 
-            all_video.append(video_clip)
+            all_clips_timepoints = get_clip_timepoints(clip_sampler, video.duration)
 
-        all_video = [video_transform(clip) for clip in all_video]
-        all_video = SpatialCrop(224, num_crops=3)(all_video)
+            # Drop 4 clips if minSample is True
+            if minSample:
+                all_clips_timepoints = all_clips_timepoints[:max(1, len(all_clips_timepoints) - 4)]
 
-        all_video = torch.stack(all_video, dim=0)
-        video_outputs.append(all_video)
+            all_video = []
+            for clip_timepoints in all_clips_timepoints:
+                clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
+                if clip is None:
+                    raise ValueError("No clip found")
+                video_clip = frame_sampler(clip["video"])
+                video_clip = video_clip / 255.0  # normalize to [0,1]
+                all_video.append(video_clip)
 
-    return torch.stack(video_outputs, dim=0).to(device)
+            all_video = [video_transform(clip) for clip in all_video]
+            all_video = SpatialCrop(224, num_crops=3)(all_video)
+
+            all_video = torch.stack(all_video, dim=0)
+            video_outputs.append(all_video)
+
+        return torch.stack(video_outputs, dim=0).to(device)
+
+    return transform
 
 def get_clip_timepoints(clip_sampler, duration):
     clips, end = [], 0.0
@@ -349,6 +358,190 @@ def get_clip_timepoints(clip_sampler, duration):
         clips.append((start, end))
         if is_last: break
     return clips
+
+def read_bin_event_file(path):
+    raw = np.fromfile(path, dtype=np.uint64)
+    raw = raw & ((1 << 40) - 1)
+
+    x = (raw >> 32) & 0xFF
+    y = (raw >> 24) & 0xFF
+    p = (raw >> 23) & 0x1
+    t = raw & 0x7FFFFF
+
+    events = np.stack([x, y, t, p], axis=1).astype(np.float32)
+    return torch.from_numpy(events).float()
+
+
+def infer_resolution(events, default_H=180, default_W=240):
+    if events.shape[0] == 0:
+        return default_H, default_W
+    H = max(int(events[:, 1].max().item()) + 1, default_H)
+    W = max(int(events[:, 0].max().item()) + 1, default_W)
+    return H, W
+
+
+def normalize_voxel(voxel):
+    min_val = voxel.min()
+    max_val = voxel.max()
+    if max_val <= min_val:
+        return voxel.zero_()
+    return (voxel - min_val) / (max_val - min_val + 1e-6)
+
+
+def event_to_voxel_grid(events, num_bins, H, W):
+    if events.shape[0] == 0:
+        return torch.zeros((num_bins, H, W), dtype=torch.float32, device=events.device)
+
+    t = events[:, 2]
+    t_norm = (t - t.min()) / (t.max() - t.min() + 1e-6)
+    t_bins = (t_norm * (num_bins - 1)).long().clamp(0, num_bins - 1)
+
+    x = events[:, 0].long()
+    y = events[:, 1].long()
+
+    valid = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+    x, y, t_bins = x[valid], y[valid], t_bins[valid]
+
+    flat_idx = t_bins * H * W + y * W + x
+    voxel = torch.zeros(num_bins * H * W, dtype=torch.float32, device=events.device)
+    voxel.index_add_(0, flat_idx, torch.ones(flat_idx.shape[0], dtype=torch.float32, device=events.device))
+    return normalize_voxel(voxel.view(num_bins, H, W))
+
+
+def sample_event_clips(events, clips_per_file):
+    if events.shape[0] == 0:
+        return []
+    t_min, t_max = events[:, 2].min(), events[:, 2].max()
+    clip_duration = (t_max - t_min) / clips_per_file
+    if clip_duration == 0:
+        return [events]
+    clips = []
+    for i in range(clips_per_file):
+        t_start = t_min + i * clip_duration
+        t_end = t_start + clip_duration
+        mask = (events[:, 2] >= t_start) & (events[:, 2] < t_end)
+        clip = events[mask]
+        if clip.shape[0] > 0:
+            clips.append(clip)
+    return clips
+
+
+def compute_time_surface(clip, H, W):
+    if clip.shape[0] == 0:
+        return np.zeros((H, W), dtype=np.float32)
+
+    t_range = (clip[:, 2].max() - clip[:, 2].min()).item()
+    if t_range == 0:
+        return np.zeros((H, W), dtype=np.float32)
+
+    x = clip[:, 0].cpu().numpy()
+    y = clip[:, 1].cpu().numpy()
+    t = clip[:, 2].cpu().numpy()
+
+    x = ((x - x.min()) / (x.ptp() + 1e-5) * (W - 1)).astype(int)
+    y = ((y - y.min()) / (y.ptp() + 1e-5) * (H - 1)).astype(int)
+    t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+
+    ts_surface = np.zeros((H, W), dtype=np.float32)
+    for xi, yi, ti in zip(x, y, t_norm):
+        if 0 <= yi < H and 0 <= xi < W:
+            ts_surface[yi, xi] = max(ts_surface[yi, xi], ti)
+    return ts_surface
+
+
+def encode_frame(pos, g, out_size, normalize_fn):
+    if pos.max() == 0:
+        tensor = torch.zeros(3, out_size, out_size, dtype=torch.float32)
+    else:
+        r = (255 * np.log1p(pos) / (np.log1p(pos.max()) + 1e-5)).astype(np.uint8)
+        b = np.zeros_like(r)
+        g = (255 * g).astype(np.uint8)
+        g[(r + b) == 0] = 0
+        rgb = np.stack([r, g, b], axis=0)  # [C, H, W]
+        tensor = torch.from_numpy(rgb).float() / 255.0
+        tensor = F.interpolate(tensor.unsqueeze(0), size=(out_size, out_size), mode="bilinear", align_corners=False).squeeze(0)
+
+    return normalize_fn(tensor)
+
+
+def load_and_transform_event_data(
+    event_paths,
+    device,
+    frames_per_clip: int = 2,
+    clips_per_file: int = 5,
+    out_size: int = 224,
+):
+    normalize = transforms.Normalize(mean=MEAN_MAP["event"], std=STD_MAP["event"])
+    all_videos = []
+
+    for path in event_paths:
+        try:
+            events = read_bin_event_file(path).to(device)
+        except Exception as e:
+            print(f"[ERROR] Failed to read file: {path} — {e}")
+            continue
+
+        if events.shape[0] == 0:
+            print(f"[WARN] Empty event file: {path}")
+            continue
+
+        H, W = infer_resolution(events)
+        t_min, t_max = events[:, 2].min(), events[:, 2].max()
+        t_range = (t_max - t_min).item()
+
+        if t_range == 0:
+            print(f"[WARN] Constant timestamps in file: {path} — duplicating identical clip {clips_per_file} times.")
+            clips = [events.clone() for _ in range(clips_per_file)]
+        else:
+            clips = sample_event_clips(events, clips_per_file)
+            if len(clips) < clips_per_file:
+                print(f"[WARN] Only {len(clips)}/{clips_per_file} valid clips from: {path} — padding with last clip.")
+                if clips:
+                    clips += [clips[-1].clone()] * (clips_per_file - len(clips))
+                else:
+                    print(f"[ERROR] All clips were empty for: {path}")
+                    continue
+
+        clip_tensors = []
+        for i, clip in enumerate(clips):
+            if clip.shape[0] == 0:
+                print(f"[WARN] Empty clip {i} in file: {path} — skipping.")
+                continue
+
+            try:
+                encode_g = (frames_per_clip == 1 and clips_per_file == 1)
+                ts_surface = compute_time_surface(clip, H, W)
+                voxel = event_to_voxel_grid(clip, frames_per_clip, H, W)
+
+                frame_list = []
+                for j in range(frames_per_clip):
+                    pos = voxel[j].cpu().numpy()
+                    g = ts_surface if encode_g else np.zeros_like(pos)
+                    frame = encode_frame(pos, g, out_size, normalize)
+                    frame_list.append(frame)
+
+                clip_tensor = torch.stack(frame_list, dim=1)  # [C, T, H, W]
+                clip_tensors.append(clip_tensor)
+            except Exception as e:
+                print(f"[ERROR] Failed to process clip {i} from {path} — {e}")
+
+        if len(clip_tensors) < clips_per_file:
+            print(f"[WARN] Only {len(clip_tensors)}/{clips_per_file} processed for: {path} — padding.")
+            if clip_tensors:
+                clip_tensors += [clip_tensors[-1].clone()] * (clips_per_file - len(clip_tensors))
+            else:
+                print(f"[ERROR] No valid clip tensors for: {path}")
+                continue
+
+        video_tensor = torch.stack(clip_tensors, dim=0).to(device)  # [V, C, T, H, W]
+        all_videos.append(video_tensor)
+
+    if not all_videos:
+        print("[ERROR] All event files failed. Returning dummy tensor.")
+        dummy = torch.zeros((1, clips_per_file, 3, frames_per_clip, out_size, out_size), dtype=torch.float32, device=device)
+        return dummy
+
+    return torch.stack(all_videos, dim=0)  # [B, V, C, T, H, W]
 
 # ===================
 # Loader & Utility
@@ -365,7 +558,7 @@ def train_data_loader(
     modality, dataset_root, train_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False
 ):
-    transform = get_transform_fn(modality)
+    transform = get_transform_fn(modality, minSample=True)
     dataset = JsonDataset(dataset_root, train_json, transform, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=True)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
@@ -374,7 +567,7 @@ def val_data_loader(
     modality, dataset_root, val_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False
 ):
-    transform = get_transform_fn(modality)
+    transform = get_transform_fn(modality, minSample=True)
     dataset = JsonDataset(dataset_root, val_json, transform, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=False)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)

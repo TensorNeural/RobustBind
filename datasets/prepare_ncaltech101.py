@@ -3,6 +3,7 @@ import os, argparse, shutil, random
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import multiprocessing as mp
 
 def read_events_from_bin(path):
     with open(path, "rb") as f:
@@ -53,50 +54,64 @@ def render_scatter_vis(x, y, p, out_path, size=224):
     plt.savefig(out_path, dpi=100, transparent=True, bbox_inches='tight', pad_inches=0)
     plt.close()
 
-def split_val(data_root, out_root, ratio=0.3):
-    all_paths = []
+def split_val(data_root, val_root, ratio=0.3):
+    total = 0
     for cls in sorted(os.listdir(data_root)):
-        for f in os.listdir(os.path.join(data_root, cls)):
-            if f.endswith(".bin"):
-                all_paths.append(os.path.join(cls, f))
-    random.seed(42)
-    random.shuffle(all_paths)
-    split = int(len(all_paths) * ratio)
-    val_paths = all_paths[:split]
-    for rel in val_paths:
-        src = os.path.join(data_root, rel)
-        dst = os.path.join(out_root, "val", rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst)
-    print(f"✅ Copied {len(val_paths)} val files.")
+        cls_dir = os.path.join(data_root, cls)
+        if not os.path.isdir(cls_dir): continue
+        files = [f for f in os.listdir(cls_dir) if f.endswith(".bin")]
+        random.seed(42)
+        random.shuffle(files)
+        split = int(len(files) * ratio)
+        for fname in files[:split]:
+            src = os.path.join(cls_dir, fname)
+            dst = os.path.join(val_root, "val", cls, fname)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            total += 1
+    print(f"✅ Copied {total} .bin files to val/ (class-balanced)")
 
-def render_all(val_dir, vis_dir):
+def process_bin_file(args):
+    path, cls, static_val, static_vis = args
+    try:
+        x, y, p, t = read_events_from_bin(path)
+        base = os.path.basename(path).replace(".bin", "")
+        out_val = os.path.join(static_val, cls, base + ".png")
+        out_vis = os.path.join(static_vis, cls, base + "_vis.png")
+        os.makedirs(os.path.dirname(out_val), exist_ok=True)
+        os.makedirs(os.path.dirname(out_vis), exist_ok=True)
+        render_model_input(x, y, p, t, out_val)
+        render_scatter_vis(x, y, p, out_vis)
+    except Exception as e:
+        print(f"❌ Error processing {path}: {e}")
+
+def render_all(val_dir, static_val, static_vis, num_workers=12):
+    tasks = []
     for cls in sorted(os.listdir(val_dir)):
         cls_dir = os.path.join(val_dir, cls)
-        vis_cls = os.path.join(vis_dir, cls)
-        os.makedirs(vis_cls, exist_ok=True)
-        for fname in tqdm(os.listdir(cls_dir), desc=cls):
-            if not fname.endswith(".bin"): continue
-            path = os.path.join(cls_dir, fname)
-            x, y, p, t = read_events_from_bin(path)
-            render_model_input(x, y, p, t, path.replace(".bin", ".png"))
-            render_scatter_vis(x, y, p, os.path.join(vis_cls, fname.replace(".bin", "_vis.png")))
-            try: os.remove(path)
-            except: pass
+        for fname in os.listdir(cls_dir):
+            if fname.endswith(".bin"):
+                path = os.path.join(cls_dir, fname)
+                tasks.append((path, cls, static_val, static_vis))
+    print(f"🚀 Rendering {len(tasks)} files with {num_workers} workers...")
+    with mp.Pool(num_workers) as pool:
+        list(tqdm(pool.imap_unordered(process_bin_file, tasks), total=len(tasks)))
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_root", required=True)
     parser.add_argument("--val_ratio", type=float, default=0.3)
+    parser.add_argument("--num_workers", type=int, default=12)
     args = parser.parse_args()
 
     raw = os.path.join(args.dataset_root, "data")
     val = os.path.join(args.dataset_root, "val")
-    vis = os.path.join(args.dataset_root, "vis")
+    static_val = os.path.join(args.dataset_root, "static", "val")
+    static_vis = os.path.join(args.dataset_root, "static", "vis")
 
     split_val(raw, args.dataset_root, ratio=args.val_ratio)
-    render_all(val, vis)
-    print("🎉 N-Caltech101: model + vis rendering complete.")
+    render_all(val, static_val, static_vis, num_workers=args.num_workers)
+    print("🎉 N-Caltech101 static render complete: model inputs + scatter plots.")
 
 if __name__ == "__main__":
     main()

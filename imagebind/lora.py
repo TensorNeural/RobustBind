@@ -20,7 +20,8 @@ class LoRALinear(nn.Module):
         with autocast('cuda', enabled=False):
             lora_x = x.to(torch.float32)
             lora_down_out = self.lora_down(lora_x)
-            lora_down_out.requires_grad_(True)
+            if self.training:
+                lora_down_out.requires_grad_(True)
             lora_up_out = self.lora_up(lora_down_out)
         lora_out = lora_up_out.to(dtype=base_out.dtype)
         return base_out + self.scaling * lora_out

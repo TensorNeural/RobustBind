@@ -1,34 +1,14 @@
 #!/usr/bin/env python3
-import os, argparse
+import os, argparse, shutil
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 def load_npz(path):
     ev = np.load(path)['event_data']
     if ev['x'].size == 0:
         return np.array([]), np.array([]), np.array([]), np.array([])
     return ev['x'], ev['y'], ev['p'], ev['t']
-
-def render_model_input(x, y, p, t, out_path, size=224):
-    if len(x) == 0:
-        print(f"⚠️ Skipping empty model input: {out_path}")
-        return
-    H, W = size, size
-    pos, neg, ts = np.zeros((H, W)), np.zeros((H, W)), np.zeros((H, W))
-    x = ((x - x.min()) / (x.ptp() + 1e-5) * (W - 1)).astype(int)
-    y = ((y - y.min()) / (y.ptp() + 1e-5) * (H - 1)).astype(int)
-    t = (t - t.min()) / (t.ptp() + 1e-5)
-    p = ((p + 1) // 2).astype(np.uint8) if p.min() < 0 else p
-    for xi, yi, pi, ti in zip(x, y, p, t):
-        if pi: pos[yi, xi] += 1
-        else: neg[yi, xi] += 1
-        ts[yi, xi] = max(ts[yi, xi], ti)
-    pos_img = 255 * np.log1p(pos) / np.log1p(pos.max()) if pos.max() > 0 else pos
-    neg_img = 255 * np.log1p(neg) / np.log1p(neg.max()) if neg.max() > 0 else neg
-    ts_img = (255 * ts).astype(np.uint8)
-    ts_img[(pos + neg) == 0] = 0
-    rgb = np.stack([pos_img, neg_img, ts_img], axis=-1).astype(np.uint8)
-    plt.imsave(out_path, rgb)
 
 def render_scatter_vis(x, y, p, out_path, size=224):
     if len(x) == 0:
@@ -49,30 +29,44 @@ def render_scatter_vis(x, y, p, out_path, size=224):
     plt.savefig(out_path, dpi=100, transparent=True, bbox_inches='tight', pad_inches=0)
     plt.close()
 
-def render_all(npz_root, val_root, vis_root):
+def move_static_dirs(root):
+    val_dir = os.path.join(root, "val")
+    vis_dir = os.path.join(root, "vis")
+    static_val = os.path.join(root, "static", "val")
+    static_vis = os.path.join(root, "static", "vis")
+
+    if os.path.exists(val_dir):
+        os.makedirs(os.path.dirname(static_val), exist_ok=True)
+        shutil.move(val_dir, static_val)
+        print(f"✅ Moved existing val/ → static/val/")
+    if os.path.exists(vis_dir):
+        os.makedirs(os.path.dirname(static_vis), exist_ok=True)
+        shutil.move(vis_dir, static_vis)
+        print(f"✅ Moved existing vis/ → static/vis/")
+
+def render_all(npz_root, vis_root):
     for cls in sorted(os.listdir(npz_root)):
         cls_dir = os.path.join(npz_root, cls)
-        val_dir = os.path.join(val_root, cls)
         vis_dir = os.path.join(vis_root, cls)
-        os.makedirs(val_dir, exist_ok=True)
         os.makedirs(vis_dir, exist_ok=True)
-        for fname in sorted(os.listdir(cls_dir)):
+        for fname in tqdm(sorted(os.listdir(cls_dir)), desc=cls):
             if not fname.endswith(".npz"): continue
-            npz_path = os.path.join(cls_dir, fname)
-            x, y, p, t = load_npz(npz_path)
-            render_model_input(x, y, p, t, os.path.join(val_dir, fname.replace(".npz", ".png")))
+            path = os.path.join(cls_dir, fname)
+            x, y, p, t = load_npz(path)
             render_scatter_vis(x, y, p, os.path.join(vis_dir, fname.replace(".npz", "_vis.png")))
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_root", required=True)
     args = parser.parse_args()
+
     root = os.path.abspath(args.dataset_root)
     npz_root = os.path.join(root, "data", "val")
-    val_root = os.path.join(root, "val")
     vis_root = os.path.join(root, "vis")
-    render_all(npz_root, val_root, vis_root)
-    print("🎉 N-ImageNet: model + vis rendering complete.")
+
+    move_static_dirs(root)
+    render_all(npz_root, vis_root)
+    print("🎉 N-ImageNet: scatter-only visualizations complete. Previous outputs saved under static/.")
 
 if __name__ == "__main__":
     main()

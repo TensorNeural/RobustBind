@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from model import Model, ForwardMode
 from transform import unnormalize_inplace, normalize_inplace
 from loss import ce_loss, l2_loss
-from perf.profiling import ProfileModelMemory
+from perf.profiling import ProfileModelMemory, GpuMemoryTracker
 
 
 # =========================== Base ===========================
@@ -58,84 +58,103 @@ class PGDAttack(Attack):
         assert self.loss_type in ("ce", "l2")
 
     def perturb(self, x, y=None, emb_orig=None):
-        x_adv = x.detach().clone().requires_grad_(True)
+        with GpuMemoryTracker(self.logger, label="PGD::Init::Detach+Clone"):
+            x_adv = x.detach().clone().requires_grad_(True)
 
-        if self.loss_type == "ce":
-            if y is None:
-                raise ValueError("Cross-entropy loss requires labels.")
-            with torch.no_grad():
-                acc = self._acc_with_x(x, y)
-            self.logger.info(f"[PGDAttack] Initial accuracy: {acc.item() * 100:.4f}%")
-        elif self.loss_type == "l2":
-            if emb_orig is None:
-                raise ValueError("L2 loss requires original embeddings.")
-            with torch.no_grad():
-                cos_sim = self._cos_sim_with_x(x, emb_orig)
-            self.logger.info(f"[PGDAttack] Initial cosine similarity: {cos_sim.item():.4f}")
-        else:
-            raise ValueError(f"Invalid loss type: {self.loss_type}")
+        with torch.no_grad():
+            if self.loss_type == "ce":
+                if y is None:
+                    raise ValueError("Cross-entropy loss requires labels.")
+                with GpuMemoryTracker(self.logger, label="PGD::InitAcc"):
+                    acc = self._acc_with_x(x, y)
+                self.logger.info(f"[PGDAttack] Initial accuracy: {acc.item() * 100:.4f}%")
+            elif self.loss_type == "l2":
+                if emb_orig is None:
+                    raise ValueError("L2 loss requires original embeddings.")
+                with GpuMemoryTracker(self.logger, label="PGD::InitCosSim"):
+                    cos_sim = self._cos_sim_with_x(x, emb_orig)
+                self.logger.info(f"[PGDAttack] Initial cosine similarity: {cos_sim.item():.4f}")
 
         if self.random_start:
-            if self.norm == "linf":
-                x_adv = random_start_linf(x, self.epsilon, self.clamp_min, self.clamp_max)
-            elif self.norm == "l2":
-                x_adv = random_start_l2(x, self.epsilon, self.clamp_min, self.clamp_max)
-            elif self.norm == "l1":
-                x_adv = random_start_l1(x, self.epsilon, self.clamp_min, self.clamp_max)
+            with GpuMemoryTracker(self.logger, label="PGD::RandomStart"):
+                if self.norm == "linf":
+                    x_adv = random_start_linf(x, self.epsilon, self.clamp_min, self.clamp_max)
+                elif self.norm == "l2":
+                    x_adv = random_start_l2(x, self.epsilon, self.clamp_min, self.clamp_max)
+                elif self.norm == "l1":
+                    x_adv = random_start_l1(x, self.epsilon, self.clamp_min, self.clamp_max)
 
         for step in range(self.steps):
-            x_adv = x_adv.detach().clone().requires_grad_(True)
-            model_input = x_adv.clone()
+            with ProfileModelMemory(self.model, self.logger):
+                with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::Reinit"):
+                    x_adv = x_adv.detach().clone().requires_grad_(True)
 
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    if self.loss_type == "ce":
+                        with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::ForwardLOGITS"):
+                            logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
+
+                        with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::LossCE"):
+                            loss = ce_loss(logits, y)
+
+                        with torch.no_grad():
+                            with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::StepAcc"):
+                                acc = self._acc_with_logits(logits, y)
+                            self.logger.debug(f"[PGDAttack] Step {step}, accuracy: {acc.item() * 100:.2f}%")
+
+                    elif self.loss_type == "l2":
+                        with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::ForwardEMB"):
+                            x_adv_emb = self.model(x_adv, mode=ForwardMode.EMBEDDINGS)
+
+                        with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::LossL2"):
+                            loss = l2_loss(x_adv_emb, emb_orig)
+
+                        with torch.no_grad():
+                            with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::StepCosSim"):
+                                cos_sim = self._cos_sim_with_emb(x_adv_emb, emb_orig)
+                            self.logger.debug(f"[PGDAttack] Step {step}, cosine similarity: {cos_sim.item():.4f}")
+
+                with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::Grad"):
+                    grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
+
+                with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::Project"):
+                    if self.norm == "linf":
+                        x_adv = project_linf(x_adv + self.alpha * grad.sign(), x, self.epsilon)
+                    elif self.norm == "l2":
+                        step_dir = self.alpha * grad / (L2_norm(grad, keepdim=True) + 1e-12)
+                        x_adv = project_l2(x_adv + step_dir, x, self.epsilon)
+                    elif self.norm == "l1":
+                        step_dir = self.alpha * grad / (L1_norm(grad, keepdim=True) + 1e-12)
+                        x_adv = x + project_l1(x_adv + step_dir - x, self.epsilon)
+
+                with GpuMemoryTracker(self.logger, label=f"PGD::Step{step}::Clamp"):
+                    x_adv = x_adv.clamp(self.clamp_min, self.clamp_max)
+
+                # Cleanup to reduce memory usage
+                del loss, grad
+                if self.loss_type == "ce":
+                    del logits
+                elif self.loss_type == "l2":
+                    del x_adv_emb
+                torch.cuda.empty_cache()
+
+        # Final eval logging
+        with torch.no_grad():
             if self.loss_type == "ce":
-                logits, _ = self.model(model_input, mode=ForwardMode.LOGITS)
-                loss = ce_loss(logits, y)
-
-                with torch.no_grad():
-                    acc = self._acc_with_logits(logits, y)
-                self.logger.debug(f"[PGDAttack] Step{step} accuracy: {acc.item() * 100:.4f}%")
+                with GpuMemoryTracker(self.logger, label="PGD::FinalAcc"):
+                    acc = self._acc_with_x(x_adv, y)
+                self.logger.info(f"[PGDAttack] Final accuracy: {acc.item() * 100:.2f}%")
             elif self.loss_type == "l2":
-                with ProfileModelMemory(self.model, self.logger):
-                    x_adv_emb = self.model(model_input, mode=ForwardMode.EMBEDDINGS)
-                loss = l2_loss(x_adv_emb, emb_orig)
+                with GpuMemoryTracker(self.logger, label="PGD::FinalCosSim"):
+                    cos_sim = self._cos_sim_with_x(x_adv, emb_orig)
+                self.logger.info(f"[PGDAttack] Final cosine similarity: {cos_sim.item():.4f}")
 
-                with torch.no_grad():
-                    cos_sim = self._cos_sim_with_emb(x_adv_emb, emb_orig)
-                self.logger.debug(f"[PGDAttack] Step{step} cosine similarity: {cos_sim.item():.4f}")
-            else:
-                raise ValueError(f"Invalid loss type: {self.loss_type}")
+        return x_adv.detach()
 
-            grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0]
-            if grad is None:
-                raise RuntimeError("Gradient is None — check model connectivity or input.")
-            
-            x_adv = x_adv.detach()
-
-            if self.norm == "linf":
-                x_adv = project_linf(x_adv + self.alpha * grad.sign(), x, self.epsilon)
-            elif self.norm == "l2":
-                step_dir = self.alpha * grad / (L2_norm(grad, keepdim=True) + 1e-12)
-                x_adv = project_l2(x_adv + step_dir, x, self.epsilon)
-            elif self.norm == "l1":
-                step_dir = self.alpha * grad / (L1_norm(grad, keepdim=True) + 1e-12)
-                x_adv = x + project_l1(x_adv + step_dir - x, self.epsilon)
-
-            x_adv = x_adv.clamp(self.clamp_min, self.clamp_max)
-
-        if self.loss_type == "ce":
-            with torch.no_grad():
-                acc = self._acc_with_x(x_adv, y)
-            self.logger.info(f"[PGDAttack] Final accuracy: {acc.item() * 100:.4f}%")
-        elif self.loss_type == "l2":
-            with torch.no_grad():
-                cos_sim = self._cos_sim_with_x(x_adv, emb_orig)
-            self.logger.info(f"[PGDAttack] Final cosine similarity: {cos_sim.item():.4f}")
-
-        return x_adv
 
     def _acc_with_x(self, x, y):
         logits, _ = self.model(x, mode=ForwardMode.LOGITS)
-        self._acc_with_logits(logits, y)
+        return self._acc_with_logits(logits, y)
     
     def _acc_with_logits(self, logits, y):
         preds = logits.argmax(dim=1)

@@ -3,17 +3,18 @@ set -e
 
 # === Model type to modalities ===
 declare -A MODEL_TYPE_TO_MODALITIES=(
-  # [vision]="image video event"
+  [vision]="image video event"
   # [audio]="audio"
-  [thermal]="thermal"
+  # [thermal]="thermal"
   # [point]="point"
 )
 
 # === Active training dataset per modality ===
 declare -A TRAIN_MODALITY_TO_DATASET=(
   # --- Vision ---
-  [image]="ImageNet-1K"
+  # [image]="ImageNet-1K"
   # [image]="Places365"
+  [video]="Kinetics-400"
   # [video]="UCF-101"
   # [video]="MSR-VTT"
   # [event]="N-Caltech-101"
@@ -38,8 +39,8 @@ declare -A VAL_MODALITY_TO_DATASET=(
   # --- Vision ---
   # [image]="ImageNet-1K"
   # [image]="Places365"
-  [video]="UCF-101"
-  # [video]="MSR-VTT"
+  # [video]="UCF-101"
+  [video]="MSR-VTT"
   # [event]="N-Caltech-101"
   # [event]="N-ImageNet-1K"
 
@@ -61,6 +62,7 @@ declare -A DATASET_TO_BATCH_SIZE=(
   # --- Vision ---
   [ImageNet-1K]=1
   [Places365]=70
+  [Kinetics-400]=25
   [UCF-101]=6
   [MSR-VTT]=6
   [N-Caltech-101]=70
@@ -85,8 +87,9 @@ declare -A TRAIN_MAX_SAMPLES_MAP=(
   # [ImageNet-1K]=1281167
   [ImageNet-1K]=18
   [Places365]=0
+  [Kinetics-400]=241258
   [UCF-101]=9537
-  [MSR-VTT]=3000
+  [MSR-VTT]=2990
   [N-Caltech-101]=3060
   [N-ImageNet-1K]=1281167
 
@@ -110,8 +113,8 @@ declare -A VAL_MAX_SAMPLES_MAP=(
   [ImageNet-1K]=6
   [Places365]=3000
   # [UCF-101]=3783
-  [UCF-101]=6
-  [MSR-VTT]=3000
+  # [UCF-101]=6
+  [MSR-VTT]=2990
   [N-Caltech-101]=3000
   [N-ImageNet-1K]=3000
 
@@ -132,6 +135,7 @@ declare -A TRAIN_JSON_MAP=(
   # --- Vision ---
   [ImageNet-1K]="./datasets/ImageNet-1K/train_data.json"
   [Places365]="./datasets/Places365/train_data.json"
+  [Kinetics-400]="./datasets/Kinetics-400/train_data.json"
   [UCF-101]="./datasets/UCF-101/train_data.json"
   [MSR-VTT]="./datasets/MSR-VTT/train_data.json"
   [N-Caltech-101]="./datasets/N-Caltech-101/train_data.json"
@@ -178,7 +182,7 @@ declare -A EMB_SUFFIX_MAP=(
   [ImageNet-1K]=in
   [Places365]=p365
   [UCF-101]=ucf
-  [MSR-VTT]=msr
+  [MSR-VTT]=msrvtt
   [N-Caltech-101]=caltech
   [N-ImageNet-1K]=nin
 
