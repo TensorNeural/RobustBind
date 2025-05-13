@@ -81,8 +81,7 @@ done
 # === Batch Size Mapping ===
 declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [ImageNet-1K]=1000
-  # [Places365]=2
-  [Places365]=3000
+  [Places365]=2000
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
@@ -97,7 +96,7 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
 
 declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [ImageNet-1K]=70
-  [Places365]=10
+  [Places365]=70
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
@@ -113,7 +112,6 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
 # === Max Sample Mapping ===
 declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [ImageNet-1K]=50000
-  # [Places365]=12
   [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048
@@ -129,8 +127,7 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
 
 declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [ImageNet-1K]=50000
-  # [Places365]=12
-  [Places365]=20
+  [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048
   [ESC-50]=400

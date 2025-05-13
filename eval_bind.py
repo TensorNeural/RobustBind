@@ -56,9 +56,7 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
             use_flash_attention=args.use_flash_attention,
             use_lora=use_lora
         ).to(device)
-    # # deduplicate labels
-    # raw_lbls = list(set(raw_lbls))
-    # class_strings = [normalize_label(lbl) for lbl in raw_lbls]
+    
     with open(args.classes_json, "r") as f:
         class_strings = json.load(f)
 
@@ -80,8 +78,6 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
         ).to(device)
 
     raise ValueError(f"Unsupported model type: {args.model_type}")
-
-
 
 def evaluate_all_models(args):
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -122,12 +118,12 @@ def evaluate_all_models(args):
 
     logger.info("Evaluating original model ...")
 
-    # if args.run_clean_eval:
-    #     acc = evaluate_clean(logger, device, model, clean_loader)
-    #     entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
-    #     if rank == 0:
-    #         logger.info(entry)
-    #     final_results.append(entry)
+    if args.run_clean_eval:
+        acc = evaluate_clean(logger, device, model, clean_loader)
+        entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
+        if rank == 0:
+            logger.info(entry)
+        final_results.append(entry)
     
     attack_loader = val_data_loader(
         modality=args.modality,
@@ -152,9 +148,9 @@ def evaluate_all_models(args):
         if rank == 0:
             final_results.append(entry)
 
-    # del model
-    # torch.cuda.empty_cache()
-    # gc.collect()
+    del model
+    torch.cuda.empty_cache()
+    gc.collect()
 
     if args.model_type == BindModelType.UNIBIND:
         model_attack = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=True)
