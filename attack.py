@@ -238,27 +238,34 @@ class APGDAttack(Attack):
 # =========================== Two-Stage Attack ===========================
 def two_stage_attack(logger, model, inputs, labels, attack_stage1, attack_stage2, mean, std):
     logger.info("Running two-stage attack...")
-    inputs_unorm = inputs.clone()
+    inputs_unorm = inputs.detach().clone()
     unnormalize_inplace(inputs_unorm, mean, std)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         adv_stage1 = attack_stage1.perturb(inputs_unorm, labels)
+
     normalize_inplace(adv_stage1, mean, std)
 
     wrapped_adv_stage1 = model.wrap_tensor(adv_stage1)
-    logits_stage1, _ = model(wrapped_adv_stage1, mode=ForwardMode.LOGITS)
-    preds_stage1 = logits_stage1.argmax(dim=1)
-    correct_mask = preds_stage1 == labels
-    keep_idx = correct_mask.nonzero(as_tuple=True)[0]
-
-    adv_final = adv_stage1.clone()
+    with torch.no_grad():
+        logits_stage1, _ = model(wrapped_adv_stage1, mode=ForwardMode.LOGITS)
+        preds_stage1 = logits_stage1.argmax(dim=1)
+        correct_mask = preds_stage1 == labels
+        keep_idx = correct_mask.nonzero(as_tuple=True)[0]
+        adv_final = adv_stage1.detach()
     if len(keep_idx) > 0:
         logger.info(f"Stage1 left {len(keep_idx)}/{inputs.size(0)} samples correct. Applying Stage2...")
-        inputs_unorm2 = inputs[keep_idx].clone()
-        unnormalize_inplace(inputs_unorm2, mean, std)
+        
+        with torch.no_grad():
+            inputs_unorm2 = inputs[keep_idx]
+            inputs_unorm2 = inputs_unorm2.detach().clone()
+            unnormalize_inplace(inputs_unorm2, mean, std)
+
         adv_stage2 = attack_stage2.perturb(inputs_unorm2, labels[keep_idx])
-        normalize_inplace(adv_stage2, mean, std)
-        adv_final[keep_idx] = adv_stage2
+
+        with torch.no_grad():
+            normalize_inplace(adv_stage2, mean, std)
+            adv_final[keep_idx] = adv_stage2
 
     return adv_final
 

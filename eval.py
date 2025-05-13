@@ -87,11 +87,13 @@ def evaluate_two_stage(logger, device, model: UniBindModel, data_loader, attack_
 
         inp, lbl = inp.to(device), lbl.to(device)
         adv_fin = two_stage_attack(logger, model, inp, lbl, stage1_attack, stage2_attack, mean, std)
-        wrapped_adv_fin = model.wrap_tensor(adv_fin)
-        logits_fin, _ = model(wrapped_adv_fin, mode=ForwardMode.LOGITS)
-        preds = logits_fin.argmax(dim=1)
 
-        total_correct += (preds == lbl).sum().item()
+        wrapped_adv_fin = model.wrap_tensor(adv_fin)
+        with torch.no_grad():
+            logits_fin, _ = model(wrapped_adv_fin, mode=ForwardMode.LOGITS)
+            preds = logits_fin.argmax(dim=1)
+            total_correct += (preds == lbl).sum().item()
+
         total_samples += inp.size(0)
 
         del inp, lbl, adv_fin, wrapped_adv_fin, logits_fin, preds
@@ -132,7 +134,7 @@ def evaluate_clean(logger, device, model: UniBindModel, data_loader):
         wrapped_inp = model.wrap_tensor(inp)
         logits_clean, _ = model(wrapped_inp, mode=ForwardMode.LOGITS)
         preds_clean = logits_clean.argmax(dim=1)
-
+        
         total_correct += (preds_clean == lbl).sum().item()
         total_samples += inp.size(0)
 

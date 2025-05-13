@@ -773,6 +773,7 @@ class LanguageBindThermal(CLIPPreTrainedModel):
         self.post_init()
         self.convert_to_lora()
         self.resize_pos(self.vision_model.embeddings, vision_config)
+        self.adapt_patch_embedding_for_thermal()
 
     def convert_to_lora(self):
         if self.lora_r == 0:
@@ -841,6 +842,12 @@ class LanguageBindThermal(CLIPPreTrainedModel):
         m.position_embedding.load_state_dict(old_pos_embed_state_dict)
 
         # m.to(args.device)
+    def adapt_patch_embedding_for_thermal(self):
+        patch_embed = self.vision_model.embeddings.patch_embedding
+        if self.config.vision_config.num_channels == 1 and patch_embed.weight.shape[1] == 3:
+            with torch.no_grad():
+                print("[INFO] Converting 3-channel patch embedding weights to 1-channel for thermal input")
+                patch_embed.weight.data = patch_embed.weight.data.mean(dim=1, keepdim=True)
 
     @add_start_docstrings_to_model_forward(CLIP_TEXT_INPUTS_DOCSTRING)
     def get_text_features(

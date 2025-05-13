@@ -3,8 +3,8 @@ set -e
 
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
-  # [ImageNet-1K]=image
-  [Places365]=image
+  [ImageNet-1K]=image
+  # [Places365]=image
 
   # [ModelNet40]=point
   # [ShapeNet]=point
@@ -52,7 +52,7 @@ declare -A EMB_SUFFIX_MAP=(
 
 # === Validation JSON Mapping ===
 declare -A CLEAN_VAL_JSON_MAP=(
-  [ImageNet-1K]="./datasets/ImageNet-1K/val_data.json"
+  [ImageNet-1K]="./datasets/ImageNet-1K/val_data_5000.json"
   [Places365]="./datasets/Places365/val_data.json"
   [ModelNet40]="./datasets/ModelNet40/val_data.json"
   [ShapeNet]="./datasets/ShapeNet/val_data.json"
@@ -67,6 +67,7 @@ declare -A CLEAN_VAL_JSON_MAP=(
 )
 
 declare -A CLASSES_JSON_MAP=(
+  [ImageNet-1K]="./datasets/ImageNet-1K/classes_imagenet.json"
   [Places365]="./datasets/Places365/classes_places365.json"
   [LLVIP]="./datasets/LLVIP/classes_llvip.json"
   [ModelNet40]="./datasets/ModelNet40/classes_modelnet40.json"
@@ -80,7 +81,7 @@ done
 
 # === Batch Size Mapping ===
 declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
-  [ImageNet-1K]=1000
+  [ImageNet-1K]=2000
   [Places365]=2000
   [ModelNet40]=64
   [ShapeNet]=64
@@ -95,7 +96,7 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
 )
 
 declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
-  [ImageNet-1K]=70
+  [ImageNet-1K]=60
   [Places365]=60
   [ModelNet40]=64
   [ShapeNet]=64
@@ -111,7 +112,7 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
 
 # === Max Sample Mapping ===
 declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=50000
+  [ImageNet-1K]=5000
   [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048
@@ -126,7 +127,7 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
 )
 
 declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=50000
+  [ImageNet-1K]=5000
   [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048

@@ -51,51 +51,36 @@ def generate_metadata(dataset_root, dataset_name, output_filename, synset_mappin
         return
 
     metadata = []
-
-    # Convert dataset_root to absolute path to ensure proper relative calculations
     dataset_root_abs = os.path.abspath(dataset_root)
 
-    # Handle test set separately (since it does not have class subdirectories)
     if not labeled:
-        for img_file in sorted(os.listdir(dataset_dir)):  # Directly iterate over test images
+        for img_file in sorted(os.listdir(dataset_dir)):
             if img_file.lower().endswith((".jpeg", ".jpg", ".png")):
                 img_path = os.path.join(dataset_dir, img_file)
-
-                # Ensure the path exists
                 if not os.path.exists(img_path):
                     print(f"Warning: Skipping missing or unreadable file {img_path}")
                     continue
-
                 metadata.append({
-                    "data": os.path.relpath(img_path, dataset_root_abs),  # Relative to DATASET_ROOT
-                    "label": "unknown"  # No labels in test set
+                    "data": os.path.relpath(img_path, dataset_root_abs),
+                    "label": "unknown"
                 })
-
     else:
-        for class_folder in sorted(os.listdir(dataset_dir)):  # Sort for consistency
+        for class_folder in sorted(os.listdir(dataset_dir)):
             class_path = os.path.join(dataset_dir, class_folder)
-
-            # Ensure it's a valid class directory
             if not os.path.isdir(class_path):
                 continue
-
             class_label = synset_mapping.get(class_folder, "unknown")
-
             for img_file in sorted(os.listdir(class_path)):
                 if img_file.lower().endswith((".jpeg", ".jpg", ".png")):
                     img_path = os.path.join(class_path, img_file)
-
-                    # Ensure file exists and is readable
                     if not os.path.exists(img_path):
                         print(f"Warning: Skipping missing or unreadable file {img_path}")
                         continue
-
                     metadata.append({
-                        "data": os.path.relpath(img_path, dataset_root_abs),  # Relative to DATASET_ROOT
+                        "data": os.path.relpath(img_path, dataset_root_abs),
                         "label": class_label
                     })
 
-    # Save JSON file
     with open(output_path, "w") as json_file:
         json.dump(metadata, json_file, indent=2)
 
@@ -106,16 +91,21 @@ def save_center_to_wordnet_mapping(output_file, human_to_synset):
     output_path = os.path.join(OUTPUT_DIR, output_file)
     with open(output_path, "w") as json_file:
         json.dump(human_to_synset, json_file, indent=2)
-    
     print(f"Center to WordNet mapping saved to {output_path} ({len(human_to_synset)} entries).")
+
+def save_class_name_list(output_file, human_to_synset):
+    """Saves a list of all human-readable class names (sorted)."""
+    class_names = sorted(human_to_synset.keys())
+    output_path = os.path.join(OUTPUT_DIR, output_file)
+    with open(output_path, "w") as f:
+        json.dump(class_names, f, indent=2)
+    print(f"Class name list saved to {output_path} ({len(class_names)} classes).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate ImageNet metadata and class mappings.")
     parser.add_argument("DATASET_ROOT", type=str, help="Path to the ImageNet dataset root directory.")
-
     args = parser.parse_args()
 
-    # Ensure the output directory exists in the current working directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     print("Loading WordNet synset mapping")
@@ -133,4 +123,7 @@ if __name__ == "__main__":
     print("Saving center to WordNet mapping")
     save_center_to_wordnet_mapping("center_to_wordnet.json", human_to_synset)
 
-    print("Metadata generation complete. All files saved in ImageNet-1K directory relative to the script.")
+    print("Saving human-readable class name list")
+    save_class_name_list("classes_imagenet.json", human_to_synset)
+
+    print("✅ Metadata generation complete. Files saved in ImageNet-1K directory.")
