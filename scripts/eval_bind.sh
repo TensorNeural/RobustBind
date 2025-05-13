@@ -25,7 +25,7 @@ declare -A MODALITY_MAP=(
 # === Modality to Supported Binds ===
 declare -A MODALITY_TO_BINDS=(
   # [image]="LanguageBind ImageBind"
-  [image]="LanguageBind"
+  [image]="ImageBind"
   [audio]="LanguageBind ImageBind"
   [video]="LanguageBind ImageBind"
   [depth]="LanguageBind ImageBind"

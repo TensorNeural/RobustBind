@@ -567,9 +567,8 @@ class ImageBindModel(Model):
         return x.to(device)
 
     def _encode(self, x):
-        with torch.no_grad():
-            imagebind_modality = IMAGEBIND_MODALITY_MAP[self.modality]
-            emb = self.model({IMAGEBIND_MODALITY_MAP[self.modality]: x})[imagebind_modality]
+        imagebind_modality = IMAGEBIND_MODALITY_MAP[self.modality]
+        emb = self.model({IMAGEBIND_MODALITY_MAP[self.modality]: x})[imagebind_modality]
         return emb / emb.norm(dim=-1, keepdim=True)
 
     def _logits(self, x, temperature=100.0):
