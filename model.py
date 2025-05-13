@@ -456,7 +456,6 @@ class LanguageBindModel(Model):
 
         # Tokenize class prompts → encode → normalize
         tokens = tokenizer(prompts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")
-        print(f"prompts: {len(prompts)}")
         tokens = to_device(tokens, device)
         text_embs = self.encode_text(tokens)
 

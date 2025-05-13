@@ -24,8 +24,7 @@ declare -A MODALITY_MAP=(
 
 # === Modality to Supported Binds ===
 declare -A MODALITY_TO_BINDS=(
-  # [image]="LanguageBind ImageBind"
-  [image]="ImageBind"
+  [image]="LanguageBind ImageBind"
   [audio]="LanguageBind ImageBind"
   [video]="LanguageBind ImageBind"
   [depth]="LanguageBind ImageBind"
@@ -69,6 +68,7 @@ declare -A CLEAN_VAL_JSON_MAP=(
 
 declare -A CLASSES_JSON_MAP=(
   [Places365]="./datasets/Places365/classes_places365.json"
+  [LLVIP]="./datasets/LLVIP/classes_llvip.json"
   [ModelNet40]="./datasets/ModelNet40/classes_modelnet40.json"
 )
 
