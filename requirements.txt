@@ -1,3 +1,4 @@
+torch
 pytorchvideo@git+https://github.com/facebookresearch/pytorchvideo.git
 fvcore
 eva-decord
@@ -34,4 +35,3 @@ torchvision
 decord
 tqdm
 torchmetrics
-open-flamingo

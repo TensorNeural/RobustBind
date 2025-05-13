@@ -3,8 +3,8 @@ set -e
 
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
-  [ImageNet-1K]=image
-  # [Places365]=image
+  # [ImageNet-1K]=image
+  [Places365]=image
 
   # [ModelNet40]=point
   # [ShapeNet]=point
@@ -15,23 +15,24 @@ declare -A MODALITY_MAP=(
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
-  [MSR-VTT]=video
-  [UCF-101]=video
+  # [MSR-VTT]=video
+  # [UCF-101]=video
 
-  [N-Caltech-101]=event
+  # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
 )
 
 # === Modality to Supported Binds ===
 declare -A MODALITY_TO_BINDS=(
-  [image]="UniBind LanguageBind ImageBind"
-  [audio]="UniBind LanguageBind ImageBind"
-  [video]="UniBind LanguageBind ImageBind"
+  # [image]="LanguageBind ImageBind"
+  [image]="LanguageBind"
+  [audio]="LanguageBind ImageBind"
+  [video]="LanguageBind ImageBind"
   [depth]="LanguageBind ImageBind"
   [imu]="LanguageBind ImageBind"
-  [thermal]="UniBind LanguageBind"
-  [point]="UniBind LanguageBind"
-  [event]="UniBind"
+  [thermal]="LanguageBind"
+  [point]="LanguageBind"
+  [event]=""
 )
 
 # === Embedding Suffix Mapping ===
@@ -66,12 +67,22 @@ declare -A CLEAN_VAL_JSON_MAP=(
   [N-ImageNet-1K]="./datasets/N-ImageNet-1K/val_data.json"
 )
 
-declare -A ATTACK_VAL_JSON_MAP=("${CLEAN_VAL_JSON_MAP[@]}")
+declare -A CLASSES_JSON_MAP=(
+  [Places365]="./datasets/Places365/classes_places365.json"
+  [ModelNet40]="./datasets/ModelNet40/classes_modelnet40.json"
+)
+
+declare -A ATTACK_VAL_JSON_MAP
+
+for key in "${!CLEAN_VAL_JSON_MAP[@]}"; do
+  ATTACK_VAL_JSON_MAP[$key]="${CLEAN_VAL_JSON_MAP[$key]}"
+done
 
 # === Batch Size Mapping ===
 declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [ImageNet-1K]=1000
-  [Places365]=1000
+  # [Places365]=2
+  [Places365]=3000
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
@@ -86,7 +97,7 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
 
 declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [ImageNet-1K]=70
-  [Places365]=70
+  [Places365]=10
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
@@ -102,6 +113,7 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
 # === Max Sample Mapping ===
 declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [ImageNet-1K]=50000
+  # [Places365]=12
   [Places365]=36500
   [ModelNet40]=2
   [ShapeNet]=2048
@@ -115,7 +127,21 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [N-ImageNet-1K]=3000
 )
 
-declare -A ATTACK_VAL_MAX_SAMPLES_MAP=("${CLEAN_VAL_MAX_SAMPLES_MAP[@]}")
+declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
+  [ImageNet-1K]=50000
+  # [Places365]=12
+  [Places365]=20
+  [ModelNet40]=2
+  [ShapeNet]=2048
+  [ESC-50]=400
+  [UrbanSound8K]=1653
+  [LLVIP]=16974
+  [RGB-T]=500
+  [MSR-VTT]=2990
+  [UCF-101]=3783
+  [N-Caltech-101]=2613
+  [N-ImageNet-1K]=3000
+)
 
 # === LoRA Weights Map ===
 declare -A LORA_WEIGHTS_LIST_MAP=(
@@ -149,6 +175,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
   lora_weights_list="${LORA_WEIGHTS_LIST_MAP[$modality]}"
   center_emb="./centre_embs/${modality}_${suffix}_center_embeddings.pkl"
   dataset_root="/home/user/datasets/$dataset"
+  classes_json="${CLASSES_JSON_MAP[$dataset]}"
 
   for model_type in UniBind LanguageBind ImageBind; do
     if [[ ! " $supported_binds " =~ " $model_type " ]]; then
@@ -170,6 +197,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
       --attack_val_batch_size "$attack_val_batch_size" \
       --clean_val_max_samples "$clean_val_max_samples" \
       --attack_val_max_samples "$attack_val_max_samples" \
+      --classes_json "$classes_json" \
       --pretrain_weights "$PRETRAIN_WEIGHTS" \
       --center_emb "$center_emb" \
       --lora_weights_list $lora_weights_list \

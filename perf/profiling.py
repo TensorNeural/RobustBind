@@ -161,3 +161,54 @@ class ProfileModelMemory:
                 # Manually exit => logs memory usage
                 tracker.__exit__(None, None, None)
         return inner_post_hook
+
+class ProfileModelGradient:
+    def __init__(self, model, logger, label="ProfileModelGradient", device=None):
+        self.model = model
+        self.logger = logger
+        self.label = label
+        self.device = device or torch.device("cuda")
+        self.hooks = []
+
+    def __enter__(self):
+        self._register_hooks(self.model, prefix="", depth=0)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for h in self.hooks:
+            h.remove()
+        self.hooks.clear()
+
+    def _register_hooks(self, module, prefix="", depth=0):
+        module_name = prefix if prefix else module.__class__.__name__
+
+        def _backward_hook(mod, grad_input, grad_output):
+            # No need to check gradients here; will only be called if gradients flow
+            pass
+
+        def _forward_hook(mod, input, output):
+            input_requires_grad = any(
+                isinstance(i, torch.Tensor) and i.requires_grad for i in input
+            )
+            if isinstance(output, torch.Tensor):
+                output_requires_grad = output.requires_grad
+            elif isinstance(output, (list, tuple)):
+                output_requires_grad = any(
+                    isinstance(o, torch.Tensor) and o.requires_grad for o in output
+                )
+            else:
+                output_requires_grad = False
+
+            msg = (
+                f"input_requires_grad: {input_requires_grad} | "
+                f"output_requires_grad: {output_requires_grad}"
+            )
+            # self.logger.info(f"{self.label}::{module_name} | {msg}")
+
+        # Only use forward hook to detect requirement status
+        fwd_handle = module.register_forward_hook(_forward_hook)
+        self.hooks.append(fwd_handle)
+
+        for child_name, child_module in module.named_children():
+            full_name = f"{module_name}.{child_name}"
+            self._register_hooks(child_module, prefix=full_name, depth=depth + 1)

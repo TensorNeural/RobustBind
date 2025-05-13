@@ -3,9 +3,9 @@ set -e
 
 # === Model type to modalities ===
 declare -A MODEL_TYPE_TO_MODALITIES=(
-  [vision]="image video event"
+  # [vision]="image video event"
   # [audio]="audio"
-  # [thermal]="thermal"
+  [thermal]="thermal"
   # [point]="point"
 )
 
@@ -204,7 +204,9 @@ OUTPUT_DIR=output
 NUM_WORKERS=2
 TENSORBOARD_DATA_DIR=tensorboard
 PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten.pt"
-EPSILONS=(2 4)
+EPSILONS=(2)
+LORA_RANKS=(2 4 8)
+LORA_ALPHAS=(4 8 16)
 
 # === Main loop ===
 
@@ -227,35 +229,39 @@ for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
       emb_path="./centre_embs/${val_modality}_${emb_suffix}_center_embeddings.pkl"
 
       for eps in "${EPSILONS[@]}"; do
-        echo "=== $model_type | $train_dataset => $val_dataset | eps=$eps ==="
-        echo "=== Embedding path: $emb_path ==="
+        for lora_rank in "${LORA_RANKS[@]}"; do
+          for lora_alpha in "${LORA_ALPHAS[@]}"; do
+            echo "=== $model_type | $train_dataset => $val_dataset | eps=$eps | rank=$lora_rank | alpha=$lora_alpha ==="
+            echo "=== Embedding path: $emb_path ==="
 
-        torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
-          --model_type "$model_type" \
-          --train_modality "$train_modality" \
-          --val_modality "$val_modality" \
-          --train_dataset_name "$train_dataset" \
-          --val_dataset_name "$val_dataset" \
-          --train_dataset_root "/home/user/datasets/$train_dataset" \
-          --val_dataset_root "/home/user/datasets/$val_dataset" \
-          --train_json "$train_json" \
-          --val_json "$val_json" \
-          --pretrain_weights "$PRETRAIN_WEIGHTS" \
-          --center_emb "$emb_path" \
-          --train_batch_size "$train_bs" \
-          --val_batch_size "$val_bs" \
-          --num_workers "$NUM_WORKERS" \
-          --train_max_samples "$train_max" \
-          --val_max_samples "$val_max" \
-          --train_attack_loss "l2" \
-          --val_attack_loss "ce" \
-          --train_loss "l2" \
-          --lora_rank 4 \
-          --lora_alpha 8 \
-          --epsilon "$eps" \
-          --use_flash_attention \
-          --tensorboard_data_dir "$TENSORBOARD_DATA_DIR" \
-          --output_dir "$OUTPUT_DIR"
+            torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
+              --model_type "$model_type" \
+              --train_modality "$train_modality" \
+              --val_modality "$val_modality" \
+              --train_dataset_name "$train_dataset" \
+              --val_dataset_name "$val_dataset" \
+              --train_dataset_root "/home/user/datasets/$train_dataset" \
+              --val_dataset_root "/home/user/datasets/$val_dataset" \
+              --train_json "$train_json" \
+              --val_json "$val_json" \
+              --pretrain_weights "$PRETRAIN_WEIGHTS" \
+              --center_emb "$emb_path" \
+              --train_batch_size "$train_bs" \
+              --val_batch_size "$val_bs" \
+              --num_workers "$NUM_WORKERS" \
+              --train_max_samples "$train_max" \
+              --val_max_samples "$val_max" \
+              --train_attack_loss "l2" \
+              --val_attack_loss "ce" \
+              --train_loss "l2" \
+              --lora_rank "$lora_rank" \
+              --lora_alpha "$lora_alpha" \
+              --epsilon "$eps" \
+              --use_flash_attention \
+              --tensorboard_data_dir "$TENSORBOARD_DATA_DIR" \
+              --output_dir "$OUTPUT_DIR"
+          done
+        done
       done
     done
   done

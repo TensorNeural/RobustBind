@@ -1,24 +1,108 @@
 import torch
-from torch import nn
-import torch.nn.functional as F
+import torch.nn as nn
 import torch.nn.init as init
-from models import PointBind_models
-from imagebind.imagebind_model import ModalityType
-import logging
-from types import SimpleNamespace
 import torch_scatter
+import torch.nn.functional as F
+import logging
 import abc
 from enum import Enum, auto
+from types import SimpleNamespace
+# import traceback
+
+# PointBind / UniBind
+from models import PointBind_models
 from imagebind.lora import lora_load_state_dict, save_lora_weights, load_lora_weights
 
-MODALITY_TO_MLP = {
-    "image":   "mlp_for_image",
-    "video":   "mlp_for_video",
-    "audio":   "mlp_for_audio",
-    "thermal": "mlp_for_thermal",
-    "point":   "mlp_for_point",
-    "event":   "mlp_for_event",
+from binds.languagebind import (
+    LanguageBind, to_device,
+    LanguageBindImageTokenizer, LanguageBindVideoTokenizer, LanguageBindAudioTokenizer, 
+    LanguageBindThermalTokenizer, LanguageBindDepthTokenizer
+)
+
+# ImageBind
+from binds.imagebind.models import imagebind_model
+from data_util import load_and_transform_text
+from binds.imagebind.models.imagebind_model import ModalityType as ImageBindModalityType
+from imagebind.imagebind_model import ModalityType
+from shared_types import Modality
+
+class ForwardMode(Enum):
+    EMBEDDINGS = auto()
+    LOGITS = auto()
+
+MODALITY_TEMPLATES = {
+    Modality.IMAGE:   "a photo of a {}",
+    Modality.VIDEO:   "a video of a {}",
+    Modality.DEPTH:   "a depth photo of a {}",
+    Modality.THERMAL: "a photo of a {}",
+    Modality.AUDIO:   "a sound of a {}",
+    Modality.POINT:   "a 3D point cloud of a {}",
+    Modality.EVENT:   "an event frame of a {}",
 }
+
+LANGUAGEBIND_MODEL_NAME_MAP = {
+    Modality.VIDEO:   "LanguageBind_Video_FT",
+    Modality.AUDIO:   "LanguageBind_Audio_FT",
+    Modality.THERMAL: "LanguageBind_Thermal",
+    Modality.IMAGE:   "LanguageBind_Image",
+    Modality.DEPTH:   "LanguageBind_Depth",
+}
+LANGUAGEBIND_TOKENIZER_MAP = {
+    Modality.IMAGE:   LanguageBindImageTokenizer,
+    Modality.VIDEO:   LanguageBindVideoTokenizer,
+    Modality.AUDIO:   LanguageBindAudioTokenizer,
+    Modality.THERMAL: LanguageBindThermalTokenizer,
+    Modality.DEPTH:   LanguageBindDepthTokenizer,
+}
+LANGUAGEBIND_TOKENIZER_NAME_MAP = {
+    Modality.IMAGE:   "lb203/LanguageBind_Image",
+    Modality.VIDEO:   "lb203/LanguageBind_Video",
+    Modality.AUDIO:   "lb203/LanguageBind_Audio",
+    Modality.THERMAL: "lb203/LanguageBind_Thermal",
+    Modality.DEPTH:   "lb203/LanguageBind_Depth",
+}
+IMAGEBIND_MODALITY_MAP = {
+    Modality.TEXT:    ImageBindModalityType.TEXT,
+    Modality.IMAGE:   ImageBindModalityType.VISION,
+    Modality.VIDEO:   ImageBindModalityType.VISION,
+    Modality.AUDIO:   ImageBindModalityType.AUDIO,
+    Modality.THERMAL: ImageBindModalityType.THERMAL,
+    Modality.DEPTH:   ImageBindModalityType.DEPTH,
+}
+
+MODALITY_TO_MLP = {
+    Modality.IMAGE:   "mlp_for_image",
+    Modality.VIDEO:   "mlp_for_video",
+    Modality.AUDIO:   "mlp_for_audio",
+    Modality.THERMAL: "mlp_for_thermal",
+    Modality.POINT:   "mlp_for_point",
+    Modality.EVENT:   "mlp_for_event",
+}
+
+MODALITY_MAP = {
+    Modality.IMAGE: ModalityType.VISION,
+    Modality.VIDEO: ModalityType.VISION,
+    Modality.AUDIO: ModalityType.AUDIO,
+    Modality.THERMAL: ModalityType.THERMAL,
+    Modality.EVENT: ModalityType.VISION,
+    Modality.POINT: ModalityType.POINT,
+}
+
+
+# ============================ Shared Model Base ============================
+class Model(nn.Module):
+    @abc.abstractmethod
+    def forward(self, x, mode: ForwardMode):
+        pass
+
+    def extract_tensor(self, x):
+        pass
+
+    def wrap_tensor(self, x):
+        pass
+    
+    def data_to_device(self, x, device):
+        pass
 
 class UniBind(nn.Module):
     def __init__(self, args, use_flash_attention=False, use_lora=False, lora_rank=4, lora_alpha=8, use_fine_tune=False, lora_weights=None, fine_tuned_weights=None, logger=None):
@@ -41,22 +125,22 @@ class UniBind(nn.Module):
         lora_load_state_dict(self.backbone, state_dict)
 
         # Create modality-specific MLP
-        if self.modality == "image":
+        if self.modality == Modality.IMAGE:
             self.mlp_for_image = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_image.requires_grad_(use_fine_tune)
-        elif self.modality == "video":
+        elif self.modality == Modality.VIDEO:
             self.mlp_for_video = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_video.requires_grad_(use_fine_tune)
-        elif self.modality == "audio":
+        elif self.modality == Modality.AUDIO:
             self.mlp_for_audio = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_audio.requires_grad_(use_fine_tune)
-        elif self.modality == "thermal":
+        elif self.modality == Modality.THERMAL:
             self.mlp_for_thermal = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_thermal.requires_grad_(use_fine_tune)
-        elif self.modality == "point":
+        elif self.modality == Modality.POINT:
             self.mlp_for_point = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_point.requires_grad_(use_fine_tune)
-        elif self.modality == "event":
+        elif self.modality == Modality.EVENT:
             self.mlp_for_event = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_event.requires_grad_(use_fine_tune)
         else:
@@ -67,47 +151,47 @@ class UniBind(nn.Module):
             self.load_fine_tuned_weights(fine_tuned_weights)
 
     def forward(self, inputs):
-        if self.modality == "image":
+        if self.modality == Modality.IMAGE:
             outputs = self.__bind(inputs)
-            text_embeddings = outputs[ModalityType.TEXT]
+            text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_image(outputs[ModalityType.VISION])
+                vision_embeddings = self.mlp_for_image(outputs[ImageBindModalityType.VISION])
             else:
-                vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "video":
+                vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.VIDEO:
             outputs = self.__bind(inputs)
-            text_embeddings = outputs[ModalityType.TEXT]
+            text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_video(outputs[ModalityType.VISION])
+                vision_embeddings = self.mlp_for_video(outputs[ImageBindModalityType.VISION])
             else:
-                vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "audio":
+                vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.AUDIO:
             outputs = self.__bind(inputs)
-            text_embeddings = outputs[ModalityType.TEXT]
+            text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_audio(outputs[ModalityType.AUDIO])
+                vision_embeddings = self.mlp_for_audio(outputs[ImageBindModalityType.AUDIO])
             else:
-                vision_embeddings = outputs[ModalityType.AUDIO]
-        elif self.modality == "thermal":
+                vision_embeddings = outputs[ImageBindModalityType.AUDIO]
+        elif self.modality == Modality.THERMAL:
             outputs = self.__bind(inputs)
-            text_embeddings = outputs[ModalityType.TEXT]
+            text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_thermal(outputs[ModalityType.THERMAL])
+                vision_embeddings = self.mlp_for_thermal(outputs[ImageBindModalityType.THERMAL])
             else:
-                vision_embeddings = outputs[ModalityType.THERMAL]
-        elif self.modality == "event":
+                vision_embeddings = outputs[ImageBindModalityType.THERMAL]
+        elif self.modality == Modality.EVENT:
             outputs = self.__bind(inputs)
-            text_embeddings = outputs[ModalityType.TEXT]
+            text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_event(outputs[ModalityType.VISION])
+                vision_embeddings = self.mlp_for_event(outputs[ImageBindModalityType.VISION])
             else:
-                vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "point":
+                vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.POINT:
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
             pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
             pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
-            outputs = self.__bind({ModalityType.TEXT: inputs['text']})
-            text_embeddings = outputs[ModalityType.TEXT]
+            outputs = self.__bind({ImageBindModalityType.TEXT: inputs['text']})
+            text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_point(pc_embeddings)
             else:
@@ -118,22 +202,22 @@ class UniBind(nn.Module):
         return text_embeddings, vision_embeddings
 
     def encode_vision(self, inputs):
-        if self.modality == "image":
+        if self.modality == Modality.IMAGE:
             outputs = self.__bind(inputs)
-            vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "video":
+            vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.VIDEO:
             outputs = self.__bind(inputs)
-            vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "audio":
+            vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.AUDIO:
             outputs = self.__bind(inputs)
-            vision_embeddings = outputs[ModalityType.AUDIO]
-        elif self.modality == "thermal":
+            vision_embeddings = outputs[ImageBindModalityType.AUDIO]
+        elif self.modality == Modality.THERMAL:
             outputs = self.__bind(inputs)
-            vision_embeddings = outputs[ModalityType.THERMAL]
-        elif self.modality == "event":
+            vision_embeddings = outputs[ImageBindModalityType.THERMAL]
+        elif self.modality == Modality.EVENT:
             outputs = self.__bind(inputs)
-            vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "point":
+            vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.POINT:
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
             pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
             vision_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
@@ -141,37 +225,37 @@ class UniBind(nn.Module):
         return vision_embeddings / vision_embeddings.norm(dim=-1, keepdim=True)
 
     def encode_vision_with_mlp(self, inputs):
-        if self.modality == "image":
+        if self.modality == Modality.IMAGE:
             outputs = self.__bind(inputs)
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_image(outputs[ModalityType.VISION])
+                vision_embeddings = self.mlp_for_image(outputs[ImageBindModalityType.VISION])
             else:
-                vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "video":
+                vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.VIDEO:
             outputs = self.__bind(inputs)
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_video(outputs[ModalityType.VISION])
+                vision_embeddings = self.mlp_for_video(outputs[ImageBindModalityType.VISION])
             else:
-                vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "audio":
+                vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.AUDIO:
             outputs = self.__bind(inputs)
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_audio(outputs[ModalityType.AUDIO])
+                vision_embeddings = self.mlp_for_audio(outputs[ImageBindModalityType.AUDIO])
             else:
-                vision_embeddings = outputs[ModalityType.AUDIO]
-        elif self.modality == "thermal":
+                vision_embeddings = outputs[ImageBindModalityType.AUDIO]
+        elif self.modality == Modality.THERMAL:
             outputs = self.__bind(inputs)
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_thermal(outputs[ModalityType.THERMAL])
+                vision_embeddings = self.mlp_for_thermal(outputs[ImageBindModalityType.THERMAL])
             else:
-                vision_embeddings = outputs[ModalityType.THERMAL]
-        elif self.modality == "event":
+                vision_embeddings = outputs[ImageBindModalityType.THERMAL]
+        elif self.modality == Modality.EVENT:
             outputs = self.__bind(inputs)
             if self.use_fine_tune:
-                vision_embeddings = self.mlp_for_event(outputs[ModalityType.VISION])
+                vision_embeddings = self.mlp_for_event(outputs[ImageBindModalityType.VISION])
             else:
-                vision_embeddings = outputs[ModalityType.VISION]
-        elif self.modality == "point":
+                vision_embeddings = outputs[ImageBindModalityType.VISION]
+        elif self.modality == Modality.POINT:
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
             pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
             pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
@@ -183,7 +267,7 @@ class UniBind(nn.Module):
         return vision_embeddings / vision_embeddings.norm(dim=-1, keepdim=True)
 
     def encode_text(self, inputs):
-        text_embeddings = self.__bind(inputs)[ModalityType.TEXT]
+        text_embeddings = self.__bind(inputs)[ImageBindModalityType.TEXT]
         return text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
 
     def save_fine_tuned_weights(self, checkpoint_path: str):
@@ -222,23 +306,9 @@ def init_linear_as_identity(linear_layer):
     nn.init.zeros_(linear_layer.bias)
     return linear_layer
 
-MODALITY_MAP = {
-    "image": ModalityType.VISION,
-    "video": ModalityType.VISION,
-    "audio": ModalityType.AUDIO,
-    "thermal": ModalityType.THERMAL,
-    "point": ModalityType.POINT,
-    "event": ModalityType.VISION
-}
-
-class ForwardMode(Enum):
-    EMBEDDINGS = auto()
-    LOGITS = auto()
-
-class Model(nn.Module):
-    @abc.abstractmethod
-    def forward(self, x, mode: ForwardMode):
-        pass
+# ============================ UniBindModel ============================
+# (as defined in your full version, unchanged)
+# Please assume your full UniBindModel code is already here.
 
 class UniBindModel(Model):
     def __init__(
@@ -305,6 +375,15 @@ class UniBindModel(Model):
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
+    def extract_tensor(self, x):
+        return x
+    
+    def wrap_tensor(self, x):
+        return x
+    
+    def data_to_device(self, x, device):
+        return x.to(device)
+
     def _logits(self, x, temperature=1000.0):
         embeddings = self._encode(x)
         similarity = embeddings @ self.centre_embeddings.t()
@@ -349,9 +428,151 @@ class UniBindModel(Model):
         masked = similarity_exp.masked_fill(~mask_exp, -1e9) # (B, C, N)
         return torch.logsumexp(masked * temperature, dim=2) / temperature  # (B, C)
 
-    def _scatter_logsumexp(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
-        return torch_scatter.scatter_logsumexp(
-            similarity * temperature,
-            self.centre_label_indices,
-            dim=1
-        ) / temperature  # (B, C)
+
+# ============================ LanguageBindModel ============================
+class LanguageBindModel(Model):
+    def __init__(self, device, modality, class_strings, logger=None):
+        super().__init__()
+        self.device = device
+        self.modality = modality
+        self.class_strings = class_strings
+        self.logger = logger or logging.getLogger(__name__)
+
+        # Prepare prompts using modality-specific templates
+        template = MODALITY_TEMPLATES.get(modality, "a {}")
+        prompts = [template.format(cls) for cls in class_strings]
+
+        # Load single-modality LanguageBind model and tokenizer
+        model_name = LANGUAGEBIND_MODEL_NAME_MAP[modality]
+        self.languagebind = LanguageBind(clip_type={modality.value: model_name})
+        self.languagebind = self.languagebind.to(device)
+        self.languagebind.eval()
+
+        tokenizer_class = LANGUAGEBIND_TOKENIZER_MAP[modality]
+        tokenizer = tokenizer_class.from_pretrained(
+            LANGUAGEBIND_TOKENIZER_NAME_MAP[self.modality],
+            cache_dir="./cache/tokenizer"
+        )
+
+        # Tokenize class prompts → encode → normalize
+        tokens = tokenizer(prompts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")
+        print(f"prompts: {len(prompts)}")
+        tokens = to_device(tokens, device)
+        text_embs = self.encode_text(tokens)
+
+        self.class_embeddings = text_embs
+
+    def forward(self, x, mode: ForwardMode):
+        if mode == ForwardMode.EMBEDDINGS:
+            return self._encode(x)
+        elif mode == ForwardMode.LOGITS:
+            return self._logits(x)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+    def extract_tensor(self, x):
+        if self.modality == Modality.IMAGE:
+            return x["pixel_values"]
+        elif self.modality == Modality.VIDEO:
+            return x["pixel_values"]
+        elif self.modality == Modality.AUDIO:
+            return x["pixel_values"]
+        elif self.modality == Modality.THERMAL:
+            return x["pixel_values"]
+        elif self.modality == Modality.DEPTH:
+            return x["pixel_values"]
+        elif self.modality == Modality.EVENT:
+            return x["pixel_values"]
+        elif self.modality == Modality.POINT:
+            return x["point"]
+        else:
+            raise ValueError(f"Unknown modality: {self.modality}")
+    
+    def wrap_tensor(self, x_tensor):
+        if self.modality == Modality.IMAGE:
+            return {"pixel_values": x_tensor}
+        elif self.modality == Modality.VIDEO:
+            return {"pixel_values": x_tensor}
+        elif self.modality == Modality.AUDIO:
+            return {"pixel_values": x_tensor}
+        elif self.modality == Modality.THERMAL:
+            return {"pixel_values": x_tensor}
+        elif self.modality == Modality.DEPTH:
+            return {"pixel_values": x_tensor}
+        elif self.modality == Modality.EVENT:
+            return {"pixel_values": x_tensor}
+        elif self.modality == Modality.POINT:
+            return {"point": x_tensor}
+        else:
+            raise ValueError(f"Unknown modality: {self.modality}")
+    
+    def data_to_device(self, x, device):
+        return to_device(x, device)
+
+    def encode_text(self, x):
+        # x is already transformed and on device
+        with torch.no_grad():
+            emb = self.languagebind({'language': x})['language']
+
+        return emb / emb.norm(dim=-1, keepdim=True)
+
+    def modality_config(self):
+        return self.languagebind.modality_config[self.modality.value]
+
+    def _encode(self, x):
+        # x is already transformed and on device
+        emb = self.languagebind({self.modality.value: x})[self.modality.value]
+        return emb / emb.norm(dim=-1, keepdim=True)
+
+    def _logits(self, x, temperature=100.0):
+        emb = self._encode(x)
+        logits = emb @ self.class_embeddings.T
+        return logits / temperature, logits
+
+# ============================ ImageBindModel ============================
+class ImageBindModel(Model):
+    def __init__(self, device, modality, class_strings, logger=None):
+        super().__init__()
+        self.device = device
+        self.modality = modality
+        self.class_strings = class_strings
+        self.logger = logger or logging.getLogger(__name__)
+
+        template = MODALITY_TEMPLATES.get(modality, "a {}")
+        text_list = [template.format(cls) for cls in class_strings]
+
+        self.model = imagebind_model.imagebind_huge(pretrained=True).to(device)
+        self.model.eval()
+        tokens = load_and_transform_text(text_list, device)
+
+        with torch.no_grad():
+            text_embs = self.model({ImageBindModalityType.TEXT: tokens})[ImageBindModalityType.TEXT]
+
+        self.class_embeddings = text_embs / text_embs.norm(dim=-1, keepdim=True)
+
+    def forward(self, x, mode: ForwardMode):
+        if mode == ForwardMode.EMBEDDINGS:
+            return self._encode(x)
+        elif mode == ForwardMode.LOGITS:
+            return self._logits(x)
+        raise ValueError(f"Unknown mode: {mode}")
+
+    def extract_tensor(self, x):
+        return x
+    
+    def wrap_tensor(self, x_tensor):
+        return x_tensor
+
+    def data_to_device(self, x, device):
+        return x.to(device)
+
+    def _encode(self, x):
+        with torch.no_grad():
+            imagebind_modality = IMAGEBIND_MODALITY_MAP[self.modality]
+            emb = self.model({IMAGEBIND_MODALITY_MAP[self.modality]: x})[imagebind_modality]
+        return emb / emb.norm(dim=-1, keepdim=True)
+
+    def _logits(self, x, temperature=100.0):
+        emb = self._encode(x)
+        logits = emb @ self.class_embeddings.T
+        return logits / temperature, logits

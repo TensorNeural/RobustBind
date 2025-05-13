@@ -22,18 +22,15 @@ def load_category_mapping(dataset_root):
         for line in f:
             parts = line.strip().split()
             if len(parts) == 2:
-                full_category_name, category_index = parts[0], int(parts[1])  # Extract full name & index
-                category_parts = full_category_name.split("/")  # Split by "/"
-
-                # Ensure we get the third part if available; otherwise, use the last part
+                full_category_name, category_index = parts[0], int(parts[1])
+                category_parts = full_category_name.split("/")
                 if len(category_parts) >= 3:
                     category_name = category_parts[2]
                 else:
                     category_name = category_parts[-1]
 
-                category_to_label[category_index] = category_name  # Index → Name Mapping
+                category_to_label[category_index] = category_name
 
-                # If category name already exists, add the index to the list
                 if category_name in label_to_categories:
                     label_to_categories[category_name].append(category_index)
                 else:
@@ -55,8 +52,8 @@ def load_image_labels(dataset_root, label_file):
         for line in f:
             parts = line.strip().split()
             if len(parts) == 2:
-                img_path = parts[0]  # Always relative path
-                image_to_label[img_path] = int(parts[1])  # Ensure category index is an integer
+                img_path = parts[0]
+                image_to_label[img_path] = int(parts[1])
 
     print(f"Loaded {len(image_to_label)} image labels from {label_file}.")
     return image_to_label
@@ -74,13 +71,13 @@ def generate_metadata(dataset_root, dataset_name, output_filename, label_file, c
     metadata = []
 
     for img_relative_path, category_index in image_labels.items():
-        img_path = os.path.join(dataset_dir, img_relative_path)  # Uses dataset_dir now
+        img_path = os.path.join(dataset_dir, img_relative_path)
 
         if not os.path.exists(img_path):
             print(f"Warning: Skipping missing file {img_path}")
             continue
 
-        category_name = category_mapping.get(category_index, "unknown")  # Correct lookup
+        category_name = category_mapping.get(category_index, "unknown")
 
         metadata.append({
             "data": os.path.join(dataset_name, img_relative_path),
@@ -100,6 +97,36 @@ def save_label_mapping(output_file, label_to_categories):
 
     print(f"Label mapping saved to {output_path} ({len(label_to_categories)} entries).")
 
+def generate_class_name_list(dataset_root, output_file):
+    """Extracts class names from categories_places365.txt and saves as a list of strings."""
+    mapping_file = os.path.join(dataset_root, CATEGORY_MAPPING_FILE)
+
+    if not os.path.exists(mapping_file):
+        print(f"Error: {mapping_file} not found.")
+        return
+
+    class_names = set()
+
+    with open(mapping_file, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) == 2:
+                category_path = parts[0]
+                path_parts = category_path.split("/")
+                if len(path_parts) >= 3:
+                    class_name = path_parts[2]
+                else:
+                    class_name = path_parts[-1]
+                class_names.add(class_name)
+
+    sorted_classes = sorted(class_names)
+
+    output_path = os.path.join(OUTPUT_DIR, output_file)
+    with open(output_path, "w") as f:
+        json.dump(sorted_classes, f, indent=2)
+
+    print(f"Class name list saved to {output_path} ({len(sorted_classes)} classes).")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Places365 metadata.")
     parser.add_argument("DATASET_ROOT", type=str, help="Path to the Places365 dataset root directory.")
@@ -118,5 +145,8 @@ if __name__ == "__main__":
 
     print("Saving label-to-category mapping...")
     save_label_mapping("center_to_places365.json", label_to_categories)
+
+    print("Saving class name list...")
+    generate_class_name_list(args.DATASET_ROOT, "classes_places365.json")
 
     print("Metadata generation complete. Files saved in Places365 directory.")

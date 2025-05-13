@@ -102,7 +102,7 @@ def prepare_coco_caption(coco_caption_root):
     for key, url in COCO_URLS.items():
         file = os.path.basename(url)
         path = os.path.join(coco_caption_root, file)
-        download(url, path)
+        # download(url, path)
         if "train2017" in key:
             extract(path, coco_caption_root, rename_dir="train")
         elif "val2017" in key:
@@ -124,7 +124,7 @@ def main():
         print("\n❌ One or more dataset URLs are invalid or unavailable. Aborting.")
         return
 
-    prepare_vqa2(vqa_dir)
+    # prepare_vqa2(vqa_dir)
     prepare_coco_caption(coco_caption_dir)
 
     print(f"\n✅ Datasets ready in:\n- {vqa_dir}\n- {coco_caption_dir}")

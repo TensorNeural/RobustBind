@@ -82,26 +82,26 @@ def main():
     safe_mkdir(base_dir)
     safe_mkdir(tar_dir)
 
-    # Download annotations
-    ann_dir = os.path.join(base_dir, "annotations")
-    safe_mkdir(ann_dir)
-    for split, url in ANNOTATIONS.items():
-        out_path = os.path.join(ann_dir, f"{split}.csv")
-        download_file(url, out_path)
+    # # Download annotations
+    # ann_dir = os.path.join(base_dir, "annotations")
+    # safe_mkdir(ann_dir)
+    # for split, url in ANNOTATIONS.items():
+    #     out_path = os.path.join(ann_dir, f"{split}.csv")
+    #     download_file(url, out_path)
 
-    # Download readme
-    download_file(README_URL, os.path.join(base_dir, "readme.md"))
+    # # Download readme
+    # download_file(README_URL, os.path.join(base_dir, "readme.md"))
 
-    # Download tarballs
-    for split in K400_SPLITS:
-        split_tar_dir = os.path.join(tar_dir, split)
-        safe_mkdir(split_tar_dir)
-        download_tar_list(TAR_URLS[split], split_tar_dir)
+    # # Download tarballs
+    # for split in K400_SPLITS:
+    #     split_tar_dir = os.path.join(tar_dir, split)
+    #     safe_mkdir(split_tar_dir)
+    #     download_tar_list(TAR_URLS[split], split_tar_dir)
 
-    # Download replacement
-    repl_dir = os.path.join(tar_dir, "replacement")
-    safe_mkdir(repl_dir)
-    download_file(REPLACEMENT_URL, os.path.join(repl_dir, os.path.basename(REPLACEMENT_URL)))
+    # # Download replacement
+    # repl_dir = os.path.join(tar_dir, "replacement")
+    # safe_mkdir(repl_dir)
+    # download_file(REPLACEMENT_URL, os.path.join(repl_dir, os.path.basename(REPLACEMENT_URL)))
 
     # Extract and organize splits
     for split in K400_SPLITS:

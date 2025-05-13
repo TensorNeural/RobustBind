@@ -13,29 +13,34 @@ from pytorchvideo.data.encoded_video import EncodedVideo
 from pytorchvideo.data.clip_sampling import ConstantClipsPerVideoSampler
 from pytorchvideo.transforms import Normalize, UniformTemporalSubsample, ShortSideScale
 import torchaudio
+from imagebind.multimodal_preprocessors import SimpleTokenizer
 import numpy as np
+from shared_types import BindModelType, Modality
+from binds.languagebind import transform_dict as lb_transform_dict
 
 from utils.utils import load_centre_embeddings
+
+BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 
 # ===================
 # Modality Constants
 # ===================
 MEAN_MAP = {
-    "image": [0.48145466, 0.4578275, 0.40821073],
-    "event": [0.48145466, 0.4578275, 0.40821073],
-    "thermal": [0.5],
-    "video": [0.48145466, 0.4578275, 0.40821073],
-    "audio": [-4.268],
-    "point": [0.0, 0.0, 0.0],
+    Modality.IMAGE: [0.48145466, 0.4578275, 0.40821073],
+    Modality.EVENT: [0.48145466, 0.4578275, 0.40821073],
+    Modality.THERMAL: [0.5],
+    Modality.VIDEO: [0.48145466, 0.4578275, 0.40821073],
+    Modality.AUDIO: [-4.268],
+    Modality.POINT: [0.0, 0.0, 0.0],
 }
 
 STD_MAP = {
-    "image": [0.26862954, 0.26130258, 0.27577711],
-    "event": [0.26862954, 0.26130258, 0.27577711],
-    "thermal": [0.5],
-    "video": [0.26862954, 0.26130258, 0.27577711],
-    "audio": [9.138],
-    "point": [1.0, 1.0, 1.0],
+    Modality.IMAGE: [0.26862954, 0.26130258, 0.27577711],
+    Modality.EVENT: [0.26862954, 0.26130258, 0.27577711],
+    Modality.THERMAL: [0.5],
+    Modality.VIDEO: [0.26862954, 0.26130258, 0.27577711],
+    Modality.AUDIO: [9.138],
+    Modality.POINT: [1.0, 1.0, 1.0],
 }
 
 NUM_FRAMES = 2
@@ -71,20 +76,21 @@ class JsonDataset(Dataset):
 # ===================
 def get_transform_fn(modality, minSample=False):
     return {
-        "image": load_and_transform_vision_data,
-        # "event": load_and_transform_event_data,
-        "event": load_and_transform_vision_data,
-        "thermal": load_and_transform_thermal_data,
-        "video": load_and_transform_video_data(minSample=minSample),
-        "audio": load_and_transform_audio_data,
-        "point": load_and_transform_point_data
+        Modality.TEXT: load_and_transform_text,
+        Modality.IMAGE: load_and_transform_vision_data,
+        # Modality.EVENT: load_and_transform_event_data,
+        Modality.EVENT: load_and_transform_vision_data,
+        Modality.THERMAL: load_and_transform_thermal_data,
+        Modality.VIDEO: load_and_transform_video_data(minSample=minSample),
+        Modality.AUDIO: load_and_transform_audio_data,
+        Modality.POINT: load_and_transform_point_data
     }[modality]
 
 IMAGE_TRANSFORM = transforms.Compose([
     transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN_MAP["image"], std=STD_MAP["image"]),
+    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
 ])
 
 def load_and_transform_vision_data(image_paths, device):
@@ -307,8 +313,8 @@ def load_and_transform_video_data(
             [
                 ShortSideScale(224),
                 Normalize(
-                    mean=MEAN_MAP["video"],
-                    std=STD_MAP["video"],
+                    mean=MEAN_MAP[Modality.VIDEO],
+                    std=STD_MAP[Modality.VIDEO],
                 ),
             ]
         )
@@ -542,6 +548,14 @@ def load_and_transform_event_data(
         return dummy
 
     return torch.stack(all_videos, dim=0)  # [B, V, C, T, H, W]
+
+def load_and_transform_text(text, device):
+    if text is None:
+        return None
+    tokenizer = SimpleTokenizer(bpe_path=BPE_PATH)
+    tokens = [tokenizer(t).unsqueeze(0).to(device) for t in text]
+    tokens = torch.cat(tokens, dim=0)
+    return tokens
 
 # ===================
 # Loader & Utility

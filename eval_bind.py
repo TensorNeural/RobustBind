@@ -5,15 +5,16 @@ import logging
 import torch.distributed as dist
 from datetime import datetime
 import gc
+import json
 
-from model import UniBindModel, LanguageBindModel, ImageBindModel
+from model import UniBindModel, LanguageBindModel, ImageBindModel, Modality
 from eval import evaluate_clean, evaluate_two_stage
 from data_util import (
     load_label_mapping,
     val_data_loader,
     get_normalization_tensors
 )
-
+from shared_types import BindModelType
 
 def setup_logger(rank, output_path):
     logger = logging.getLogger(f"EvalLogger-Rank{rank}")
@@ -42,8 +43,9 @@ def normalize_label(label: str) -> str:
 
 
 def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=False):
-    if args.model_type == "UniBind":
-        model = UniBindModel(
+    logger.info(f"Building {args.model_type.value.upper()} model ...")
+    if args.model_type == BindModelType.UNIBIND:
+        return UniBindModel(
             device=device,
             pretrain_weights=args.pretrain_weights,
             modality=args.modality,
@@ -53,28 +55,32 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
             logger=logger,
             use_flash_attention=args.use_flash_attention,
             use_lora=use_lora
-        )
-    else:
-        class_strings = [normalize_label(lbl) for lbl in raw_lbls]
-        if args.model_type == "LanguageBind":
-            model = LanguageBindModel(
-                device=device,
-                modality=args.modality,
-                class_strings=class_strings,
-                logger=logger
-            )
-        elif args.model_type == "ImageBind":
-            model = ImageBindModel(
-                device=device,
-                modality=args.modality,
-                class_strings=class_strings,
-                logger=logger
-            )
-        else:
-            raise ValueError(f"Unsupported model_type: {args.model_type}")
+        ).to(device)
+    # # deduplicate labels
+    # raw_lbls = list(set(raw_lbls))
+    # class_strings = [normalize_label(lbl) for lbl in raw_lbls]
+    with open(args.classes_json, "r") as f:
+        class_strings = json.load(f)
 
-    model.to(device)
-    return model
+    class_strings = [normalize_label(lbl) for lbl in class_strings]
+    if args.model_type == BindModelType.LANGUAGEBIND:
+        return LanguageBindModel(
+            device=device,
+            modality=args.modality,
+            class_strings=class_strings,
+            logger=logger
+        ).to(device)
+
+    if args.model_type == BindModelType.IMAGEBIND:
+        return ImageBindModel(
+            device=device,
+            modality=args.modality,
+            class_strings=class_strings,
+            logger=logger
+        ).to(device)
+
+    raise ValueError(f"Unsupported model type: {args.model_type}")
+
 
 
 def evaluate_all_models(args):
@@ -84,18 +90,20 @@ def evaluate_all_models(args):
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, "eval", args.modality, args.dataset_name)
+    args.output_dir = os.path.join(args.output_dir, "eval", args.modality.value, args.dataset_name)
     os.makedirs(args.output_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
 
     logger = setup_logger(rank, log_path)
-    logger.info(f"Evaluating {args.model_type.upper()} on {args.modality.upper()} / {args.dataset_name.upper()}")
+    logger.info(f"Evaluating {args.model_type.value.upper()} on {args.modality.value.upper()} / {args.dataset_name.upper()} epsilons={args.epsilons}")
 
     raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
 
     clean_loader = None
+    model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx)
+
     if args.run_clean_eval:
         clean_loader = val_data_loader(
             modality=args.modality,
@@ -107,6 +115,20 @@ def evaluate_all_models(args):
             max_samples=args.clean_val_max_samples
         )
 
+    mean, std = get_normalization_tensors(args.modality, device)
+    eps_list = [float(e.strip()) / 255.0 for e in args.epsilons.split(",")]
+
+    final_results = []
+
+    logger.info("Evaluating original model ...")
+
+    # if args.run_clean_eval:
+    #     acc = evaluate_clean(logger, device, model, clean_loader)
+    #     entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
+    #     if rank == 0:
+    #         logger.info(entry)
+    #     final_results.append(entry)
+    
     attack_loader = val_data_loader(
         modality=args.modality,
         dataset_root=args.dataset_root,
@@ -116,21 +138,6 @@ def evaluate_all_models(args):
         num_workers=args.num_workers,
         max_samples=args.attack_val_max_samples
     )
-
-    mean, std = get_normalization_tensors(args.modality, device)
-    eps_list = [float(e.strip()) / 255.0 for e in args.epsilons.split(",")]
-
-    final_results = []
-
-    logger.info("Evaluating original model ...")
-    model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx)
-
-    if args.run_clean_eval:
-        acc = evaluate_clean(logger, device, model, clean_loader)
-        entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
-        logger.info(entry)
-        final_results.append(entry)
-
     for eps in eps_list:
         acc = evaluate_two_stage(
             logger, device, model, attack_loader,
@@ -142,13 +149,14 @@ def evaluate_all_models(args):
         )
         entry = f"[ORIGINAL] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}"
         logger.info(entry)
-        final_results.append(entry)
+        if rank == 0:
+            final_results.append(entry)
 
-    del model
-    torch.cuda.empty_cache()
-    gc.collect()
+    # del model
+    # torch.cuda.empty_cache()
+    # gc.collect()
 
-    if args.model_type == "UniBind":
+    if args.model_type == BindModelType.UNIBIND:
         model_attack = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=True)
         for lora_path in args.lora_weights_list:
             logger.info(f"Evaluating robust model: {lora_path}")
@@ -158,7 +166,8 @@ def evaluate_all_models(args):
                 acc = evaluate_clean(logger, device, model_attack, clean_loader)
                 entry = f"[{os.path.basename(lora_path)}] Clean acc = {acc:.4f}"
                 logger.info(entry)
-                final_results.append(entry)
+                if rank == 0:
+                    final_results.append(entry)
 
             for eps in eps_list:
                 acc = evaluate_two_stage(
@@ -171,22 +180,29 @@ def evaluate_all_models(args):
                 )
                 entry = f"[{os.path.basename(lora_path)}] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}"
                 logger.info(entry)
-                final_results.append(entry)
+                if rank == 0:
+                    final_results.append(entry)
 
     all_results = [None for _ in range(dist.get_world_size())]
     dist.all_gather_object(all_results, final_results)
 
-    logger.info("Final results:")
-    for rank_results in all_results:
-        for line in rank_results:
-            logger.info(line)
+    if rank == 0:
+        logger.info("Final results:")
+        for rank_results in all_results:
+            for line in rank_results:
+                logger.info(line)
+
+        result_path = os.path.join(args.output_dir, f"results_{timestamp}.json")
+        with open(result_path, "w") as f:
+            json.dump(all_results, f, indent=2)
+        logger.info(f"Saved results to {result_path}")
 
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unified evaluation for UniBind, LanguageBind, and ImageBind")
-    parser.add_argument("--model_type", required=True, choices=["UniBind", "LanguageBind", "ImageBind"])
+    parser.add_argument("--model_type", required=True, choices=[e.value for e in BindModelType])
     parser.add_argument("--modality", required=True)
     parser.add_argument("--dataset_name", required=True)
     parser.add_argument("--output_dir", default="output")
@@ -197,6 +213,8 @@ if __name__ == "__main__":
     parser.add_argument("--attack_val_batch_size", type=int, default=64)
     parser.add_argument("--clean_val_max_samples", type=int, default=3000)
     parser.add_argument("--attack_val_max_samples", type=int, default=3000)
+
+    parser.add_argument("--classes_json", required=True)
     parser.add_argument("--pretrain_weights", required=True)
     parser.add_argument("--center_emb", required=True)
     parser.add_argument("--lora_weights_list", nargs="+", default=[])
@@ -207,5 +225,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_clean_eval", action="store_true", default=False)
     parser.add_argument("--two_stage_iters", type=int, default=100)
     args = parser.parse_args()
-
+    
+    args.model_type = BindModelType(args.model_type)
+    args.modality = Modality(args.modality)
     evaluate_all_models(args)
