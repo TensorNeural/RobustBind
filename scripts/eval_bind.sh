@@ -96,7 +96,7 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
 
 declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [ImageNet-1K]=70
-  [Places365]=70
+  [Places365]=60
   [ModelNet40]=64
   [ShapeNet]=64
   [ESC-50]=90
