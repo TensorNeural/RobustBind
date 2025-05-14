@@ -239,6 +239,8 @@ class APGDAttack(Attack):
 def two_stage_attack(logger, model, inputs, labels, attack_stage1, attack_stage2, mean, std):
     logger.info("Running two-stage attack...")
     inputs_unorm = inputs.detach().clone()
+    # logger.info(f"Shape of input: {inputs.shape}, mean: {mean}, std: {std}")
+
     unnormalize_inplace(inputs_unorm, mean, std)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):

@@ -432,7 +432,6 @@ class UniBindModel(Model):
         class_raw_scores = torch_scatter.scatter_logsumexp(similarity * temperature, self.centre_label_indices, dim=1)
         return class_raw_scores / temperature
 
-
 # ============================ LanguageBindModel ============================
 class LanguageBindModel(Model):
     def __init__(self, device, modality, class_strings, logger=None):
