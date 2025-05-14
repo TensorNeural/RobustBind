@@ -15,44 +15,44 @@ def read_events_from_bin(path):
     t = ((raw[:, 2] & 0x7F) << 16) | (raw[:, 3] << 8) | raw[:, 4]
     return x, y, p, t
 
-def render_model_input(x, y, p, t, out_path, size=224):
+def render_eventbind_images(x, y, p, t, out_dir, size=224, T=8):
     if len(x) == 0:
-        print(f"⚠️ Skipping empty model input: {out_path}")
+        print(f"⚠️ Skipping empty input: {out_dir}")
         return
-    H, W = size, size
-    pos, neg, ts = np.zeros((H, W)), np.zeros((H, W)), np.zeros((H, W))
-    x = ((x - x.min()) / (x.ptp() + 1e-5) * (W - 1)).astype(int)
-    y = ((y - y.min()) / (y.ptp() + 1e-5) * (H - 1)).astype(int)
-    t = (t - t.min()) / (t.ptp() + 1e-5)
-    for xi, yi, pi, ti in zip(x, y, p, t):
-        if pi: pos[yi, xi] += 1
-        else: neg[yi, xi] += 1
-        ts[yi, xi] = max(ts[yi, xi], ti)
-    pos_img = 255 * np.log1p(pos) / np.log1p(pos.max()) if pos.max() > 0 else pos
-    neg_img = 255 * np.log1p(neg) / np.log1p(neg.max()) if neg.max() > 0 else neg
-    ts_img = (255 * ts).astype(np.uint8)
-    ts_img[(pos + neg) == 0] = 0
-    rgb = np.stack([pos_img, neg_img, ts_img], axis=-1).astype(np.uint8)
-    plt.imsave(out_path, rgb)
 
-def render_scatter_vis(x, y, p, out_path, size=224):
-    if len(x) == 0:
-        print(f"⚠️ Skipping empty vis: {out_path}")
-        return
-    p = (p > 0).astype(np.uint8)
-    x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1))
-    y = ((y - y.min()) / (y.ptp() + 1e-5) * (size - 1))
-    fig = plt.figure(figsize=(size / 100, size / 100), dpi=100)
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.set_xlim(0, size)
-    ax.set_ylim(0, size)
-    ax.axis('off')
-    ax.set_facecolor("black")
-    ax.invert_yaxis()
-    ax.scatter(x[p == 1], y[p == 1], c='blue', s=1.0, alpha=0.35, edgecolors='none')
-    ax.scatter(x[p == 0], y[p == 0], c='red',  s=1.0, alpha=0.35, edgecolors='none')
-    plt.savefig(out_path, dpi=100, transparent=True, bbox_inches='tight', pad_inches=0)
-    plt.close()
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Normalize coordinates and time
+    x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1)).astype(int)
+    y = ((y - y.min()) / (y.ptp() + 1e-5) * (size - 1)).astype(int)
+    t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+
+    bins = np.linspace(0, 1, T + 1)
+    for i in range(T):
+        idx = (t_norm >= bins[i]) & (t_norm < bins[i + 1])
+        if idx.sum() == 0:
+            continue
+        xx, yy, pp, tt = x[idx], y[idx], p[idx], t_norm[idx]
+
+        pos = np.zeros((size, size))
+        neg = np.zeros((size, size))
+        ts = np.zeros((size, size))
+
+        for xi, yi, pi, ti in zip(xx, yy, pp, tt):
+            if pi:
+                pos[yi, xi] += 1
+            else:
+                neg[yi, xi] += 1
+            ts[yi, xi] = max(ts[yi, xi], ti)
+
+        # Color channels
+        red   = (255 * pos / (pos.max() + 1e-5)).astype(np.uint8)
+        green = (255 * ts).astype(np.uint8)
+        blue  = (255 * neg / (neg.max() + 1e-5)).astype(np.uint8)
+
+        rgb = np.stack([red, green, blue], axis=-1)
+        frame_path = os.path.join(out_dir, f"frame_{i:03d}.png")
+        plt.imsave(frame_path, rgb)
 
 def split_val(data_root, val_root, ratio=0.3):
     total = 0
@@ -72,28 +72,24 @@ def split_val(data_root, val_root, ratio=0.3):
     print(f"✅ Copied {total} .bin files to val/ (class-balanced)")
 
 def process_bin_file(args):
-    path, cls, static_val, static_vis = args
+    path, cls, static_val, size, T = args
     try:
         x, y, p, t = read_events_from_bin(path)
         base = os.path.basename(path).replace(".bin", "")
-        out_val = os.path.join(static_val, cls, base + ".png")
-        out_vis = os.path.join(static_vis, cls, base + "_vis.png")
-        os.makedirs(os.path.dirname(out_val), exist_ok=True)
-        os.makedirs(os.path.dirname(out_vis), exist_ok=True)
-        render_model_input(x, y, p, t, out_val)
-        render_scatter_vis(x, y, p, out_vis)
+        out_dir = os.path.join(static_val, cls, base)
+        render_eventbind_images(x, y, p, t, out_dir, size=size, T=T)
     except Exception as e:
         print(f"❌ Error processing {path}: {e}")
 
-def render_all(val_dir, static_val, static_vis, num_workers=12):
+def render_all(val_dir, static_val, size=224, T=8, num_workers=12):
     tasks = []
     for cls in sorted(os.listdir(val_dir)):
         cls_dir = os.path.join(val_dir, cls)
         for fname in os.listdir(cls_dir):
             if fname.endswith(".bin"):
                 path = os.path.join(cls_dir, fname)
-                tasks.append((path, cls, static_val, static_vis))
-    print(f"🚀 Rendering {len(tasks)} files with {num_workers} workers...")
+                tasks.append((path, cls, static_val, size, T))
+    print(f"🚀 Rendering {len(tasks)} samples into EventBind-style RGB images with {num_workers} workers...")
     with mp.Pool(num_workers) as pool:
         list(tqdm(pool.imap_unordered(process_bin_file, tasks), total=len(tasks)))
 
@@ -102,16 +98,17 @@ def main():
     parser.add_argument("--dataset_root", required=True)
     parser.add_argument("--val_ratio", type=float, default=0.3)
     parser.add_argument("--num_workers", type=int, default=12)
+    parser.add_argument("--frame_size", type=int, default=224)
+    parser.add_argument("--num_frames", type=int, default=8)
     args = parser.parse_args()
 
     raw = os.path.join(args.dataset_root, "data")
     val = os.path.join(args.dataset_root, "val")
     static_val = os.path.join(args.dataset_root, "static", "val")
-    static_vis = os.path.join(args.dataset_root, "static", "vis")
 
     split_val(raw, args.dataset_root, ratio=args.val_ratio)
-    render_all(val, static_val, static_vis, num_workers=args.num_workers)
-    print("🎉 N-Caltech101 static render complete: model inputs + scatter plots.")
+    render_all(val, static_val, size=args.frame_size, T=args.num_frames, num_workers=args.num_workers)
+    print("🎉 EventBind-style RGB rendering complete.")
 
 if __name__ == "__main__":
     main()

@@ -9,14 +9,14 @@ declare -A MODALITY_MAP=(
   # [ModelNet40]=point
   # [ShapeNet]=point
 
-  [ESC-50]=audio
-  [UrbanSound8K]=audio
+  # [ESC-50]=audio
+  # [UrbanSound8K]=audio
 
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
   # [MSR-VTT]=video
-  # [UCF-101]=video
+  [UCF-101]=video
 
   # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
@@ -76,6 +76,7 @@ declare -A CLASSES_JSON_MAP=(
   [ESC-50]="./datasets/ESC-50/classes.json"
   [UrbanSound8K]="./datasets/UrbanSound8K/classes.json"
   [UCF-101]="./datasets/UCF-101/classes.json"
+  [MSR-VTT]="./datasets/MSR-VTT/classes.json"
 )
 
 declare -A ATTACK_VAL_JSON_MAP
@@ -95,8 +96,8 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=1000
   [RGB-T]=16
-  [MSR-VTT]=30
-  [UCF-101]=30
+  [MSR-VTT]=100
+  [UCF-101]=100
   [N-Caltech-101]=1000
   [N-ImageNet-1K]=1000
 )
@@ -111,8 +112,8 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=70
   [RGB-T]=16
-  [MSR-VTT]=30
-  [UCF-101]=30
+  [MSR-VTT]=15
+  [UCF-101]=15
   [N-Caltech-101]=70
   [N-ImageNet-1K]=70
 )
@@ -142,8 +143,10 @@ declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [UrbanSound8K]=1653
   [LLVIP]=16974
   [RGB-T]=500
-  [MSR-VTT]=2990
-  [UCF-101]=3783
+  # [MSR-VTT]=2990
+  # [UCF-101]=3783
+  [MSR-VTT]=700
+  [UCF-101]=700
   [N-Caltech-101]=2613
   [N-ImageNet-1K]=3000
 )

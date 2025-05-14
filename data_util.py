@@ -78,10 +78,10 @@ def get_transform_fn(modality, minSample=False, model_type=None):
     return {
         Modality.TEXT: load_and_transform_text,
         Modality.IMAGE: load_and_transform_vision_data,
-        # Modality.EVENT: load_and_transform_event_data,
-        Modality.EVENT: load_and_transform_vision_data,
+        Modality.EVENT: load_and_transform_event_data,
+        # Modality.EVENT: load_and_transform_vision_data,
         Modality.THERMAL: load_and_transform_thermal_data,
-        Modality.VIDEO: load_and_transform_video_data(minSample=minSample),
+        Modality.VIDEO: load_and_transform_video_data(minSample=minSample, model_type=model_type),
         Modality.AUDIO: load_and_transform_audio_data(model_type),
         Modality.POINT: load_and_transform_point_data
     }[modality]
@@ -305,31 +305,36 @@ class SpatialCrop(nn.Module):
 
 def load_and_transform_video_data(
     minSample=False,
+    model_type=BindModelType.IMAGEBIND
 ):
     def transform(
         video_paths,
         device,
-        clip_duration=2,
-        clips_per_video=5,
-        sample_rate=16000):
+        sample_rate=16000,
+        target_t=8  # target temporal frames for LanguageBind
+    ):
         if video_paths is None:
             return None
 
         video_outputs = []
-        video_transform = transforms.Compose(
-            [
-                ShortSideScale(224),
-                Normalize(
-                    mean=MEAN_MAP[Modality.VIDEO],
-                    std=STD_MAP[Modality.VIDEO],
-                ),
-            ]
-        )
 
-        clip_sampler = ConstantClipsPerVideoSampler(
-            clip_duration=clip_duration, clips_per_video=clips_per_video
-        )
-        frame_sampler = UniformTemporalSubsample(num_samples=clip_duration)
+        if model_type == BindModelType.LANGUAGEBIND:
+            # LanguageBind settings
+            frame_sampler = UniformTemporalSubsample(num_samples=target_t)
+            spatial_crop = None  # no multi-crop
+            video_transform = transforms.Compose([
+                ShortSideScale(224),
+                transforms.CenterCrop(224),
+                Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
+            ])
+        else:
+            # ImageBind settings
+            frame_sampler = UniformTemporalSubsample(num_samples=2)
+            spatial_crop = SpatialCrop(224, num_crops=3)
+            video_transform = transforms.Compose([
+                ShortSideScale(224),
+                Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
+            ])
 
         for video_path in video_paths:
             video = EncodedVideo.from_path(
@@ -339,28 +344,47 @@ def load_and_transform_video_data(
                 **{"sample_rate": sample_rate},
             )
 
-            all_clips_timepoints = get_clip_timepoints(clip_sampler, video.duration)
-
-            # Drop 4 clips if minSample is True
-            if minSample:
-                all_clips_timepoints = all_clips_timepoints[:max(1, len(all_clips_timepoints) - 4)]
+            if model_type == BindModelType.LANGUAGEBIND:
+                # One full clip
+                all_clips_timepoints = [(0, video.duration)]
+            else:
+                # One short clip of 2 frames
+                clip_duration = 2
+                clips_per_video = 1
+                all_clips_timepoints = get_clip_timepoints(
+                    ConstantClipsPerVideoSampler(clip_duration, clips_per_video),
+                    video.duration
+                )
 
             all_video = []
             for clip_timepoints in all_clips_timepoints:
                 clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
                 if clip is None:
-                    raise ValueError("No clip found")
-                video_clip = frame_sampler(clip["video"])
-                video_clip = video_clip / 255.0  # normalize to [0,1]
+                    continue
+                video_clip = frame_sampler(clip["video"]) / 255.0  # [C, T, H, W]
                 all_video.append(video_clip)
 
-            all_video = [video_transform(clip) for clip in all_video]
-            all_video = SpatialCrop(224, num_crops=3)(all_video)
+            if not all_video:
+                raise ValueError(f"No valid clips in video {video_path}")
 
-            all_video = torch.stack(all_video, dim=0)
-            video_outputs.append(all_video)
+            if model_type == BindModelType.LANGUAGEBIND:
+                video_tensor = video_transform(all_video[0])  # [C, T, H, W]
+                T_actual = video_tensor.shape[1]
+                if T_actual < 8:
+                    raise ValueError(f"Video {video_path} has only {T_actual} frames, require ≥8")
+                T_trim = (T_actual // 8) * 8
+                video_tensor = video_tensor[:, :T_trim]  # [C, T_trim, H, W]
+            else:
+                all_video = [video_transform(clip) for clip in all_video]
+                all_video = spatial_crop(all_video)  # list of [C, T=2, H, W]
+                video_tensor = torch.stack(all_video, dim=0)  # [V=3, C, T=2, H, W]
 
-        return torch.stack(video_outputs, dim=0).to(device)
+            video_outputs.append(video_tensor)
+
+        if model_type == BindModelType.LANGUAGEBIND:
+            return torch.stack(video_outputs, dim=0).to(device)  # [B, C, T, H, W]
+        else:
+            return torch.stack(video_outputs, dim=0).to(device)  # [B, V, C, T=2, H, W]
 
     return transform
 
@@ -595,23 +619,24 @@ def val_data_loader(
     sampler = DistributedSampler(dataset, shuffle=False)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
 
-def get_normalization_tensors(modality, device):
+def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBIND):
     mean = torch.tensor(MEAN_MAP[modality], device=device)
     std = torch.tensor(STD_MAP[modality], device=device)
+
     if modality == Modality.IMAGE:
-        # For [B, C, H, W] images
         return mean.view(1, 3, 1, 1), std.view(1, 3, 1, 1)
     elif modality == Modality.EVENT:
-        # For [B, C, H, W] event images
         return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)
-    if modality == Modality.POINT:
-        # For [B, N, 3] point clouds
+    elif modality == Modality.POINT:
         return mean.view(1, 1, 3), std.view(1, 1, 3)
     elif modality == Modality.THERMAL:
-        # For [1, H, W] grayscale images
         return mean.view(1, 1, 1), std.view(1, 1, 1)
     elif modality == Modality.VIDEO:
-        # For [B, V, C, T, H, W] video tensors
-        return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
+        if model_type == BindModelType.LANGUAGEBIND:
+            # For [B, C, T, H, W]
+            return mean.view(1, 3, 1, 1, 1), std.view(1, 3, 1, 1, 1)
+        else:
+            # For [B, V, C, T, H, W]
+            return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
     else:
         return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)

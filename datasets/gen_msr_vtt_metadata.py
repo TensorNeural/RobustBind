@@ -11,7 +11,7 @@ def load_category_map(category_file):
                 category_map[int(idx)] = label
     return category_map
 
-def generate_metadata(info_json_path, split_dir, dataset_root, category_map, split_name, output_base_dir):
+def generate_metadata(info_json_path, split_dir, dataset_root, category_map, split_name, output_base_dir, class_names):
     with open(info_json_path, "r") as f:
         data = json.load(f)
 
@@ -28,6 +28,9 @@ def generate_metadata(info_json_path, split_dir, dataset_root, category_map, spl
             print(f"⚠️ Skipping missing file: {full_path}")
             continue
 
+        if label not in class_names:
+            class_names.append(label)
+
         metadata.append({
             "data": os.path.relpath(full_path, dataset_root),
             "label": label
@@ -40,6 +43,13 @@ def generate_metadata(info_json_path, split_dir, dataset_root, category_map, spl
 
     print(f"✅ Saved {len(metadata)} entries to {output_path}")
 
+def save_class_names(class_names, output_base_dir):
+    class_names.sort()
+    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    path = os.path.join(output_base_dir, "classes.json")
+    with open(path, "w") as f:
+        json.dump(class_to_idx, f, indent=2)
+    print(f"✅ Saved class mapping to {path} ({len(class_to_idx)} classes)")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate MSR-VTT metadata JSONs (data, label) from train/val dirs.")
@@ -52,13 +62,15 @@ if __name__ == "__main__":
 
     category_map = load_category_map(category_file)
 
+    class_names = []
     generate_metadata(
         info_json_path=os.path.join(dataset_root, "train_val_videodatainfo.json"),
         split_dir="train",
         dataset_root=dataset_root,
         category_map=category_map,
         split_name="train",
-        output_base_dir=output_dir
+        output_base_dir=output_dir,
+        class_names=class_names
     )
 
     generate_metadata(
@@ -67,7 +79,10 @@ if __name__ == "__main__":
         dataset_root=dataset_root,
         category_map=category_map,
         split_name="val",
-        output_base_dir=output_dir
+        output_base_dir=output_dir,
+        class_names=class_names
     )
 
-    print("🎉 Done. Metadata saved to ./MSR-VTT/train_data.json and val_data.json")
+    save_class_names(class_names, output_dir)
+
+    print("🎉 Done. Metadata saved to ./MSR-VTT/train_data.json, val_data.json, and classes.json")
