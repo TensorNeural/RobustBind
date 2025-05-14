@@ -122,8 +122,9 @@ def evaluate_all_models(args):
         acc = evaluate_clean(logger, device, model, clean_loader)
         entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
         if rank == 0:
-            logger.info(entry)
-        final_results.append(entry)
+            final_results.append(entry)
+        
+        logger.info(entry)
     
     attack_loader = val_data_loader(
         modality=args.modality,

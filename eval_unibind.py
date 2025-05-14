@@ -13,7 +13,7 @@ from data_util import (
     val_data_loader,
     get_normalization_tensors
 )
-
+from shared_types import Modality
 
 def setup_logger(rank, output_path):
     logger = logging.getLogger(f"EvalLogger-Rank{rank}")
@@ -42,7 +42,9 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
         label_to_index=lbl_to_idx,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
-        use_lora=use_lora
+        use_lora=use_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha
     )
     model.to(device)
     return model
@@ -55,14 +57,14 @@ def evaluate_all_models(args):
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, "eval", args.modality, args.dataset_name)
+    args.output_dir = os.path.join(args.output_dir, "eval", args.modality.value, args.dataset_name)
     os.makedirs(args.output_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
 
     logger = setup_logger(rank, log_path)
-    logger.info(f"Evaluating {args.modality.upper()} on {args.dataset_name.upper()}")
+    logger.info(f"Evaluating {args.modality.value.upper()} on {args.dataset_name.upper()}")
 
     raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
 
@@ -96,31 +98,31 @@ def evaluate_all_models(args):
     final_results = []
 
     # Original model (no LoRA)
-    logger.info("Evaluating original (pretrained-only) model ...")
-    model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx)
+    # logger.info("Evaluating original (pretrained-only) model ...")
+    # model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx)
 
-    if args.run_clean_eval:
-        acc = evaluate_clean(logger, device, model, clean_loader)
-        entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
-        logger.info(entry)
-        final_results.append(entry)
+    # if args.run_clean_eval:
+    #     acc = evaluate_clean(logger, device, model, clean_loader)
+    #     entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
+    #     logger.info(entry)
+    #     final_results.append(entry)
 
-    for eps in eps_list:
-        acc = evaluate_two_stage(
-            logger, device, model, attack_loader,
-            attack_loss_type=args.val_attack_loss,
-            iteration_count=args.two_stage_iters,
-            epsilon=eps,
-            mean=mean,
-            std=std
-        )
-        entry = f"[ORIGINAL] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}"
-        logger.info(entry)
-        final_results.append(entry)
+    # for eps in eps_list:
+    #     acc = evaluate_two_stage(
+    #         logger, device, model, attack_loader,
+    #         attack_loss_type=args.val_attack_loss,
+    #         iteration_count=args.two_stage_iters,
+    #         epsilon=eps,
+    #         mean=mean,
+    #         std=std
+    #     )
+    #     entry = f"[ORIGINAL] Robust acc @ eps={eps*255:.0f}/255 = {acc:.4f}"
+    #     logger.info(entry)
+    #     final_results.append(entry)
 
-    del model
-    torch.cuda.empty_cache()
-    gc.collect()
+    # del model
+    # torch.cuda.empty_cache()
+    # gc.collect()
     
     model_attack = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=True)
     # Robust models (LoRA)
@@ -174,6 +176,8 @@ if __name__ == "__main__":
     parser.add_argument("--pretrain_weights", required=True)
     parser.add_argument("--center_emb", required=True)
     parser.add_argument("--lora_weights_list", nargs="+", default=[])
+    parser.add_argument("--lora_rank", type=int, default=4)
+    parser.add_argument("--lora_alpha", type=float, default=8)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
     parser.add_argument("--val_attack_loss", type=str, default="ce")
@@ -182,4 +186,5 @@ if __name__ == "__main__":
     parser.add_argument("--two_stage_iters", type=int, default=100)
     args = parser.parse_args()
 
+    args.modality = Modality(args.modality)
     evaluate_all_models(args)
