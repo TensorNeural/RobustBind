@@ -15,7 +15,7 @@ declare -A MODALITY_MAP=(
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
-  # [MSR-VTT]=video
+  [MSR-VTT]=video
   [UCF-101]=video
 
   # [N-Caltech-101]=event
@@ -145,8 +145,8 @@ declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [RGB-T]=500
   # [MSR-VTT]=2990
   # [UCF-101]=3783
-  [MSR-VTT]=700
-  [UCF-101]=700
+  [MSR-VTT]=800
+  [UCF-101]=800
   [N-Caltech-101]=2613
   [N-ImageNet-1K]=3000
 )
