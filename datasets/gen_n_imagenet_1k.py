@@ -52,10 +52,10 @@ def generate_val_metadata(dataset_root, synset_mapping):
         label = synset_mapping.get(class_folder, "unknown")
 
         for file in sorted(os.listdir(class_path)):
-            if file.endswith(".png"):
-                image_path = os.path.join(class_path, file)
+            if file.endswith(".npz"):
+                data_path = os.path.join(class_path, file)
                 metadata.append({
-                    "data": os.path.relpath(image_path, dataset_root_abs),
+                    "data": os.path.relpath(data_path, dataset_root_abs),
                     "label": label
                 })
 
@@ -73,7 +73,7 @@ def save_center_to_wordnet(output_file, human_to_synset):
     print(f"📄 Saved center_to_wordnet.json to {output_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate val_data.json for N-ImageNet-1K")
+    parser = argparse.ArgumentParser(description="Generate val_data.json for N-ImageNet-1K (NPZ format)")
     parser.add_argument("DATASET_ROOT", type=str, help="Path to dataset root containing val/")
     args = parser.parse_args()
 

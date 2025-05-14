@@ -80,7 +80,7 @@ def get_transform_fn(modality, minSample=False, model_type=None):
         Modality.IMAGE: load_and_transform_vision_data,
         Modality.EVENT: load_and_transform_event_data,
         # Modality.EVENT: load_and_transform_vision_data,
-        Modality.THERMAL: load_and_transform_thermal_data,
+        Modality.THERMAL: load_and_transform_thermal_data(model_type=model_type),
         Modality.VIDEO: load_and_transform_video_data(minSample=minSample, model_type=model_type),
         Modality.AUDIO: load_and_transform_audio_data(model_type),
         Modality.POINT: load_and_transform_point_data
@@ -101,19 +101,39 @@ def load_and_transform_vision_data(image_paths, device):
         images.append(IMAGE_TRANSFORM(img).to(device))
     return torch.stack(images)
 
-def load_and_transform_thermal_data(thermal_paths, device):
-    transform = transforms.Compose([
-        transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    images = []
-    for p in thermal_paths:
-        with open(p, "rb") as f:
-            img = Image.open(f).convert("L")
-        images.append(transform(img).to(device))
-    return torch.stack(images)
+def load_and_transform_thermal_data(model_type=BindModelType.IMAGEBIND):
+    def transform(thermal_paths, device):
+        # Determine expected channels and color mode
+        if model_type == BindModelType.LANGUAGEBIND:
+            expected_channels = 3
+            color_mode = "RGB"
+        else:  # UniBind/ImageBind expects 1 channel
+            expected_channels = 1
+            color_mode = "L"
+
+        # Load mean and std, then expand if needed
+        mean = MEAN_MAP[Modality.THERMAL]
+        std = STD_MAP[Modality.THERMAL]
+        if len(mean) == 1 and expected_channels == 3:
+            mean = mean * 3
+            std = std * 3
+
+        preprocess = transforms.Compose([
+            transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
+
+        images = []
+        for p in thermal_paths:
+            with open(p, "rb") as f:
+                img = Image.open(f).convert(color_mode)
+            images.append(preprocess(img).to(device))
+
+        return torch.stack(images)
+
+    return transform
 
 def load_and_transform_point_data(point_paths, device):
     return torch.stack([torch.load(p) for p in point_paths]).to(device)
@@ -399,15 +419,25 @@ def get_clip_timepoints(clip_sampler, duration):
 def read_bin_event_file(path):
     raw = np.fromfile(path, dtype=np.uint64)
     raw = raw & ((1 << 40) - 1)
-
     x = (raw >> 32) & 0xFF
     y = (raw >> 24) & 0xFF
     p = (raw >> 23) & 0x1
     t = raw & 0x7FFFFF
-
     events = np.stack([x, y, t, p], axis=1).astype(np.float32)
-    return torch.from_numpy(events).float()
+    return torch.from_numpy(events)
 
+def read_npz_event_file(path):
+    raw = np.load(path)["event_data"]
+    events_np = np.stack([raw["x"], raw["y"], raw["t"], raw["p"]], axis=1).astype(np.float32)
+    return torch.from_numpy(events_np)
+
+def load_event_file(path):
+    if path.endswith(".bin"):
+        return read_bin_event_file(path)
+    elif path.endswith(".npz"):
+        return read_npz_event_file(path)
+    else:
+        raise ValueError(f"Unsupported file format: {path}")
 
 def infer_resolution(events, default_H=180, default_W=240):
     if events.shape[0] == 0:
@@ -416,169 +446,114 @@ def infer_resolution(events, default_H=180, default_W=240):
     W = max(int(events[:, 0].max().item()) + 1, default_W)
     return H, W
 
+def split_events_temporally(events, num_bins):
+    events = events[events[:, 2].argsort()]
+    return np.array_split(events, num_bins)
 
-def normalize_voxel(voxel):
-    min_val = voxel.min()
-    max_val = voxel.max()
-    if max_val <= min_val:
-        return voxel.zero_()
-    return (voxel - min_val) / (max_val - min_val + 1e-6)
+def generate_eventbind_rgb(h_pos, h_neg):
+    h, w = h_pos.shape
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    rgb[..., 0] = h_neg
+    rgb[..., 1] = h_pos + h_neg
+    rgb[..., 2] = h_pos
+    return np.clip(rgb, 0, 1)
 
+def render_event_frame(events, H, W):
+    x = np.clip(events[:, 0], 0, W - 1).astype(int)
+    y = np.clip(events[:, 1], 0, H - 1).astype(int)
+    p = events[:, 3].astype(int)
 
-def event_to_voxel_grid(events, num_bins, H, W):
-    if events.shape[0] == 0:
-        return torch.zeros((num_bins, H, W), dtype=torch.float32, device=events.device)
+    h_pos = np.zeros((H, W), dtype=np.float32)
+    h_neg = np.zeros((H, W), dtype=np.float32)
+    for xi, yi, pi in zip(x, y, p):
+        if pi > 0:
+            h_pos[yi, xi] += 1
+        else:
+            h_neg[yi, xi] += 1
 
-    t = events[:, 2]
-    t_norm = (t - t.min()) / (t.max() - t.min() + 1e-6)
-    t_bins = (t_norm * (num_bins - 1)).long().clamp(0, num_bins - 1)
-
-    x = events[:, 0].long()
-    y = events[:, 1].long()
-
-    valid = (x >= 0) & (x < W) & (y >= 0) & (y < H)
-    x, y, t_bins = x[valid], y[valid], t_bins[valid]
-
-    flat_idx = t_bins * H * W + y * W + x
-    voxel = torch.zeros(num_bins * H * W, dtype=torch.float32, device=events.device)
-    voxel.index_add_(0, flat_idx, torch.ones(flat_idx.shape[0], dtype=torch.float32, device=events.device))
-    return normalize_voxel(voxel.view(num_bins, H, W))
-
-
-def sample_event_clips(events, clips_per_file):
-    if events.shape[0] == 0:
-        return []
-    t_min, t_max = events[:, 2].min(), events[:, 2].max()
-    clip_duration = (t_max - t_min) / clips_per_file
-    if clip_duration == 0:
-        return [events]
-    clips = []
-    for i in range(clips_per_file):
-        t_start = t_min + i * clip_duration
-        t_end = t_start + clip_duration
-        mask = (events[:, 2] >= t_start) & (events[:, 2] < t_end)
-        clip = events[mask]
-        if clip.shape[0] > 0:
-            clips.append(clip)
-    return clips
-
-
-def compute_time_surface(clip, H, W):
-    if clip.shape[0] == 0:
-        return np.zeros((H, W), dtype=np.float32)
-
-    t_range = (clip[:, 2].max() - clip[:, 2].min()).item()
-    if t_range == 0:
-        return np.zeros((H, W), dtype=np.float32)
-
-    x = clip[:, 0].cpu().numpy()
-    y = clip[:, 1].cpu().numpy()
-    t = clip[:, 2].cpu().numpy()
-
-    x = ((x - x.min()) / (x.ptp() + 1e-5) * (W - 1)).astype(int)
-    y = ((y - y.min()) / (y.ptp() + 1e-5) * (H - 1)).astype(int)
-    t_norm = (t - t.min()) / (t.ptp() + 1e-5)
-
-    ts_surface = np.zeros((H, W), dtype=np.float32)
-    for xi, yi, ti in zip(x, y, t_norm):
-        if 0 <= yi < H and 0 <= xi < W:
-            ts_surface[yi, xi] = max(ts_surface[yi, xi], ti)
-    return ts_surface
-
-
-def encode_frame(pos, g, out_size, normalize_fn):
-    if pos.max() == 0:
-        tensor = torch.zeros(3, out_size, out_size, dtype=torch.float32)
-    else:
-        r = (255 * np.log1p(pos) / (np.log1p(pos.max()) + 1e-5)).astype(np.uint8)
-        b = np.zeros_like(r)
-        g = (255 * g).astype(np.uint8)
-        g[(r + b) == 0] = 0
-        rgb = np.stack([r, g, b], axis=0)  # [C, H, W]
-        tensor = torch.from_numpy(rgb).float() / 255.0
-        tensor = F.interpolate(tensor.unsqueeze(0), size=(out_size, out_size), mode="bilinear", align_corners=False).squeeze(0)
-
-    return normalize_fn(tensor)
-
+    if h_pos.max() > 0: h_pos /= h_pos.max()
+    if h_neg.max() > 0: h_neg /= h_neg.max()
+    return generate_eventbind_rgb(h_pos, h_neg)
 
 def load_and_transform_event_data(
     event_paths,
     device,
-    frames_per_clip: int = 2,
-    clips_per_file: int = 5,
+    frames_per_video: int = 1,
     out_size: int = 224,
+    model_type=BindModelType.IMAGEBIND,
 ):
-    normalize = transforms.Normalize(mean=MEAN_MAP["event"], std=STD_MAP["event"])
+    normalize = transforms.Normalize(mean=MEAN_MAP[Modality.EVENT], std=STD_MAP[Modality.EVENT])
+    to_tensor = transforms.ToTensor()
+    resize = transforms.Resize((out_size, out_size), interpolation=transforms.InterpolationMode.BILINEAR)
     all_videos = []
 
     for path in event_paths:
         try:
-            events = read_bin_event_file(path).to(device)
+            events = load_event_file(path).cpu().numpy()
         except Exception as e:
-            print(f"[ERROR] Failed to read file: {path} — {e}")
+            print(f"[ERROR] Failed to read {path} — {e}")
             continue
 
         if events.shape[0] == 0:
             print(f"[WARN] Empty event file: {path}")
             continue
 
-        H, W = infer_resolution(events)
-        t_min, t_max = events[:, 2].min(), events[:, 2].max()
-        t_range = (t_max - t_min).item()
+        H, W = infer_resolution(torch.from_numpy(events))
 
-        if t_range == 0:
-            print(f"[WARN] Constant timestamps in file: {path} — duplicating identical clip {clips_per_file} times.")
-            clips = [events.clone() for _ in range(clips_per_file)]
+        # Frame segmentation
+        if model_type == BindModelType.LANGUAGEBIND:
+            if frames_per_video < 8:
+                raise ValueError("LanguageBind requires ≥ 8 frames.")
+            segments = split_events_temporally(events, frames_per_video)
+        elif model_type == BindModelType.IMAGEBIND:
+            if frames_per_video not in (1, 2):
+                raise ValueError("ImageBind only supports 1 (image) or 2 (video) frames.")
+            segments = split_events_temporally(events, frames_per_video)
         else:
-            clips = sample_event_clips(events, clips_per_file)
-            if len(clips) < clips_per_file:
-                print(f"[WARN] Only {len(clips)}/{clips_per_file} valid clips from: {path} — padding with last clip.")
-                if clips:
-                    clips += [clips[-1].clone()] * (clips_per_file - len(clips))
-                else:
-                    print(f"[ERROR] All clips were empty for: {path}")
-                    continue
+            raise ValueError("Unsupported model type.")
 
-        clip_tensors = []
-        for i, clip in enumerate(clips):
-            if clip.shape[0] == 0:
-                print(f"[WARN] Empty clip {i} in file: {path} — skipping.")
-                continue
+        # Convert segments to image tensors
+        frame_tensors = []
+        for segment in segments:
+            rgb = render_event_frame(segment, H, W)
+            img = Image.fromarray((rgb * 255).astype(np.uint8))
+            img = resize(img)
+            tensor = normalize(to_tensor(img))  # [3, H, W]
+            frame_tensors.append(tensor)
 
-            try:
-                encode_g = (frames_per_clip == 1 and clips_per_file == 1)
-                ts_surface = compute_time_surface(clip, H, W)
-                voxel = event_to_voxel_grid(clip, frames_per_clip, H, W)
+        if model_type == BindModelType.LANGUAGEBIND:
+            video_tensor = torch.stack(frame_tensors, dim=1)  # [3, T, H, W]
+            T_raw = video_tensor.shape[1]
+            if T_raw < 8:
+                raise ValueError(f"{path} has only {T_raw} frames; LanguageBind requires ≥8.")
+            T_trim = (T_raw // 8) * 8
+            video_tensor = video_tensor[:, :T_trim]
+            all_videos.append(video_tensor)  # [3, T_trim, H, W]
 
-                frame_list = []
-                for j in range(frames_per_clip):
-                    pos = voxel[j].cpu().numpy()
-                    g = ts_surface if encode_g else np.zeros_like(pos)
-                    frame = encode_frame(pos, g, out_size, normalize)
-                    frame_list.append(frame)
+        elif model_type == BindModelType.IMAGEBIND:
+            cropper = SpatialCrop(out_size, num_crops=3)
 
-                clip_tensor = torch.stack(frame_list, dim=1)  # [C, T, H, W]
-                clip_tensors.append(clip_tensor)
-            except Exception as e:
-                print(f"[ERROR] Failed to process clip {i} from {path} — {e}")
+            if frames_per_video == 1:
+                image_tensor = frame_tensors[0]  # [3, H, W]
+                crops = cropper([image_tensor.unsqueeze(1)])  # -> list of [3, 1, H, W]
+                crops = [c.squeeze(1) for c in crops]         # remove T=1 → [3, H, W]
+                all_videos.append(torch.stack(crops, dim=0))  # [3, 3, H, W]
 
-        if len(clip_tensors) < clips_per_file:
-            print(f"[WARN] Only {len(clip_tensors)}/{clips_per_file} processed for: {path} — padding.")
-            if clip_tensors:
-                clip_tensors += [clip_tensors[-1].clone()] * (clips_per_file - len(clip_tensors))
-            else:
-                print(f"[ERROR] No valid clip tensors for: {path}")
-                continue
-
-        video_tensor = torch.stack(clip_tensors, dim=0).to(device)  # [V, C, T, H, W]
-        all_videos.append(video_tensor)
+            elif frames_per_video == 2:
+                video_tensor = torch.stack(frame_tensors, dim=1)  # [3, 2, H, W]
+                crops = cropper([video_tensor])                   # list of [3, 2, H, W]
+                all_videos.append(torch.stack(crops, dim=0))      # [3, 3, 2, H, W]
 
     if not all_videos:
-        print("[ERROR] All event files failed. Returning dummy tensor.")
-        dummy = torch.zeros((1, clips_per_file, 3, frames_per_clip, out_size, out_size), dtype=torch.float32, device=device)
-        return dummy
+        print("[ERROR] All event files failed. Returning dummy.")
+        if model_type == BindModelType.LANGUAGEBIND:
+            return torch.zeros((1, 3, 8, out_size, out_size), device=device)
+        elif frames_per_video == 1:
+            return torch.zeros((1, 3, 3, out_size, out_size), device=device)
+        else:
+            return torch.zeros((1, 3, 3, frames_per_video, out_size, out_size), device=device)
 
-    return torch.stack(all_videos, dim=0)  # [B, V, C, T, H, W]
+    return torch.stack(all_videos, dim=0).to(device)
 
 def load_and_transform_text(text, device):
     if text is None:
