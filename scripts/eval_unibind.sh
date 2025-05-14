@@ -16,9 +16,9 @@ declare -A MODALITY_MAP=(
   # [RGB-T]=thermal
 
   # [MSR-VTT]=video
-  # [UCF-101]=video
+  [UCF-101]=video
 
-  [N-Caltech-101]=event
+  # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
 )
 

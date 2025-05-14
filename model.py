@@ -427,7 +427,10 @@ class UniBindModel(Model):
         mask_exp = mask.unsqueeze(0).expand(B, C, N)         # (B, C, N)
         masked = similarity_exp.masked_fill(~mask_exp, -1e9) # (B, C, N)
         return torch.logsumexp(masked * temperature, dim=2) / temperature  # (B, C)
-
+    
+    def _scatter_logsumexp(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
+        class_raw_scores = torch_scatter.scatter_logsumexp(similarity * temperature, self.centre_label_indices, dim=1)
+        return class_raw_scores / temperature
 
 # ============================ LanguageBindModel ============================
 class LanguageBindModel(Model):

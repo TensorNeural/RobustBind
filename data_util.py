@@ -589,20 +589,20 @@ def val_data_loader(
 def get_normalization_tensors(modality, device):
     mean = torch.tensor(MEAN_MAP[modality], device=device)
     std = torch.tensor(STD_MAP[modality], device=device)
-    if modality == "image":
+    if modality == Modality.IMAGE:
         # For [B, C, H, W] images
         return mean.view(1, 3, 1, 1), std.view(1, 3, 1, 1)
-    elif modality == "event":
+    elif modality == Modality.EVENT:
         # For [B, C, H, W] event images
         return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)
-    if modality == "point":
+    if modality == Modality.POINT:
         # For [B, N, 3] point clouds
         return mean.view(1, 1, 3), std.view(1, 1, 3)
-    elif modality == "thermal":
+    elif modality == Modality.THERMAL:
         # For [1, H, W] grayscale images
         return mean.view(1, 1, 1), std.view(1, 1, 1)
-    elif modality == "video":
+    elif modality == Modality.VIDEO:
         # For [B, V, C, T, H, W] video tensors
-        return mean.view(1, 1, -1, 1, 1, 1), std.view(1, 1, -1, 1, 1, 1)
+        return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
     else:
         return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)

@@ -3,7 +3,7 @@ set -e
 
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
-  [ImageNet-1K]=image
+  # [ImageNet-1K]=image
   # [Places365]=image
 
   # [ModelNet40]=point
@@ -16,7 +16,7 @@ declare -A MODALITY_MAP=(
   # [RGB-T]=thermal
 
   # [MSR-VTT]=video
-  # [UCF-101]=video
+  [UCF-101]=video
 
   # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
@@ -24,8 +24,10 @@ declare -A MODALITY_MAP=(
 
 # === Modality to Supported Binds ===
 declare -A MODALITY_TO_BINDS=(
-  [image]="LanguageBind ImageBind"
+  # [image]="LanguageBind ImageBind"
+  [image]="ImageBind"
   [audio]="LanguageBind ImageBind"
+  # [video]="UniBind LanguageBind ImageBind"
   [video]="LanguageBind ImageBind"
   [depth]="LanguageBind ImageBind"
   [imu]="LanguageBind ImageBind"
@@ -53,7 +55,7 @@ declare -A EMB_SUFFIX_MAP=(
 # === Validation JSON Mapping ===
 declare -A CLEAN_VAL_JSON_MAP=(
   [ImageNet-1K]="./datasets/ImageNet-1K/val_data_5000.json"
-  [Places365]="./datasets/Places365/val_data.json"
+  [Places365]="./datasets/Places365/val_data_5000.json"
   [ModelNet40]="./datasets/ModelNet40/val_data.json"
   [ShapeNet]="./datasets/ShapeNet/val_data.json"
   [ESC-50]="./datasets/ESC-50/val_data.json"
@@ -71,6 +73,7 @@ declare -A CLASSES_JSON_MAP=(
   [Places365]="./datasets/Places365/classes_places365.json"
   [LLVIP]="./datasets/LLVIP/classes_llvip.json"
   [ModelNet40]="./datasets/ModelNet40/classes_modelnet40.json"
+  [UCF-101]="./datasets/UCF-101/classes.json"
 )
 
 declare -A ATTACK_VAL_JSON_MAP
@@ -85,7 +88,8 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [Places365]=2000
   [ModelNet40]=64
   [ShapeNet]=64
-  [ESC-50]=90
+  # [ESC-50]=90
+  [ESC-50]=2
   [UrbanSound8K]=90
   [LLVIP]=1000
   [RGB-T]=16
@@ -100,12 +104,13 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [Places365]=60
   [ModelNet40]=64
   [ShapeNet]=64
-  [ESC-50]=90
+  # [ESC-50]=90
+  [ESC-50]=2
   [UrbanSound8K]=90
   [LLVIP]=70
   [RGB-T]=16
-  [MSR-VTT]=6
-  [UCF-101]=6
+  [MSR-VTT]=30
+  [UCF-101]=30
   [N-Caltech-101]=70
   [N-ImageNet-1K]=70
 )
@@ -198,7 +203,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
       --classes_json "$classes_json" \
       --pretrain_weights "$PRETRAIN_WEIGHTS" \
       --center_emb "$center_emb" \
-      --lora_weights_list $lora_weights_list \
+      --lora_weights_list "$lora_weights_list" \
       --num_workers "$NUM_WORKERS" \
       --use_flash_attention \
       --val_attack_loss "ce" \
