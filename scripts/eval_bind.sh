@@ -9,14 +9,14 @@ declare -A MODALITY_MAP=(
   # [ModelNet40]=point
   # [ShapeNet]=point
 
-  # [ESC-50]=audio
-  # [UrbanSound8K]=audio
+  [ESC-50]=audio
+  [UrbanSound8K]=audio
 
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
   # [MSR-VTT]=video
-  [UCF-101]=video
+  # [UCF-101]=video
 
   # [N-Caltech-101]=event
   # [N-ImageNet-1K]=event
@@ -73,6 +73,8 @@ declare -A CLASSES_JSON_MAP=(
   [Places365]="./datasets/Places365/classes_places365.json"
   [LLVIP]="./datasets/LLVIP/classes_llvip.json"
   [ModelNet40]="./datasets/ModelNet40/classes_modelnet40.json"
+  [ESC-50]="./datasets/ESC-50/classes.json"
+  [UrbanSound8K]="./datasets/UrbanSound8K/classes.json"
   [UCF-101]="./datasets/UCF-101/classes.json"
 )
 
@@ -89,7 +91,7 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [ModelNet40]=64
   [ShapeNet]=64
   # [ESC-50]=90
-  [ESC-50]=2
+  [ESC-50]=50
   [UrbanSound8K]=90
   [LLVIP]=1000
   [RGB-T]=16
@@ -105,7 +107,7 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [ModelNet40]=64
   [ShapeNet]=64
   # [ESC-50]=90
-  [ESC-50]=2
+  [ESC-50]=50
   [UrbanSound8K]=90
   [LLVIP]=70
   [RGB-T]=16

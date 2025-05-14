@@ -74,7 +74,7 @@ class JsonDataset(Dataset):
 # ===================
 # Transforms
 # ===================
-def get_transform_fn(modality, minSample=False):
+def get_transform_fn(modality, minSample=False, model_type=None):
     return {
         Modality.TEXT: load_and_transform_text,
         Modality.IMAGE: load_and_transform_vision_data,
@@ -82,7 +82,7 @@ def get_transform_fn(modality, minSample=False):
         Modality.EVENT: load_and_transform_vision_data,
         Modality.THERMAL: load_and_transform_thermal_data,
         Modality.VIDEO: load_and_transform_video_data(minSample=minSample),
-        Modality.AUDIO: load_and_transform_audio_data,
+        Modality.AUDIO: load_and_transform_audio_data(model_type),
         Modality.POINT: load_and_transform_point_data
     }[modality]
 
@@ -131,51 +131,58 @@ def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
     fbank = torch.nn.functional.pad(fbank, (0, max(0, p)))[:, :target_length]
     return fbank.unsqueeze(0)
 
-def load_and_transform_audio_data(
-    audio_paths,
-    device,
-    num_mel_bins=128,
-    target_length=204,
-    sample_rate=16000,
-    clip_duration=2,
-    clips_per_video=3,
-    mean=-4.268,
-    std=9.138
-):
-    normalize = transforms.Normalize(mean=[mean], std=[std])
-    outputs = []
-    sampler = ConstantClipsPerVideoSampler(
-        clip_duration=clip_duration, clips_per_video=clips_per_video
-    )
+def load_and_transform_audio_data(model_type):
+    def transform(
+        audio_paths,
+        device,
+        num_mel_bins=128,
+        target_length=204,
+        sample_rate=16000,
+        clip_duration=2,
+        clips_per_video=3,
+        mean=-4.268,
+        std=9.138
+    ):
+        if model_type == BindModelType.LANGUAGEBIND:
+            num_mel_bins = 112
+            target_length = 1036
+            clip_duration = 10.4
 
-    for path in audio_paths:
-        waveform, sr = torchaudio.load(path)
-        if sr != sample_rate:
-            waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
+        normalize = transforms.Normalize(mean=[mean], std=[std])
+        outputs = []
+        sampler = ConstantClipsPerVideoSampler(
+            clip_duration=clip_duration, clips_per_video=clips_per_video
+        )
 
-        # Ensure minimum total duration
-        total_duration = waveform.size(1) / sample_rate
-        expected_samples = int(clip_duration * sample_rate)
-        if total_duration < clip_duration:
-            pad_len = expected_samples - waveform.size(1)
-            waveform = torch.nn.functional.pad(waveform, (0, pad_len))
+        for path in audio_paths:
+            waveform, sr = torchaudio.load(path)
+            if sr != sample_rate:
+                waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
 
-        segments = []
-        clip_timepoints = get_clip_timepoints(sampler, waveform.size(1) / sample_rate)
+            # Ensure minimum total duration
+            total_duration = waveform.size(1) / sample_rate
+            expected_samples = int(clip_duration * sample_rate)
+            if total_duration < clip_duration:
+                pad_len = expected_samples - waveform.size(1)
+                waveform = torch.nn.functional.pad(waveform, (0, pad_len))
 
-        for start, end in clip_timepoints:
-            clip = waveform[:, int(start * sample_rate):int(end * sample_rate)]
+            segments = []
+            clip_timepoints = get_clip_timepoints(sampler, waveform.size(1) / sample_rate)
 
-            # Pad clip if still too short (e.g., end too close to waveform end)
-            if clip.size(1) < expected_samples:
-                clip = torch.nn.functional.pad(clip, (0, expected_samples - clip.size(1)))
+            for start, end in clip_timepoints:
+                clip = waveform[:, int(start * sample_rate):int(end * sample_rate)]
 
-            spec = waveform2melspec(clip, sample_rate, num_mel_bins, target_length)
-            segments.append(normalize(spec))
+                # Pad clip if still too short (e.g., end too close to waveform end)
+                if clip.size(1) < expected_samples:
+                    clip = torch.nn.functional.pad(clip, (0, expected_samples - clip.size(1)))
 
-        outputs.append(torch.stack(segments))
+                spec = waveform2melspec(clip, sample_rate, num_mel_bins, target_length)
+                segments.append(normalize(spec))
 
-    return torch.stack(outputs).to(device)
+            outputs.append(torch.stack(segments))
+
+        return torch.stack(outputs).to(device)
+    return transform
 
 def crop_boxes(boxes, x_offset, y_offset):
     """
@@ -570,18 +577,20 @@ def load_label_mapping(center_emb_path, device):
 
 def train_data_loader(
     modality, dataset_root, train_json, label_to_index,
-    batch_size, num_workers, max_samples=None, debug=False
+    batch_size, num_workers, max_samples=None, debug=False,
+    model_type=BindModelType.IMAGEBIND
 ):
-    transform = get_transform_fn(modality, minSample=True)
+    transform = get_transform_fn(modality, minSample=True, model_type=model_type)
     dataset = JsonDataset(dataset_root, train_json, transform, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=True)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
 
 def val_data_loader(
     modality, dataset_root, val_json, label_to_index,
-    batch_size, num_workers, max_samples=None, debug=False
+    batch_size, num_workers, max_samples=None, debug=False,
+    model_type=BindModelType.IMAGEBIND
 ):
-    transform = get_transform_fn(modality, minSample=True)
+    transform = get_transform_fn(modality, minSample=True, model_type=model_type)
     dataset = JsonDataset(dataset_root, val_json, transform, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=False)
     return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)

@@ -100,31 +100,32 @@ def evaluate_all_models(args):
     clean_loader = None
     model = build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx)
 
-    # if args.run_clean_eval:
-    #     clean_loader = val_data_loader(
-    #         modality=args.modality,
-    #         dataset_root=args.dataset_root,
-    #         val_json=args.clean_val_json,
-    #         label_to_index=lbl_to_idx,
-    #         batch_size=args.clean_val_batch_size,
-    #         num_workers=args.num_workers,
-    #         max_samples=args.clean_val_max_samples
-    #     )
+    if args.run_clean_eval:
+        clean_loader = val_data_loader(
+            modality=args.modality,
+            dataset_root=args.dataset_root,
+            val_json=args.clean_val_json,
+            label_to_index=lbl_to_idx,
+            batch_size=args.clean_val_batch_size,
+            num_workers=args.num_workers,
+            max_samples=args.clean_val_max_samples,
+            model_type=args.model_type
+        )
 
     mean, std = get_normalization_tensors(args.modality, device)
     eps_list = [float(e.strip()) / 255.0 for e in args.epsilons.split(",")]
 
     final_results = []
 
-    # logger.info("Evaluating original model ...")
+    logger.info("Evaluating original model ...")
 
-    # if args.run_clean_eval:
-    #     acc = evaluate_clean(logger, device, model, clean_loader)
-    #     entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
-    #     if rank == 0:
-    #         final_results.append(entry)
+    if args.run_clean_eval:
+        acc = evaluate_clean(logger, device, model, clean_loader)
+        entry = f"[ORIGINAL] Clean acc = {acc:.4f}"
+        if rank == 0:
+            final_results.append(entry)
         
-    #     logger.info(entry)
+        logger.info(entry)
     
     attack_loader = val_data_loader(
         modality=args.modality,
@@ -133,7 +134,8 @@ def evaluate_all_models(args):
         label_to_index=lbl_to_idx,
         batch_size=args.attack_val_batch_size,
         num_workers=args.num_workers,
-        max_samples=args.attack_val_max_samples
+        max_samples=args.attack_val_max_samples,
+        model_type=args.model_type
     )
     for eps in eps_list:
         acc = evaluate_two_stage(
