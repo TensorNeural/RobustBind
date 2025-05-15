@@ -17,7 +17,7 @@ audio_model = LanguageBindModel(device=device, modality="audio", class_strings=c
 tokenizer_modality = "image"  # or "audio", depending on your use case
 model_name = LANGUAGEBIND_MODEL_NAME_MAP[tokenizer_modality]
 tokenizer_class = LANGUAGEBIND_TOKENIZER_MAP[tokenizer_modality]
-tokenizer = tokenizer_class.from_pretrained(LANGUAGEBIND_TOKENIZER_NAME_MAP[tokenizer_modality], cache_dir="./cache/tokenizer")
+tokenizer = tokenizer_class.from_pretrained(LANGUAGEBIND_TOKENIZER_NAME_MAP[tokenizer_modality], cache_dir=".cache/tokenizer")
 tokenized_text = tokenizer(class_names, max_length=77, padding="max_length", truncation=True, return_tensors="pt")
 text_tokens = to_device(tokenized_text, device)
 

@@ -18,7 +18,7 @@ declare -A MODALITY_MAP=(
   # [MSR-VTT]=video
   # [UCF-101]=video
 
-  # [N-Caltech-101]=event
+  [N-Caltech-101]=event
   [N-ImageNet-1K]=event
 )
 
@@ -97,8 +97,8 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [RGB-T]=16
   [MSR-VTT]=100
   [UCF-101]=100
-  [N-Caltech-101]=2000
-  [N-ImageNet-1K]=2000
+  [N-Caltech-101]=500
+  [N-ImageNet-1K]=500
 )
 
 declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
@@ -130,8 +130,9 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [MSR-VTT]=2990
   [UCF-101]=3783
   [N-Caltech-101]=2613
-  # [N-ImageNet-1K]=3000
-  [N-ImageNet-1K]=2
+  [N-ImageNet-1K]=50000
+  # [N-Caltech-101]=2
+  # [N-ImageNet-1K]=2
 )
 
 declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
@@ -149,8 +150,9 @@ declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [MSR-VTT]=800
   [UCF-101]=800
   [N-Caltech-101]=2613
-  # [N-ImageNet-1K]=50000
-  [N-ImageNet-1K]=2
+  [N-ImageNet-1K]=50000
+  # [N-Caltech-101]=2
+  # [N-ImageNet-1K]=2
 )
 
 # === LoRA Weights Map ===

@@ -35,7 +35,7 @@ def load_synset_mapping(dataset_root):
     print(f"✅ Loaded {len(synset_to_human)} synsets.")
     return synset_to_human, human_to_synset
 
-def generate_val_metadata(dataset_root, synset_mapping):
+def generate_val_metadata(dataset_root, synset_mapping, class_names):
     val_dir = os.path.join(dataset_root, "val")
     dataset_root_abs = os.path.abspath(dataset_root)
     metadata = []
@@ -50,6 +50,8 @@ def generate_val_metadata(dataset_root, synset_mapping):
             continue
 
         label = synset_mapping.get(class_folder, "unknown")
+        if label not in class_names:
+            class_names.append(label)
 
         for file in sorted(os.listdir(class_path)):
             if file.endswith(".npz"):
@@ -72,14 +74,24 @@ def save_center_to_wordnet(output_file, human_to_synset):
         json.dump(human_to_synset, f, indent=2)
     print(f"📄 Saved center_to_wordnet.json to {output_path}")
 
+def save_class_names(class_names):
+    class_names = sorted(set(class_names))
+    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    output_path = os.path.join(OUTPUT_DIR, "classes.json")
+    with open(output_path, "w") as f:
+        json.dump(class_to_idx, f, indent=2)
+    print(f"📄 Saved classes.json with {len(class_to_idx)} classes.")
+
 def main():
     parser = argparse.ArgumentParser(description="Generate val_data.json for N-ImageNet-1K (NPZ format)")
     parser.add_argument("DATASET_ROOT", type=str, help="Path to dataset root containing val/")
     args = parser.parse_args()
 
     synset_to_human, human_to_synset = load_synset_mapping(args.DATASET_ROOT)
-    generate_val_metadata(args.DATASET_ROOT, synset_to_human)
+    class_names = []
+    generate_val_metadata(args.DATASET_ROOT, synset_to_human, class_names)
     save_center_to_wordnet("center_to_wordnet.json", human_to_synset)
+    save_class_names(class_names)
 
     print("✅ All done.")
 

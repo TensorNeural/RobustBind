@@ -316,9 +316,9 @@ class UniBindModel(Model):
         device,
         pretrain_weights,
         modality,
-        centre_embeddings,
-        centre_labels,
-        label_to_index,
+        centre_embeddings=None,
+        centre_labels = None,
+        label_to_index = None,
         logger=None,
         use_flash_attention=False,
         use_lora=False,
@@ -447,7 +447,7 @@ class LanguageBindModel(Model):
 
         # Load single-modality LanguageBind model and tokenizer
         model_name = LANGUAGEBIND_MODEL_NAME_MAP[modality]
-        self.languagebind = LanguageBind(clip_type={modality.value: model_name})
+        self.languagebind = LanguageBind(clip_type={modality.value: model_name}, cache_dir='.cache')
         self.languagebind = self.languagebind.to(device)
         self.languagebind.eval()
 

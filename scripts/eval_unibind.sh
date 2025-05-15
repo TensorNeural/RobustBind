@@ -16,10 +16,10 @@ declare -A MODALITY_MAP=(
   # [RGB-T]=thermal
 
   # [MSR-VTT]=video
-  [UCF-101]=video
+  # [UCF-101]=video
 
-  # [N-Caltech-101]=event
-  # [N-ImageNet-1K]=event
+  [N-Caltech-101]=event
+  [N-ImageNet-1K]=event
 )
 
 # === Embedding Suffix Mapping ===
@@ -60,7 +60,7 @@ declare -A CLEAN_VAL_JSON_MAP=(
   [MSR-VTT]="./datasets/MSR-VTT/val_data.json"
   [UCF-101]="./datasets/UCF-101/val_data.json"
 
-  [N-Caltech-101]="./datasets/N-Caltech-101/static/val_data.json"
+  [N-Caltech-101]="./datasets/N-Caltech-101/val_data.json"
   [N-ImageNet-1K]="./datasets/N-ImageNet-1K/val_data.json"
 )
 
@@ -81,7 +81,7 @@ declare -A ATTACK_VAL_JSON_MAP=(
   [MSR-VTT]="./datasets/MSR-VTT/val_data.json"
   [UCF-101]="./datasets/UCF-101/val_data.json"
 
-  [N-Caltech-101]="./datasets/N-Caltech-101/static/val_data.json"
+  [N-Caltech-101]="./datasets/N-Caltech-101/val_data.json"
   [N-ImageNet-1K]="./datasets/N-ImageNet-1K/val_data.json"
 )
 
