@@ -6,9 +6,11 @@ import torch
 import logging
 import matplotlib.pyplot as plt
 from enum import Enum
+from datetime import datetime
 from sklearn.manifold import TSNE
 from torch.utils.data import Subset, DataLoader
 from multiprocessing import Pool
+from functools import partial
 
 from model import UniBindModel, ForwardMode
 from attack import AttackModel, APGDAttack, two_stage_attack
@@ -52,16 +54,20 @@ MODALITY_COLOR = {
     Modality.AUDIO: "red",
     Modality.EVENT: "green"
 }
-
+CLASS_NAME_PER_MODALITY = {
+    Modality.IMAGE: "church",
+    Modality.AUDIO: "church",
+    Modality.EVENT: "church"
+}
 MODALITIES = [Modality.IMAGE, Modality.AUDIO, Modality.EVENT]
 
 # === Logger
-def setup_logger():
-    os.makedirs("output", exist_ok=True)
+def setup_logger(log_dir):
+    os.makedirs(log_dir, exist_ok=True)
     logger = logging.getLogger("Logger")
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s - %(message)s")
-    fh = logging.FileHandler("output/tsne.log")
+    fh = logging.FileHandler(os.path.join(log_dir, "tsne.log"))
     fh.setFormatter(formatter)
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
@@ -91,13 +97,15 @@ class DataParallelWithReplication(torch.nn.DataParallel):
             return getattr(self.module, name)
 
 # === Data/Model Helpers
-def get_church_samples(modality, dataset_name, val_json, train_json, dataset_root, device, label_to_index):
+def get_class_samples(modality, dataset_name, val_json, train_json, dataset_root, device, label_to_index):
+    target_class = CLASS_NAME_PER_MODALITY[modality]
+
     def load_json(path):
         if not os.path.exists(path): return []
         with open(path) as f: return json.load(f)
 
     val_data = load_json(val_json)
-    val_matches = [i for i, e in enumerate(val_data) if "church" in e["label"].lower()]
+    val_matches = [i for i, e in enumerate(val_data) if target_class in e["label"].lower()]
     if len(val_matches) >= NUM_SAMPLES:
         selected = val_matches[:NUM_SAMPLES]
         dataset = JsonDataset(
@@ -109,9 +117,9 @@ def get_church_samples(modality, dataset_name, val_json, train_json, dataset_roo
     else:
         train_data = load_json(train_json)
         combined_data = val_data + train_data
-        combined_matches = val_matches + [i + len(val_data) for i, e in enumerate(train_data) if "church" in e["label"].lower()]
+        combined_matches = val_matches + [i + len(val_data) for i, e in enumerate(train_data) if target_class in e["label"].lower()]
         if not combined_matches:
-            raise ValueError(f"[{modality.name}] No 'church' examples in val or train.")
+            raise ValueError(f"[{modality.name}] No examples found for class '{target_class}'.")
 
         selected = combined_matches[:NUM_SAMPLES]
         combined_path = f"./output/tmp_combined_{modality.name.lower()}.json"
@@ -132,7 +140,6 @@ def get_church_samples(modality, dataset_name, val_json, train_json, dataset_roo
         return x.to(device)
 
 def build_model(device, pretrain_weights, modality, label_to_index, centre_embeddings, centre_labels, use_flash_attention, lora_weights=None):
-    print(f"Building model for {modality.name}, {lora_weights}...")
     model = UniBindModel(
         device=device,
         pretrain_weights=pretrain_weights,
@@ -168,7 +175,7 @@ def save_embeddings(name, embeddings):
 def embeddings_already_saved(name):
     return os.path.exists(f"output/embeddings/{name}.npy")
 
-def plot_tsne_per_combo(name_prefix):
+def plot_tsne_per_combo(name_prefix, save_dir):
     folder = "output/embeddings"
     all_embs, all_colors = [], []
 
@@ -183,43 +190,24 @@ def plot_tsne_per_combo(name_prefix):
         all_colors.extend([MODALITY_COLOR[modality]] * len(emb))
 
     if not all_embs:
-        print(f"[SKIP] No embeddings found for {name_prefix}")
         return
 
     X = np.concatenate(all_embs, axis=0)
     coords = TSNE(n_components=2, perplexity=PERPLEXITY, random_state=42).fit_transform(X)
-    xs, ys = coords[:, 0], coords[:, 1]
+    coords = (coords - coords.min(axis=0)) / (coords.max(axis=0) - coords.min(axis=0))
 
     plt.figure(figsize=(8, 6))
-    plt.scatter(xs, ys, c=all_colors, s=60)
-
-    handles = [
-        plt.Line2D([0], [0], marker='o', color='w',
-                   label=m.name.lower(),
-                   markerfacecolor=MODALITY_COLOR[m],
-                   markeredgecolor='k', markersize=10)
-        for m in MODALITIES
-    ]
-    # plt.legend(handles=handles, title="Modality", fontsize=10, title_fontsize=11)
-    # plt.title(f"t-SNE: {name_prefix}", fontsize=13)
-    # plt.xlabel("t-SNE 1", fontsize=12)
-    # plt.ylabel("t-SNE 2", fontsize=12)
-    plt.xticks(fontsize=10)
-    plt.yticks(fontsize=10)
-    # plt.grid(True, linestyle='--', alpha=0.5)
+    plt.scatter(coords[:, 0], coords[:, 1], c=all_colors, s=60)
+    os.makedirs(save_dir, exist_ok=True)
     plt.tight_layout()
-    os.makedirs("output/tsne_charts", exist_ok=True)
-    plt.savefig(f"output/tsne_charts/tsne_{name_prefix}.png", dpi=300)
+    plt.savefig(os.path.join(save_dir, f"tsne_{name_prefix}.png"), dpi=300)
     plt.close()
-    print(f"✅ Saved: output/tsne_charts/tsne_{name_prefix}.png")
 
-def plot_center_embeddings_tsne(modality_to_center_emb, device):
-    os.makedirs("output/tsne_charts", exist_ok=True)
+def plot_center_embeddings_tsne(modality_to_center_emb, device, save_dir):
     all_embs, all_colors = [], []
 
     for modality, (emb_path, color) in modality_to_center_emb.items():
         if not os.path.exists(emb_path):
-            print(f"[WARN] Center embedding file missing for {modality.name}: {emb_path}")
             continue
 
         try:
@@ -227,53 +215,41 @@ def plot_center_embeddings_tsne(modality_to_center_emb, device):
             if isinstance(centre_emb, torch.Tensor):
                 centre_emb = centre_emb.cpu().numpy()
 
+            target_class = CLASS_NAME_PER_MODALITY[modality]
             for emb, label in zip(centre_emb, centre_labels):
-                if "church" in label.lower():
+                if target_class in label.lower():
                     all_embs.append(emb)
                     all_colors.append(color)
 
-        except Exception as e:
-            print(f"[ERROR] Failed to load {emb_path} for {modality.name}: {e}")
+        except Exception:
             continue
 
     if not all_embs:
-        print("No 'church' class centers found.")
         return
 
     X = np.stack(all_embs, axis=0)
-    coords = TSNE(n_components=2, perplexity=5, random_state=42).fit_transform(X)
-    xs, ys = coords[:, 0], coords[:, 1]
+    coords = TSNE(n_components=2, perplexity=PERPLEXITY, random_state=42).fit_transform(X)
+    coords = (coords - coords.min(axis=0)) / (coords.max(axis=0) - coords.min(axis=0))
 
     plt.figure(figsize=(8, 6))
-    plt.scatter(xs, ys, c=all_colors, s=60)
-    handles = [
-        plt.Line2D([0], [0], marker='o', color='w',
-                   label=mod.name.lower(),
-                   markerfacecolor=MODALITY_COLOR[mod],
-                   markeredgecolor='k', markersize=10)
-        for mod in modality_to_center_emb
-    ]
-    # plt.legend(handles=handles, title="Modality")
-    # plt.title("t-SNE of Center Embeddings (church only)")
-    # plt.grid(True, linestyle="--", alpha=0.5)
+    plt.scatter(coords[:, 0], coords[:, 1], c=all_colors, s=60)
     plt.tight_layout()
-    plt.savefig("output/tsne_charts/tsne_center_embeddings_church.png", dpi=200)
+    plt.savefig(os.path.join(save_dir, "tsne_center_embeddings.png"), dpi=200)
     plt.close()
-    print("✅ Saved t-SNE chart: tsne_center_embeddings_church.png")
 
-# === Dispatcher for all (model + eps) combos
-def generate_all_tsne_combo_charts(only_clean=False, only_unibind=False):
-    print("Generating t-SNE charts for all (model, eps) combos...")
+def generate_all_tsne_combo_charts(tsne_output_dir, only_clean=False, only_unibind=False):
     eps_levels = [EpsLevel.CLEAN] if only_clean else list(EpsLevel)
     model_types = [ModelType.UNIBIND] if only_unibind else list(ModelType)
     prefixes = [f"{model.name}_{eps.name}" for model in model_types for eps in eps_levels]
-
+    plot_fn = partial(plot_tsne_per_combo, save_dir=tsne_output_dir)
     with Pool(processes=os.cpu_count()) as pool:
-        pool.map(plot_tsne_per_combo, prefixes)
+        pool.map(plot_fn, prefixes)
 
 # === Main
 def main(args):
-    logger = setup_logger()
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    tsne_output_dir = os.path.join("output", "tsne_charts", timestamp)
+    logger = setup_logger(tsne_output_dir)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     modality_config = {
@@ -296,7 +272,7 @@ def main(args):
 
                 logger.info(f"== {modality.name} - {model_enum.value} @ {eps_enum.name} ==")
                 centre_emb, centre_labels, label_to_index, _ = load_label_mapping(center_emb_path, device)
-                x = get_church_samples(modality, dataset, val_json, train_json, args.dataset_root, device, label_to_index)
+                x = get_class_samples(modality, dataset, val_json, train_json, args.dataset_root, device, label_to_index)
                 mean, std = get_normalization_tensors(modality, device)
 
                 lora_list = LORA_WEIGHTS_LIST_MAP[modality]
@@ -323,14 +299,13 @@ def main(args):
                 embeddings = extract_embeddings(model, x, device)
                 save_embeddings(save_name, embeddings)
 
-    logger.info("Generating per-(model, eps) t-SNE charts...")
-    generate_all_tsne_combo_charts(args.only_clean, args.only_unibind)
+    logger.info("Generating t-SNE visualizations...")
+    generate_all_tsne_combo_charts(tsne_output_dir, args.only_clean, args.only_unibind)
     plot_center_embeddings_tsne({
         Modality.IMAGE: (args.centre_emb_image, MODALITY_COLOR[Modality.IMAGE]),
         Modality.AUDIO: (args.centre_emb_audio, MODALITY_COLOR[Modality.AUDIO]),
         Modality.EVENT: (args.centre_emb_event, MODALITY_COLOR[Modality.EVENT]),
-    }, device=device)
-
+    }, device=device, save_dir=tsne_output_dir)
 
 # === CLI
 if __name__ == "__main__":
@@ -347,8 +322,8 @@ if __name__ == "__main__":
     parser.add_argument("--centre_emb_audio", default="./centre_embs/audio_esc_center_embeddings.pkl")
     parser.add_argument("--pretrain_weights", default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
-    parser.add_argument("--force_recompute", action="store_true", default=False, help="Force regenerate .npy embeddings")
-    parser.add_argument("--only_clean", action="store_true", default=False, help="Only generate clean embeddings")
-    parser.add_argument("--only_unibind", action="store_true", default=False, help="Only run UniBind model")
+    parser.add_argument("--force_recompute", action="store_true", default=False)
+    parser.add_argument("--only_clean", action="store_true", default=False)
+    parser.add_argument("--only_unibind", action="store_true", default=False)
     args = parser.parse_args()
     main(args)

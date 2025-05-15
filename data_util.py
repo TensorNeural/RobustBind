@@ -19,6 +19,7 @@ from shared_types import BindModelType, Modality
 from binds.languagebind import transform_dict as lb_transform_dict
 
 from utils.utils import load_centre_embeddings
+import multiprocessing
 
 BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 
@@ -485,25 +486,32 @@ def render_event_frame_gpu(events: torch.Tensor, H: int, W: int, device: torch.d
 
     return rgb.clamp(0, 1)
 
-def load_and_transform_event_data(event_paths, device):
-    images = []
-    for path in event_paths:
-        try:
-            events = load_event_file(path)
-        except Exception as e:
-            print(f"[ERROR] Failed to read {path} — {e}")
-            continue
-
+def _load_event_segment_cpu(path):
+    try:
+        events = load_event_file(path)
         if events.shape[0] == 0:
             print(f"[WARN] Empty event file: {path}")
+            return None
+        H, W = infer_resolution(events)
+        segment = split_events_temporally(events, 1)[0]
+        return (segment, H, W)
+    except Exception as e:
+        print(f"[ERROR] Failed to read {path} — {e}")
+        return None
+
+def load_and_transform_event_data(event_paths, device):
+    images = []
+
+    for path in event_paths:
+        result = _load_event_segment_cpu(path)
+        if result is None:
             continue
 
-        H, W = infer_resolution(events)
-        segment = split_events_temporally(events, 1)[0].to(device)  # <-- FIXED here
-
-        rgb_tensor = render_event_frame_gpu(segment, H, W, device)  # [3, H, W]
-        img = transforms.ToPILImage()(rgb_tensor.cpu())             # Convert to PIL
-        images.append(EVENT_TRANSFORM(img).to(device))              # Apply transforms and move to GPU
+        segment, H, W = result
+        segment = segment.to(device)
+        rgb_tensor = render_event_frame_gpu(segment, H, W, device)
+        img = transforms.ToPILImage()(rgb_tensor.cpu())
+        images.append(EVENT_TRANSFORM(img).to(device))
 
     if not images:
         print("[ERROR] All event files failed. Returning dummy.")

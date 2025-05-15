@@ -125,14 +125,11 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [ESC-50]=400
   [UrbanSound8K]=1653
   [LLVIP]=16974
-  # [LLVIP]=5000
   [RGB-T]=500
   [MSR-VTT]=2990
   [UCF-101]=3783
   [N-Caltech-101]=2613
   [N-ImageNet-1K]=50000
-  # [N-Caltech-101]=2
-  # [N-ImageNet-1K]=2
 )
 
 declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
@@ -151,8 +148,6 @@ declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [UCF-101]=800
   [N-Caltech-101]=2613
   [N-ImageNet-1K]=50000
-  # [N-Caltech-101]=2
-  # [N-ImageNet-1K]=2
 )
 
 # === LoRA Weights Map ===
