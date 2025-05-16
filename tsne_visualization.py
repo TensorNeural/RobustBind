@@ -55,9 +55,9 @@ MODALITY_COLOR = {
     Modality.EVENT: "green"
 }
 CLASS_NAME_PER_MODALITY = {
-    Modality.IMAGE: "church",
-    Modality.AUDIO: "church",
-    Modality.EVENT: "church"
+    Modality.IMAGE: "bathroom",
+    Modality.AUDIO: "toilet_flush",
+    Modality.EVENT: "toilet seat",
 }
 MODALITIES = [Modality.IMAGE, Modality.AUDIO, Modality.EVENT]
 
