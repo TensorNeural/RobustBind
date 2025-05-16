@@ -19,7 +19,6 @@ from shared_types import BindModelType, Modality
 from binds.languagebind import transform_dict as lb_transform_dict
 
 from utils.utils import load_centre_embeddings
-import multiprocessing
 
 BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 

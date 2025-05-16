@@ -8,14 +8,17 @@ from datetime import datetime
 from collections import defaultdict
 
 from shared_types import Modality
+from model import ForwardMode
 from model import UniBindModel, ForwardMode
 from attack import AttackModel, APGDAttack, two_stage_attack
 from data_util import get_transform_fn, get_normalization_tensors, load_label_mapping
 import logging
+import matplotlib.pyplot as plt
+import numpy as np
 
 TOP_K = 5
 NUM_QUERY_PER_CLASS = 5
-NUM_TARGET_PER_CLASS = 20
+NUM_TARGET_PER_CLASS = 5
 
 LORA_VARIANTS = {
     "clean": None,
@@ -23,12 +26,35 @@ LORA_VARIANTS = {
     "eps4": "./ckpts/audio_eps4_lora_weights.pt"
 }
 
+MAX_DATASET_SIZES = {
+    Modality.IMAGE: 2,
+    Modality.EVENT: 2,
+    Modality.AUDIO: 2,
+    Modality.POINT: 2,
+}
+
+BATCH_SIZES = {
+    Modality.IMAGE: 32,
+    Modality.EVENT: 32,
+    Modality.AUDIO: 32,
+    Modality.POINT: 32,
+}
+
+MODALITY_EXTENSIONS = {
+    Modality.AUDIO: ".wav",
+    Modality.IMAGE: ".jpg",
+    Modality.EVENT: ".png",
+    Modality.POINT: ".png",
+    Modality.THERMAL: ".png",
+    Modality.VIDEO: ".mp4"
+}
+
 def setup_logger(log_dir):
     os.makedirs(log_dir, exist_ok=True)
     logger = logging.getLogger("Logger")
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s - %(message)s")
-    fh = logging.FileHandler(os.path.join(log_dir, "tsne.log"))
+    fh = logging.FileHandler(os.path.join(log_dir, "cms.log"))
     fh.setFormatter(formatter)
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
@@ -59,14 +85,67 @@ class DataParallelWithReplication(torch.nn.DataParallel):
 def load_label_map(path):
     with open(path) as f:
         return json.load(f)
+    
+def read_events_from_bin(path):
+    with open(path, "rb") as f:
+        raw = np.frombuffer(f.read(), dtype=np.uint8).reshape(-1, 5)
+    if raw.size == 0:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+    x = raw[:, 0].astype(np.uint32)
+    y = raw[:, 1].astype(np.uint32)
+    p = (raw[:, 2] >> 7) & 1
+    return x, y, p
 
+def render_bin_to_png(src_path, dst_path, width=240, height=180):
+    x, y, p = read_events_from_bin(src_path)
+    if len(x) == 0:
+        print(f"⚠️ Empty bin: {src_path}")
+        return
 
-def load_samples(modality, dataset_name, val_json, dataset_root, center_emb_path, max_per_class, device, class_map):
+    # Plot using matplotlib with red (pos) and blue (neg) on black
+    fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.invert_yaxis()
+    ax.set_axis_off()
+
+    # Draw events
+    ax.scatter(x[p == 0], y[p == 0], c='b', s=0.2)
+    ax.scatter(x[p == 1], y[p == 1], c='r', s=0.2)
+
+    # Save to PNG
+    plt.savefig(dst_path, dpi=100, transparent=True)
+    plt.close(fig)
+
+def render_npz_to_png(src_path, dst_path, width=224, height=224):
+    try:
+        data = np.load(src_path)
+        ev = data['event_data']
+        x, y, p = ev['x'], ev['y'], ev['p']
+        x_norm = (x - x.min()) / (x.ptp() + 1e-5) * (width - 1)
+        y_norm = (y - y.min()) / (y.ptp() + 1e-5) * (height - 1)
+
+        fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, width)
+        ax.set_ylim(0, height)
+        ax.invert_yaxis()
+        ax.set_axis_off()
+
+        ax.scatter(x_norm[p == 0], y_norm[p == 0], c='b', s=0.2)
+        ax.scatter(x_norm[p == 1], y_norm[p == 1], c='r', s=0.2)
+
+        plt.savefig(dst_path, dpi=100, transparent=True)
+        plt.close(fig)
+    except Exception as e:
+        print(f"❌ Failed to render npz {src_path}: {e}")
+
+def load_samples(modality, dataset_name, val_json, dataset_root, max_per_class, device, class_map, max_total_samples=None):
     print(f"[INFO] Loading samples for modality: {modality}, dataset: {dataset_name}")
     print(f"[INFO] Using val_json: {val_json}")
     print(f"[INFO] Class map contains {len(class_map)}")
 
-    _, _, label_to_index, _ = load_label_mapping(center_emb_path, device)
     transform = get_transform_fn(modality)
 
     with open(val_json, "r") as f:
@@ -75,14 +154,20 @@ def load_samples(modality, dataset_name, val_json, dataset_root, center_emb_path
     print(f"[INFO] Loaded {len(entries)} entries from {val_json}")
 
     buckets, labels, metas = defaultdict(list), defaultdict(list), defaultdict(list)
-    failed, skipped = 0, 0
+    failed, skipped, total_loaded = 0, 0, 0
+    satisfied_classes = set()
 
     for entry in tqdm(entries, desc=f"[{modality}] Loading samples", unit="sample"):
+        if max_total_samples is not None and total_loaded >= max_total_samples:
+            print("[INFO] Reached global sample cap. Exiting early.")
+            break
+
         label_str = entry["label"].strip().lower()
         if label_str not in class_map:
             skipped += 1
             continue
         if len(buckets[label_str]) >= max_per_class:
+            satisfied_classes.add(label_str)
             continue
 
         rel_path = entry["data"]
@@ -92,6 +177,10 @@ def load_samples(modality, dataset_name, val_json, dataset_root, center_emb_path
             buckets[label_str].append(tensor)
             labels[label_str].append(label_str)
             metas[label_str].append(full_path)
+            total_loaded += 1
+
+            if len(buckets[label_str]) >= max_per_class:
+                satisfied_classes.add(label_str)
         except Exception as e:
             print(f"[WARN] Failed to process {full_path}: {e}")
             failed += 1
@@ -122,20 +211,20 @@ def extract_embeddings(model, x, device):
 def extract_embeddings_with_two_stage_attack(model, x, eps, mean, std, device, logger):
     labels = torch.zeros(x.size(0), dtype=torch.long, device=device)
     attack_model = AttackModel(model, mean, std)
-    stage1 = APGDAttack(logger, attack_model, "linf", 10, 1, eps, "ce", device)
-    stage2 = APGDAttack(logger, attack_model, "linf", 10, 1, eps, "ce", device)
+    stage1 = APGDAttack(logger, attack_model, 100, "linf", 1, eps, "ce", 1, False, device)
+    stage2 = APGDAttack(logger, attack_model, 100, "linf", 1, eps, "ce", 1, False, device)
     adv_x = two_stage_attack(logger, model, x, labels, stage1, stage2, mean, std)
     with torch.no_grad():
         return torch.nn.functional.normalize(model(adv_x, ForwardMode.EMBEDDINGS), dim=-1).cpu()
 
-def build_model(args, logger, device, modality, lora_path=None):
+def build_model(args, logger, device, modality, centre_emb, centre_labels,label_to_index,lora_path=None):
     model = UniBindModel(
         device=device,
         pretrain_weights=args.pretrain_weights,
         modality=modality,
-        centre_embeddings=None,
-        centre_labels=None,
-        label_to_index=None,
+        centre_embeddings=centre_emb,
+        centre_labels=centre_labels,
+        label_to_index=label_to_index,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
         use_lora=(lora_path is not None)
@@ -153,10 +242,11 @@ def precompute_targets(args, logger, device):
     for modality in [Modality.EVENT, Modality.IMAGE, Modality.POINT]:
         logger.info(f"[INFO] Precomputing embeddings for {modality} modality")
 
-        model = build_model(args, logger, device, modality)
-
         # Load label_to_index from center embedding
-        _, _, label_to_index, _ = load_label_mapping(args.center_embs[modality], device)
+        centre_emb, centre_labels, label_to_index, _ = load_label_mapping(args.center_embs[modality], device)
+
+        model = build_model(args, logger, device, modality, centre_emb=centre_emb, centre_labels=centre_labels, label_to_index=label_to_index)
+
         class_names = list(label_to_index.keys())
 
         # Use identity map: label → label
@@ -167,14 +257,14 @@ def precompute_targets(args, logger, device):
             dataset_name=args.datasets[modality],
             val_json=args.val_jsons[modality],
             dataset_root=args.dataset_root,
-            center_emb_path=args.center_embs[modality],
             max_per_class=NUM_TARGET_PER_CLASS,
             device=device,
-            class_map=class_map
+            class_map=class_map,
+            max_total_samples=MAX_DATASET_SIZES[modality]
         )
 
         # === Batched embedding extraction with tqdm ===
-        batch_size = 500
+        batch_size = BATCH_SIZES[modality]
         embeddings = []
         data = [s["data"] for s in samples]
 
@@ -215,9 +305,17 @@ def evaluate_and_save_results(logger, samples, embeddings, target_matrix, all_ta
             expected = label_map[q_class][t["modality"].value]
             match = (t["label"] == expected)
             if match: hit = True
-            dst_path = os.path.join(q_out, f"{rank+1}_{t['modality'].value}_{t['label']}.ext")
+            ext = MODALITY_EXTENSIONS.get(t["modality"], ".bin")
+            dst_path = os.path.join(q_out, f"{rank+1}_{t['modality'].value}_{t['label']}{ext}")
+
             if os.path.exists(t["path"]):
-                shutil.copyfile(t["path"], dst_path)
+                if t["path"].endswith(".bin"):
+                    render_bin_to_png(t["path"], dst_path)
+                elif t["path"].endswith(".npz"):
+                    render_npz_to_png(t["path"], dst_path)
+                else:
+                    shutil.copyfile(t["path"], dst_path)
+
             results.append({
                 "query_index": i,
                 "query_class": q_class,
@@ -232,16 +330,16 @@ def evaluate_and_save_results(logger, samples, embeddings, target_matrix, all_ta
 
     with open(os.path.join(out_dir, "top5_results.json"), "w") as f:
         json.dump(results, f, indent=2)
-    print(f"[RESULT] Recall@5 = {hits}/{len(samples)} = {hits / len(samples):.3f}")
+    logger.info(f"[RESULT] Recall@5 = {hits}/{len(samples)} = {hits / len(samples):.3f}")
 
-def run_single_experiment(logger, variant_name, lora_path, args, device, label_map, audio_class_map, all_targets, target_matrix, base_out):
+def run_single_experiment(logger, variant_name, centre_emb, centre_labels, label_to_index, 
+                          lora_path, args, device, label_map, audio_class_map, all_targets, target_matrix, base_out):
     out_dir = os.path.join(base_out, variant_name)
     os.makedirs(out_dir, exist_ok=True)
     print(f"\n[INFO] Running variant: {variant_name}")
 
-    model = build_model(args, logger, device, Modality.AUDIO, lora_path=lora_path)
-    samples = load_samples(Modality.AUDIO, "ESC-50", args.val_json_audio, args.dataset_root,
-                           args.center_emb_audio, NUM_QUERY_PER_CLASS, device, audio_class_map)
+    model = build_model(args, logger, device, Modality.AUDIO, centre_emb, centre_labels, label_to_index, lora_path=lora_path)
+    samples = load_samples(Modality.AUDIO, "ESC-50", args.val_json_audio, args.dataset_root, NUM_QUERY_PER_CLASS, device, audio_class_map)
     mean, std = get_normalization_tensors(Modality.AUDIO, device)
     x = torch.stack([s["data"] for s in samples]).to(device)
 
@@ -251,7 +349,7 @@ def run_single_experiment(logger, variant_name, lora_path, args, device, label_m
     elif "eps4" in variant_name:
         eps = 4 / 255.
 
-    emb
+    emb = None
     if eps:
         emb = extract_embeddings_with_two_stage_attack(model, x, eps, mean, std, device, logger)
     else:
@@ -263,7 +361,7 @@ def run(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base_out = os.path.join(args.output_dir, "cross_modal_search", timestamp)
+    base_out = os.path.join(args.output_dir, "cross_modality_search", timestamp)
     logger = setup_logger(base_out)
     logger.info(f"[INFO] Using dataset root: {args.dataset_root}")
     logger.info("Loading label map")
@@ -275,10 +373,14 @@ def run(args):
     all_targets = precompute_targets(args, logger, device)
     target_matrix = torch.stack([t["embedding"] for t in all_targets])
 
+    centre_emb, centre_labels, label_to_index, _ = load_label_mapping(args.center_embs[Modality.AUDIO], device)
+
     for variant_name, lora_path in LORA_VARIANTS.items():
-        run_single_experiment(logger, variant_name, lora_path, args, device, label_map, audio_class_map, all_targets, target_matrix, base_out)
+        run_single_experiment(logger, variant_name, centre_emb, centre_labels, label_to_index,
+                              lora_path, args, device, label_map, audio_class_map, all_targets, target_matrix, base_out)
 
 if __name__ == "__main__":
+    print("[INFO] Starting cross-modality search")
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_root", default="/home/user/datasets")
     parser.add_argument("--val_json_audio", default="./datasets/ESC-50/val_data.json")
@@ -298,17 +400,20 @@ if __name__ == "__main__":
     args.datasets = {
         Modality.IMAGE: "Places365",
         Modality.EVENT: "N-ImageNet-1K",
-        Modality.POINT: "ModelNet40"
+        Modality.POINT: "ModelNet40",
+        Modality.AUDIO: "ESC-50"
     }
     args.val_jsons = {
         Modality.IMAGE: args.val_json_image,
         Modality.EVENT: args.val_json_event,
-        Modality.POINT: args.val_json_point
+        Modality.POINT: args.val_json_point,
+        Modality.AUDIO: args.val_json_audio
     }
     args.center_embs = {
         Modality.IMAGE: args.center_emb_image,
         Modality.EVENT: args.center_emb_event,
-        Modality.POINT: args.center_emb_point
+        Modality.POINT: args.center_emb_point,
+        Modality.AUDIO: args.center_emb_audio
     }
 
     run(args)

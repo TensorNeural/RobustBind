@@ -25,7 +25,7 @@ class AttackModel(Model):
     def forward(self, x, mode=ForwardMode.EMBEDDINGS):
         x = (x - self.mean) / self.std
         wrapped_x = self.model.wrap_tensor(x)
-        return self.model(wrapped_x, mode=mode)
+        return self.model(wrapped_x, mode)
 
 
 # =========================== PGD ===========================
@@ -177,19 +177,19 @@ class APGDAttack(Attack):
                     with ProfileModelGradient(self.model, self.logger):
                         for _ in range(self.eot_iter):
                             if self.loss_type == "ce":
-                                logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
+                                logits, _ = self.model(x_adv, ForwardMode.LOGITS)
                                 loss += ce_loss(logits, y)
                             elif self.loss_type == "ce-targeted":
-                                logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
+                                logits, _ = self.model(x_adv, ForwardMode.LOGITS)
                                 loss += ce_loss_targeted(logits, self.y_target)
                             elif self.loss_type == "dlr":
-                                logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
+                                logits, _ = self.model(x_adv, ForwardMode.LOGITS)
                                 loss += dlr_loss(logits, y)
                             elif self.loss_type == "dlr-targeted":
-                                logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
+                                logits, _ = self.model(x_adv, ForwardMode.LOGITS)
                                 loss += dlr_loss_targeted(logits, y, self.y_target)
                             elif self.loss_type == "l2":
-                                x_emb = self.model(x_adv, mode=ForwardMode.EMBEDDINGS)
+                                x_emb = self.model(x_adv, ForwardMode.EMBEDDINGS)
                                 loss += l2_loss(x_emb, emb_orig)
                     loss /= self.eot_iter
                     grad = torch.autograd.grad(loss, x_adv)[0]
@@ -239,7 +239,6 @@ class APGDAttack(Attack):
 def two_stage_attack(logger, model, inputs, labels, attack_stage1, attack_stage2, mean, std):
     logger.info("Running two-stage attack...")
     inputs_unorm = inputs.detach().clone()
-    # logger.info(f"Shape of input: {inputs.shape}, mean: {mean}, std: {std}")
 
     unnormalize_inplace(inputs_unorm, mean, std)
 
@@ -250,7 +249,7 @@ def two_stage_attack(logger, model, inputs, labels, attack_stage1, attack_stage2
 
     wrapped_adv_stage1 = model.wrap_tensor(adv_stage1)
     with torch.no_grad():
-        logits_stage1, _ = model(wrapped_adv_stage1, mode=ForwardMode.LOGITS)
+        logits_stage1, _ = model(wrapped_adv_stage1, ForwardMode.LOGITS)
         preds_stage1 = logits_stage1.argmax(dim=1)
         correct_mask = preds_stage1 == labels
         keep_idx = correct_mask.nonzero(as_tuple=True)[0]
