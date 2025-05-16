@@ -14,7 +14,7 @@ CENTER_EVENT="${CENTER_EMB_DIR}/event_nin_center_embeddings.pkl"
 CENTER_POINT="${CENTER_EMB_DIR}/point_modelnet40_center_embeddings.pkl"
 
 # === Validation JSON Metadata ===
-VAL_AUDIO="./datasets/ESC-50/val_data.json"
+VAL_AUDIO="./datasets/ESC-50/train_data.json"
 VAL_IMAGE="./datasets/Places365/val_data.json"
 VAL_EVENT="./datasets/N-ImageNet-1K/val_data.json"
 VAL_POINT="./datasets/ModelNet40/val_data.json"

@@ -17,14 +17,35 @@ from attack import AttackModel, APGDAttack, two_stage_attack
 from data_util import get_transform_fn, get_normalization_tensors, load_label_mapping
 
 TOP_K = 5
-NUM_QUERY_PER_CLASS = 5
-NUM_TARGET_PER_CLASS = 20
+NUM_QUERY_PER_CLASS = 50
+NUM_TARGET_PER_CLASS = 30
+
 LORA_VARIANTS = {
     "clean": None,
-    "eps2": "./ckpts/audio_eps2_lora_weights.pt",
-    "eps4": "./ckpts/audio_eps4_lora_weights.pt"
+    "lora_robust2": "./ckpts/audio_eps2_lora_weights.pt",
+    "lora_robust4": "./ckpts/audio_eps4_lora_weights.pt"
 }
-QUERY_BATCH_SIZE = 100
+
+EVAL_EPS_VARIANTS = {
+    "clean": None,
+    "eps2": 2 / 255.,
+    "eps4": 4 / 255.
+}
+
+CLEAN_BATCH_SIZES = {
+    Modality.AUDIO: 64,
+    Modality.IMAGE: 1000,
+    Modality.EVENT: 200,
+    Modality.POINT: 64,
+}
+
+ATTACK_BATCH_SIZES = {
+    Modality.AUDIO: 32,
+    Modality.IMAGE: 256,
+    Modality.EVENT: 100,
+    Modality.POINT: 40,
+}
+
 MODALITY_EXTENSIONS = {
     Modality.AUDIO: ".wav",
     Modality.IMAGE: ".jpg",
@@ -33,6 +54,7 @@ MODALITY_EXTENSIONS = {
     Modality.THERMAL: ".png",
     Modality.VIDEO: ".mp4"
 }
+
 DATASET_NAMES = {
     Modality.AUDIO: "ESC-50",
     Modality.IMAGE: "Places365",
@@ -48,18 +70,33 @@ def setup_ddp():
 
 def setup_logger(log_dir, rank):
     os.makedirs(log_dir, exist_ok=True)
-    logger = logging.getLogger(f"Logger{rank}")
+    logger = logging.getLogger(f"Logger-{rank+1}")
     logger.setLevel(logging.INFO)
+
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    log_file = os.path.join(log_dir, f"log_rank{rank}.txt")
+
     formatter = logging.Formatter(
         f"[%(asctime)s] [Rank {rank}] [%(filename)s:%(lineno)d] - %(message)s"
     )
-    fh = logging.FileHandler(os.path.join(log_dir, f"log_rank{rank}.txt"))
+    fh = logging.FileHandler(log_file)
     fh.setFormatter(formatter)
+
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
-    logger.handlers = []
+
     logger.addHandler(fh)
     logger.addHandler(sh)
+
+    # ✅ Explicit check that the log file was created
+    try:
+        with open(log_file, "a") as f:
+            f.write("")  # ensure file is writable
+    except Exception as e:
+        raise RuntimeError(f"Rank {rank} failed to create log file: {log_file}. Error: {e}")
+
     return logger
 
 def render_bin_to_png(src_path, dst_path, width=240, height=180):
@@ -179,7 +216,7 @@ def extract_and_gather_targets(args, device, rank, world_size, logger):
         logger.info(f"[Global] Gathered {len(all_targets)} total targets.")
     return all_targets
 
-def extract_audio_queries(args, device, rank, world_size, logger):
+def extract_audio_queries(args, device, rank, world_size, logger, out_base):
     logger.info(f"[Audio] Rank {rank} preparing query entries...")
 
     if rank == 0:
@@ -201,7 +238,7 @@ def extract_audio_queries(args, device, rank, world_size, logger):
         logger.info(f"[Audio] Rank 0 kept {len(filtered)} filtered queries after label map validation.")
         partitions = [filtered[i::world_size] for i in range(world_size)]
 
-        query_dir = os.path.join(args.output_dir, "cross_modality_search", "queries_by_class")
+        query_dir = os.path.join(out_base, "cross_modality_search", "queries_by_class")
         os.makedirs(query_dir, exist_ok=True)
         per_class = defaultdict(list)
         for e in filtered:
@@ -229,17 +266,22 @@ def extract_audio_queries(args, device, rank, world_size, logger):
             logger.warning(f"Failed to load query {path}: {ex}")
     return emb, labels, label_to_index, queries
 
-def evaluate_lora_variant(variant, lora_path, args, queries, all_targets, target_matrix, out_base, logger, device, rank, world_size):
-    logger.info(f"[{variant}] Rank {rank} starting evaluation with {len(queries)} queries")
+def evaluate_lora_variant(variant, lora_path, args, queries, all_targets, target_matrix, out_base, logger, device, rank, world_size, eval_eps):
+    logger.info(f"\n[{variant.upper()}] Rank {rank} starting evaluation with {len(queries)} queries")
+    logger.info(f"[{variant.upper()}] LoRA path: {lora_path if lora_path else 'None'} | Attack ε: {eval_eps if eval_eps else 'clean'}")
+
     model = build_model(args, device, Modality.AUDIO, *args.audio_model_info, lora_path)
-    eps = 2 / 255. if "eps2" in variant else 4 / 255. if "eps4" in variant else None
     mean, std = get_normalization_tensors(Modality.AUDIO, device)
 
+    batch_size = ATTACK_BATCH_SIZES[Modality.AUDIO]
     emb_x = []
-    for i in range(0, len(queries), QUERY_BATCH_SIZE):
-        x_batch = torch.stack([q["tensor"] for q in queries[i:i + QUERY_BATCH_SIZE]])
-        logger.info(f"[{variant}] Rank {rank} attacking batch {i} → {i+len(x_batch)}")
-        emb_batch = extract_with_attack(model, x_batch, eps, mean, std, device, logger) if eps else extract_embeddings(model, x_batch, device)
+    for i in range(0, len(queries), batch_size):
+        x_batch = torch.stack([q["tensor"] for q in queries[i:i + batch_size]])
+        logger.info(f"[{variant}] Rank {rank} attacking batch {i} → {i + len(x_batch)}")
+        if eval_eps:
+            emb_batch = extract_with_attack(model, x_batch, eval_eps, mean, std, device, logger)
+        else:
+            emb_batch = extract_embeddings(model, x_batch, device)
         emb_x.append(emb_batch)
     emb_x = torch.cat(emb_x, dim=0)
 
@@ -288,16 +330,11 @@ def evaluate_lora_variant(variant, lora_path, args, queries, all_targets, target
     with open(os.path.join(out_dir, "top5_results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    logger.info(f"[{variant}] Rank {rank} Recall@5 summary:")
-    for cls in sorted(class_total.keys()):
-        h, t = class_hits[cls], class_total[cls]
-        logger.info(f"  - {cls}: {h}/{t} = {h / t:.3f}")
-    logger.info(f"[{variant}] Rank {rank} Total Recall@5: {hits}/{len(queries)} = {hits / len(queries):.3f}")
-
-    # Gather to rank 0
     recall_data = {
         "rank": rank,
         "variant": variant,
+        "lora_path": lora_path,
+        "attack_eps": eval_eps,
         "hits": hits,
         "total": len(queries),
         "class_hits": dict(class_hits),
@@ -307,24 +344,8 @@ def evaluate_lora_variant(variant, lora_path, args, queries, all_targets, target
     dist.all_gather_object(gathered, recall_data)
 
     if rank == 0:
-        total_hits = sum(d["hits"] for d in gathered)
-        total_queries = sum(d["total"] for d in gathered)
-        logger.info(f"[{variant}] Global Recall@5: {total_hits}/{total_queries} = {total_hits / total_queries:.3f}")
-
-        agg_hits = defaultdict(int)
-        agg_total = defaultdict(int)
-        for d in gathered:
-            for cls, h in d["class_hits"].items():
-                agg_hits[cls] += h
-            for cls, t in d["class_total"].items():
-                agg_total[cls] += t
-
-        logger.info(f"[{variant}] Global Recall@5 per class:")
-        for cls in sorted(agg_total.keys()):
-            h, t = agg_hits[cls], agg_total[cls]
-            logger.info(f"  - {cls}: {h}/{t} = {h / t:.3f}")
-
-        with open(os.path.join(out_base, f"{variant}_recall_summary.json"), "w") as f:
+        summary_path = os.path.join(out_base, f"{variant}_recall_summary.json")
+        with open(summary_path, "w") as f:
             json.dump(gathered, f, indent=2)
 
 def run(args, device, rank, world_size):
@@ -334,26 +355,27 @@ def run(args, device, rank, world_size):
     args.label_map = json.load(open(args.label_map))
 
     logger.info(f"[Setup] Rank {rank} starting data prep...")
-
     all_targets = extract_and_gather_targets(args, device, rank, world_size, logger)
+
     if rank == 0:
         target_matrix = torch.stack([t["embedding"] for t in all_targets]).to(device)
     else:
         emb_dim = all_targets[0]["embedding"].shape[0]
         target_matrix = torch.empty((len(all_targets), emb_dim), device=device)
-
     dist.broadcast(target_matrix, src=0)
-    # target_matrix = target_matrix.to(device)
 
-
-    emb, labels, label_to_index, queries = extract_audio_queries(args, device, rank, world_size, logger)
+    emb, labels, label_to_index, queries = extract_audio_queries(args, device, rank, world_size, logger, out_base)
     args.audio_model_info = (emb, labels, label_to_index)
 
-    for name, lora_path in LORA_VARIANTS.items():
-        evaluate_lora_variant(name, lora_path, args, queries, all_targets, target_matrix, out_base, logger, device, rank, world_size)
-    
+    for lora_name, lora_path in LORA_VARIANTS.items():
+        for eps_name, eps in EVAL_EPS_VARIANTS.items():
+            variant = f"{lora_name}__{eps_name}"
+            evaluate_lora_variant(
+                variant, lora_path, args, queries, all_targets,
+                target_matrix, out_base, logger, device, rank, world_size, eps
+            )
+
     if rank == 0:
-        # Count total examples per modality
         modality_counts = defaultdict(int)
         for t in all_targets:
             modality_counts[t["modality"].value] += 1
@@ -362,25 +384,39 @@ def run(args, device, rank, world_size):
         for mod, count in sorted(modality_counts.items()):
             logger.info(f"{mod}: {count} examples")
 
-        logger.info("\n=== Final Global Recall@5 Summary Across Variants ===")
+        logger.info("\n=== Final Global Recall@5 Summary ===")
         summary = {}
-        for name in LORA_VARIANTS.keys():
+        for lora_name in LORA_VARIANTS:
+            for eps_name in EVAL_EPS_VARIANTS:
+                name = f"{lora_name}__{eps_name}"
+                path = os.path.join(out_base, f"{name}_recall_summary.json")
+                if not os.path.exists(path): continue
+                data = json.load(open(path))
+                hits = sum(x["hits"] for x in data)
+                total = sum(x["total"] for x in data)
+                summary[name] = hits / total if total else 0.0
+                logger.info(f"[{name}] Recall@5 = {hits} / {total} = {summary[name]:.4f}")
+
+        logger.info("\n=== Per-Class Recall@5 Across Variants ===")
+        all_class_stats = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+        for name in summary:
             path = os.path.join(out_base, f"{name}_recall_summary.json")
-            if not os.path.exists(path):
-                logger.warning(f"Missing summary file: {path}")
-                continue
-
             data = json.load(open(path))
-            total_hits = sum(d["hits"] for d in data)
-            total_queries = sum(d["total"] for d in data)
-            summary[name] = {
-                "total_hits": total_hits,
-                "total_queries": total_queries,
-                "recall_at_5": round(total_hits / total_queries, 4) if total_queries else 0.0
-            }
-
-        for name, stats in summary.items():
-            logger.info(f"[{name}] Recall@5 = {stats['total_hits']} / {stats['total_queries']} = {stats['recall_at_5']:.4f}")
+            for d in data:
+                for cls, h in d["class_hits"].items():
+                    all_class_stats[cls][name][0] += h
+                for cls, t in d["class_total"].items():
+                    all_class_stats[cls][name][1] += t
+        header = "Class".ljust(20) + "".join(n.rjust(20) for n in summary)
+        logger.info(header)
+        logger.info("-" * len(header))
+        for cls in sorted(all_class_stats):
+            row = cls.ljust(20)
+            for name in summary:
+                h, t = all_class_stats[cls][name]
+                val = f"{h}/{t}={h/t:.3f}" if t else "0/0=0.000"
+                row += val.rjust(20)
+            logger.info(row)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
