@@ -69,6 +69,7 @@ class PGDAttack(Attack):
                 self.logger.info(f"[PGD] Initial cosine similarity: {cos_sim.item():.4f}")
 
             if self.random_start:
+                self.logger.debug(f"[PGD] Applying random start for norm={self.norm}")
                 x_adv = {
                     "linf": random_start_linf,
                     "l2": random_start_l2,
@@ -78,7 +79,7 @@ class PGDAttack(Attack):
             for step in range(self.steps):
                 x_adv = x_adv.detach().clone().requires_grad_(True)
                 model_input = x_adv.clone()
-                
+
                 if self.loss_type == "ce":
                     with ProfileModelMemory(self.model, self.logger):
                         logits, _ = self.model(model_input, mode=ForwardMode.LOGITS)
@@ -93,11 +94,11 @@ class PGDAttack(Attack):
                     logits, _ = self.model(model_input, mode=ForwardMode.LOGITS)
                     loss = dlr_loss_targeted(logits, y, self.y_target)
                 elif self.loss_type == "l2":
-                    # with ProfileModelMemory(self.model, self.logger):
                     x_adv_emb = self.model(model_input, mode=ForwardMode.EMBEDDINGS)
                     loss = l2_loss(x_adv_emb, emb_orig)
 
                 grad = torch.autograd.grad(loss, x_adv)[0]
+                grad_norm = grad.norm().item()
                 del loss
                 x_adv = x_adv.detach()
 
@@ -111,7 +112,33 @@ class PGDAttack(Attack):
                     x_adv = x + project_l1(x_adv + step_dir - x, self.epsilon)
 
                 x_adv = x_adv.clamp(self.clamp_min, self.clamp_max)
+
+                # === Log step-wise metrics ===
+                self.logger.debug(f"[PGD][Step {step+1}/{self.steps}] Grad norm: {grad_norm:.4f}")
+                if self.loss_type == "l2":
+                    with torch.no_grad():
+                        cos_sim_step = self._cos_sim_with_x(x_adv, emb_orig)
+                    self.logger.debug(f"[PGD][Step {step+1}] Cosine similarity: {cos_sim_step.item():.4f}")
+                elif self.loss_type in {"ce", "dlr", "ce-targeted", "dlr-targeted"}:
+                    with torch.no_grad():
+                        acc_step = self._acc_with_x(x_adv, y)
+                    self.logger.debug(f"[PGD][Step {step+1}] Accuracy: {acc_step.item() * 100:.2f}%")
+                    self.logger.debug(f"[PGD][Step {step+1}] Perturbed sample range: "
+                                      f"[{x_adv.min().item():.4f}, {x_adv.max().item():.4f}]")
+
                 del grad
+
+            # === Final metric ===
+            if self.loss_type == "l2":
+                with torch.no_grad():
+                    final_cos_sim = self._cos_sim_with_x(x_adv, emb_orig)
+                self.logger.info(f"[PGD] Final cosine similarity: {final_cos_sim.item():.4f}")
+            elif self.loss_type in {"ce", "dlr", "ce-targeted", "dlr-targeted"}:
+                with torch.no_grad():
+                    final_acc = self._acc_with_x(x_adv, y)
+                self.logger.info(f"[PGD] Final accuracy: {final_acc.item() * 100:.2f}%")
+
+            self.logger.info("[PGD] Attack completed.")
             return x_adv
 
     def _acc_with_x(self, x, y):
@@ -163,17 +190,17 @@ class APGDAttack(Attack):
             emb_orig = emb_orig.to(self.device) if emb_orig is not None else None
 
             best_adv = x.clone()
-            # best_loss_val = -1e10 * torch.ones(x.size(0), device=self.device)
 
             for restart in range(self.n_restarts):
+                self.logger.info(f"[APGD] Restart {restart + 1}/{self.n_restarts}")
                 delta = (2 * torch.rand_like(x) - 1) if self.norm == "linf" else torch.randn_like(x)
                 delta = self._normalize(delta) * self.eps
                 x_adv = (x + delta).clamp(0, 1)
 
                 for i in range(self.n_iter):
                     x_adv = x_adv.detach().clone().requires_grad_(True)
-                    
                     loss = 0.0
+
                     with ProfileModelGradient(self.model, self.logger):
                         for _ in range(self.eot_iter):
                             if self.loss_type == "ce":
@@ -191,8 +218,10 @@ class APGDAttack(Attack):
                             elif self.loss_type == "l2":
                                 x_emb = self.model(x_adv, ForwardMode.EMBEDDINGS)
                                 loss += l2_loss(x_emb, emb_orig)
+
                     loss /= self.eot_iter
                     grad = torch.autograd.grad(loss, x_adv)[0]
+                    grad_norm = grad.norm().item()
                     x_adv = x_adv.detach()
 
                     if self.norm == "linf":
@@ -206,24 +235,34 @@ class APGDAttack(Attack):
 
                     x_adv = x_adv.clamp(0, 1)
 
-                # if self.best_loss:
-                #     with torch.no_grad():
-                #         logits, _ = self.model(x_adv, mode=ForwardMode.LOGITS)
-                #         final_loss = {
-                #             "ce": ce_loss(logits, y),
-                #             "dlr": dlr_loss(logits, y),
-                #         }
-                #         if self.y_target is not None:
-                #             final_loss["ce-targeted"] = ce_loss_targeted(logits, self.y_target)
-                #             final_loss["dlr-targeted"] = dlr_loss_targeted(logits, y, self.y_target)
+                    # === Log step-wise metrics ===
+                    self.logger.debug(f"[APGD][Restart {restart+1}][Iter {i+1}/{self.n_iter}] Grad norm: {grad_norm:.4f}")
+                    if self.loss_type == "l2":
+                        with torch.no_grad():
+                            cos_sim_step = self._cos_sim_with_x(x_adv, emb_orig)
+                        self.logger.debug(f"[APGD][Restart {restart+1}][Iter {i+1}] Cosine similarity: {cos_sim_step.item():.4f}")
+                    elif self.loss_type in {"ce", "dlr", "ce-targeted", "dlr-targeted"}:
+                        with torch.no_grad():
+                            acc_step = self._acc_with_x(x_adv, y)
+                        self.logger.debug(f"[APGD][Restart {restart+1}][Iter {i+1}] Accuracy: {acc_step.item() * 100:.2f}%")
+                        self.logger.debug(f"[APGD][Restart {restart+1}][Iter {i+1}] Perturbed sample range: "
+                                          f"[{x_adv.min().item():.4f}, {x_adv.max().item():.4f}]")
 
-                #         loss_val = final_loss[self.loss_type]  # Pick the selected loss
-                #         better = loss_val > best_loss_val      # Elementwise comparison
-                #         best_loss_val[better] = loss_val[better]   # Update best loss
-                #         best_adv[better] = x_adv[better]           # Update best adv
-                # else:
+                    del grad
+
                 best_adv = x_adv
 
+            # === Final metric ===
+            if self.loss_type == "l2":
+                with torch.no_grad():
+                    final_cos_sim = self._cos_sim_with_x(best_adv, emb_orig)
+                self.logger.info(f"[APGD] Final cosine similarity: {final_cos_sim.item():.4f}")
+            elif self.loss_type in {"ce", "dlr", "ce-targeted", "dlr-targeted"}:
+                with torch.no_grad():
+                    final_acc = self._acc_with_x(best_adv, y)
+                self.logger.info(f"[APGD] Final accuracy: {final_acc.item() * 100:.2f}%")
+
+            self.logger.info("[APGD] Attack completed.")
             return best_adv
 
     def _normalize(self, x):
@@ -233,6 +272,14 @@ class APGDAttack(Attack):
             return x / (x.view(x.size(0), -1).norm(p=2, dim=1, keepdim=True) + 1e-12)
         elif self.norm == "l1":
             return x / (x.view(x.size(0), -1).abs().sum(dim=1, keepdim=True) + 1e-12)
+
+    def _acc_with_x(self, x, y):
+        logits, _ = self.model(x, mode=ForwardMode.LOGITS)
+        return (logits.argmax(dim=1) == y).float().mean()
+
+    def _cos_sim_with_x(self, x, emb_orig):
+        x_emb = self.model(x, mode=ForwardMode.EMBEDDINGS)
+        return F.cosine_similarity(x_emb, emb_orig, dim=1).mean()
 
 
 # =========================== Two-Stage Attack ===========================
