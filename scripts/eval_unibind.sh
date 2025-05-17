@@ -3,8 +3,8 @@ set -e
 
 # === Modality Mapping ===
 declare -A MODALITY_MAP=(
-  # [ImageNet-1K]=image
-  # [Places365]=image
+  [ImageNet-1K]=image
+  [Places365]=image
 
   # [ModelNet40]=point
   # [ShapeNet]=point
@@ -15,8 +15,8 @@ declare -A MODALITY_MAP=(
   # [LLVIP]=thermal
   # [RGB-T]=thermal
 
-  # [MSR-VTT]=video
-  # [UCF-101]=video
+  [MSR-VTT]=video
+  [UCF-101]=video
 
   [N-Caltech-101]=event
   [N-ImageNet-1K]=event
