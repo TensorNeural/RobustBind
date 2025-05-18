@@ -10,3 +10,7 @@ results/
 *.png
 *.log
 output
+cache/
+cache_dir
+bpe/
+.checkpoints/

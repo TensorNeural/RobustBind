@@ -12,8 +12,9 @@ declare -A MODEL_TYPE_TO_MODALITIES=(
 # === Active training dataset per modality ===
 declare -A TRAIN_MODALITY_TO_DATASET=(
   # --- Vision ---
-  [image]="ImageNet-1K"
+  # [image]="ImageNet-1K"
   # [image]="Places365"
+  [video]="Kinetics-400"
   # [video]="UCF-101"
   # [video]="MSR-VTT"
   # [event]="N-Caltech-101"
@@ -38,8 +39,8 @@ declare -A VAL_MODALITY_TO_DATASET=(
   # --- Vision ---
   # [image]="ImageNet-1K"
   # [image]="Places365"
-  [video]="UCF-101"
-  # [video]="MSR-VTT"
+  # [video]="UCF-101"
+  [video]="MSR-VTT"
   # [event]="N-Caltech-101"
   # [event]="N-ImageNet-1K"
 
@@ -61,6 +62,7 @@ declare -A DATASET_TO_BATCH_SIZE=(
   # --- Vision ---
   [ImageNet-1K]=1
   [Places365]=70
+  [Kinetics-400]=25
   [UCF-101]=6
   [MSR-VTT]=6
   [N-Caltech-101]=70
@@ -85,8 +87,9 @@ declare -A TRAIN_MAX_SAMPLES_MAP=(
   # [ImageNet-1K]=1281167
   [ImageNet-1K]=18
   [Places365]=0
+  [Kinetics-400]=241258
   [UCF-101]=9537
-  [MSR-VTT]=3000
+  [MSR-VTT]=2990
   [N-Caltech-101]=3060
   [N-ImageNet-1K]=1281167
 
@@ -110,8 +113,8 @@ declare -A VAL_MAX_SAMPLES_MAP=(
   [ImageNet-1K]=6
   [Places365]=3000
   # [UCF-101]=3783
-  [UCF-101]=6
-  [MSR-VTT]=3000
+  # [UCF-101]=6
+  [MSR-VTT]=2990
   [N-Caltech-101]=3000
   [N-ImageNet-1K]=3000
 
@@ -132,6 +135,7 @@ declare -A TRAIN_JSON_MAP=(
   # --- Vision ---
   [ImageNet-1K]="./datasets/ImageNet-1K/train_data.json"
   [Places365]="./datasets/Places365/train_data.json"
+  [Kinetics-400]="./datasets/Kinetics-400/train_data.json"
   [UCF-101]="./datasets/UCF-101/train_data.json"
   [MSR-VTT]="./datasets/MSR-VTT/train_data.json"
   [N-Caltech-101]="./datasets/N-Caltech-101/train_data.json"
@@ -178,7 +182,7 @@ declare -A EMB_SUFFIX_MAP=(
   [ImageNet-1K]=in
   [Places365]=p365
   [UCF-101]=ucf
-  [MSR-VTT]=msr
+  [MSR-VTT]=msrvtt
   [N-Caltech-101]=caltech
   [N-ImageNet-1K]=nin
 
@@ -200,7 +204,9 @@ OUTPUT_DIR=output
 NUM_WORKERS=2
 TENSORBOARD_DATA_DIR=tensorboard
 PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten.pt"
-EPSILONS=(2 4)
+EPSILONS=(2)
+LORA_RANKS=(2 4 8)
+LORA_ALPHAS=(4 8 16)
 
 # === Main loop ===
 
@@ -223,35 +229,39 @@ for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
       emb_path="./centre_embs/${val_modality}_${emb_suffix}_center_embeddings.pkl"
 
       for eps in "${EPSILONS[@]}"; do
-        echo "=== $model_type | $train_dataset => $val_dataset | eps=$eps ==="
-        echo "=== Embedding path: $emb_path ==="
+        for lora_rank in "${LORA_RANKS[@]}"; do
+          for lora_alpha in "${LORA_ALPHAS[@]}"; do
+            echo "=== $model_type | $train_dataset => $val_dataset | eps=$eps | rank=$lora_rank | alpha=$lora_alpha ==="
+            echo "=== Embedding path: $emb_path ==="
 
-        torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
-          --model_type "$model_type" \
-          --train_modality "$train_modality" \
-          --val_modality "$val_modality" \
-          --train_dataset_name "$train_dataset" \
-          --val_dataset_name "$val_dataset" \
-          --train_dataset_root "/home/user/datasets/$train_dataset" \
-          --val_dataset_root "/home/user/datasets/$val_dataset" \
-          --train_json "$train_json" \
-          --val_json "$val_json" \
-          --pretrain_weights "$PRETRAIN_WEIGHTS" \
-          --center_emb "$emb_path" \
-          --train_batch_size "$train_bs" \
-          --val_batch_size "$val_bs" \
-          --num_workers "$NUM_WORKERS" \
-          --train_max_samples "$train_max" \
-          --val_max_samples "$val_max" \
-          --train_attack_loss "l2" \
-          --val_attack_loss "ce" \
-          --train_loss "l2" \
-          --lora_rank 4 \
-          --lora_alpha 8 \
-          --epsilon "$eps" \
-          --use_flash_attention \
-          --tensorboard_data_dir "$TENSORBOARD_DATA_DIR" \
-          --output_dir "$OUTPUT_DIR"
+            torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
+              --model_type "$model_type" \
+              --train_modality "$train_modality" \
+              --val_modality "$val_modality" \
+              --train_dataset_name "$train_dataset" \
+              --val_dataset_name "$val_dataset" \
+              --train_dataset_root "/home/user/datasets/$train_dataset" \
+              --val_dataset_root "/home/user/datasets/$val_dataset" \
+              --train_json "$train_json" \
+              --val_json "$val_json" \
+              --pretrain_weights "$PRETRAIN_WEIGHTS" \
+              --center_emb "$emb_path" \
+              --train_batch_size "$train_bs" \
+              --val_batch_size "$val_bs" \
+              --num_workers "$NUM_WORKERS" \
+              --train_max_samples "$train_max" \
+              --val_max_samples "$val_max" \
+              --train_attack_loss "l2" \
+              --val_attack_loss "ce" \
+              --train_loss "l2" \
+              --lora_rank "$lora_rank" \
+              --lora_alpha "$lora_alpha" \
+              --epsilon "$eps" \
+              --use_flash_attention \
+              --tensorboard_data_dir "$TENSORBOARD_DATA_DIR" \
+              --output_dir "$OUTPUT_DIR"
+          done
+        done
       done
     done
   done

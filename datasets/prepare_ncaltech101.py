@@ -1,129 +1,114 @@
 #!/usr/bin/env python3
-
-import os
-import random
-import argparse
-from tqdm import tqdm
+import os, argparse, shutil, random
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
+from tqdm import tqdm
+import multiprocessing as mp
 
-def read_events_from_bin(file_path):
-    with open(file_path, "rb") as f:
-        raw_bytes = f.read()
-    byte_array = np.frombuffer(raw_bytes, dtype=np.uint8)
-    event_bytes = byte_array.reshape((-1, 5))
-    x = event_bytes[:, 0].astype(np.uint32)
-    y = event_bytes[:, 1].astype(np.uint32)
-    polarity = (event_bytes[:, 2] >> 7) & 0x01
-    timestamp = (
-        ((event_bytes[:, 2] & 0x7F).astype(np.uint32) << 16) |
-        (event_bytes[:, 3].astype(np.uint32) << 8) |
-        event_bytes[:, 4].astype(np.uint32)
-    )
-    return x, y, polarity, timestamp
+def read_events_from_bin(path):
+    with open(path, "rb") as f:
+        raw = np.frombuffer(f.read(), dtype=np.uint8).reshape(-1, 5)
+    if raw.size == 0:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+    x, y = raw[:, 0].astype(np.uint32), raw[:, 1].astype(np.uint32)
+    p = (raw[:, 2] >> 7) & 1
+    t = ((raw[:, 2] & 0x7F) << 16) | (raw[:, 3] << 8) | raw[:, 4]
+    return x, y, p, t
 
-def create_unibind_style_event_image(x, y, polarity, timestamp, num_samples=50000):
+def render_eventbind_images(x, y, p, t, out_dir, size=224, T=8):
     if len(x) == 0:
-        raise ValueError("Empty event stream")
+        print(f"⚠️ Skipping empty input: {out_dir}")
+        return
 
-    np.random.seed(42)
-    sample_indices = np.random.choice(len(x), size=min(num_samples, len(x)), replace=False)
+    os.makedirs(out_dir, exist_ok=True)
 
-    x_sample = x[sample_indices]
-    y_sample = y[sample_indices]
-    pol_sample = polarity[sample_indices]
-    ts_sample = timestamp[sample_indices]
+    # Normalize coordinates and time
+    x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1)).astype(int)
+    y = ((y - y.min()) / (y.ptp() + 1e-5) * (size - 1)).astype(int)
+    t_norm = (t - t.min()) / (t.ptp() + 1e-5)
 
-    ts_norm = (ts_sample - ts_sample.min()) / (ts_sample.max() - ts_sample.min() + 1e-8)
-
-    hsv = np.zeros((len(x_sample), 3))
-    hsv[:, 0] = ts_norm
-    hsv[:, 1] = 1.0
-    hsv[:, 2] = np.where(pol_sample == 1, 1.0, 0.6)
-
-    rgb = mcolors.hsv_to_rgb(hsv)
-    return x_sample, y_sample, rgb
-
-def save_event_image_scatter(x, y, rgb, output_path):
-    plt.figure(figsize=(6, 6), dpi=300)
-    plt.scatter(x, y, c=rgb, s=0.5, edgecolors='none')
-    plt.gca().invert_yaxis()
-    plt.axis('equal')
-    plt.axis('off')
-    plt.gca().set_facecolor((0, 0, 0, 0))
-    plt.tight_layout(pad=0)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight', pad_inches=0, transparent=True)
-    plt.close()
-
-def gather_all_bin_paths(data_root):
-    bin_paths = []
-    for class_name in sorted(os.listdir(data_root)):
-        class_dir = os.path.join(data_root, class_name)
-        if not os.path.isdir(class_dir):
+    bins = np.linspace(0, 1, T + 1)
+    for i in range(T):
+        idx = (t_norm >= bins[i]) & (t_norm < bins[i + 1])
+        if idx.sum() == 0:
             continue
-        for fname in os.listdir(class_dir):
+        xx, yy, pp, tt = x[idx], y[idx], p[idx], t_norm[idx]
+
+        pos = np.zeros((size, size))
+        neg = np.zeros((size, size))
+        ts = np.zeros((size, size))
+
+        for xi, yi, pi, ti in zip(xx, yy, pp, tt):
+            if pi:
+                pos[yi, xi] += 1
+            else:
+                neg[yi, xi] += 1
+            ts[yi, xi] = max(ts[yi, xi], ti)
+
+        # Color channels
+        red   = (255 * pos / (pos.max() + 1e-5)).astype(np.uint8)
+        green = (255 * ts).astype(np.uint8)
+        blue  = (255 * neg / (neg.max() + 1e-5)).astype(np.uint8)
+
+        rgb = np.stack([red, green, blue], axis=-1)
+        frame_path = os.path.join(out_dir, f"frame_{i:03d}.png")
+        plt.imsave(frame_path, rgb)
+
+def split_val(data_root, val_root, ratio=0.3):
+    total = 0
+    for cls in sorted(os.listdir(data_root)):
+        cls_dir = os.path.join(data_root, cls)
+        if not os.path.isdir(cls_dir): continue
+        files = [f for f in os.listdir(cls_dir) if f.endswith(".bin")]
+        random.seed(42)
+        random.shuffle(files)
+        split = int(len(files) * ratio)
+        for fname in files[:split]:
+            src = os.path.join(cls_dir, fname)
+            dst = os.path.join(val_root, "val", cls, fname)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            total += 1
+    print(f"✅ Copied {total} .bin files to val/ (class-balanced)")
+
+def process_bin_file(args):
+    path, cls, static_val, size, T = args
+    try:
+        x, y, p, t = read_events_from_bin(path)
+        base = os.path.basename(path).replace(".bin", "")
+        out_dir = os.path.join(static_val, cls, base)
+        render_eventbind_images(x, y, p, t, out_dir, size=size, T=T)
+    except Exception as e:
+        print(f"❌ Error processing {path}: {e}")
+
+def render_all(val_dir, static_val, size=224, T=8, num_workers=12):
+    tasks = []
+    for cls in sorted(os.listdir(val_dir)):
+        cls_dir = os.path.join(val_dir, cls)
+        for fname in os.listdir(cls_dir):
             if fname.endswith(".bin"):
-                rel_path = os.path.join(class_name, fname)
-                bin_paths.append(rel_path)
-    return bin_paths
-
-def save_split_file(path_list, output_txt):
-    with open(output_txt, "w") as f:
-        for path in path_list:
-            f.write(f"{path}\n")
-
-def convert_split(txt_file, split_name, data_root, output_root):
-    with open(txt_file, "r") as f:
-        rel_paths = [line.strip() for line in f.readlines()]
-
-    for rel_path in tqdm(rel_paths, desc=f"Processing {split_name}"):
-        class_name = rel_path.split("/")[0]
-        file_stem = os.path.splitext(os.path.basename(rel_path))[0]
-        src_path = os.path.join(data_root, rel_path)
-        dst_dir = os.path.join(output_root, split_name, class_name)
-        dst_path = os.path.join(dst_dir, file_stem + ".png")
-        os.makedirs(dst_dir, exist_ok=True)
-
-        try:
-            x, y, p, t = read_events_from_bin(src_path)
-            xs, ys, rgb = create_unibind_style_event_image(x, y, p, t)
-            save_event_image_scatter(xs, ys, rgb, dst_path)
-        except Exception as e:
-            print(f"Failed: {src_path} — {e}")
+                path = os.path.join(cls_dir, fname)
+                tasks.append((path, cls, static_val, size, T))
+    print(f"🚀 Rendering {len(tasks)} samples into EventBind-style RGB images with {num_workers} workers...")
+    with mp.Pool(num_workers) as pool:
+        list(tqdm(pool.imap_unordered(process_bin_file, tasks), total=len(tasks)))
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("DATASET_ROOT", help="Path to dataset (must contain data/)")
-    parser.add_argument("--train-ratio", type=float, default=0.7, help="Proportion of data to use for training (default: 0.7)")
+    parser.add_argument("--dataset_root", required=True)
+    parser.add_argument("--val_ratio", type=float, default=0.3)
+    parser.add_argument("--num_workers", type=int, default=12)
+    parser.add_argument("--frame_size", type=int, default=224)
+    parser.add_argument("--num_frames", type=int, default=8)
     args = parser.parse_args()
 
-    data_root = os.path.join(args.DATASET_ROOT, "data")
-    train_txt = os.path.join(args.DATASET_ROOT, "train.txt")
-    test_txt = os.path.join(args.DATASET_ROOT, "test.txt")
+    raw = os.path.join(args.dataset_root, "data")
+    val = os.path.join(args.dataset_root, "val")
+    static_val = os.path.join(args.dataset_root, "static", "val")
 
-    if not os.path.exists(train_txt) or not os.path.exists(test_txt):
-        all_paths = gather_all_bin_paths(data_root)
-        total = len(all_paths)
-        if total == 0:
-            raise ValueError("No .bin files found.")
-
-        random.seed(42)
-        random.shuffle(all_paths)
-
-        train_count = int(total * args.train_ratio)
-        train_split = all_paths[:train_count]
-        test_split = all_paths[train_count:]
-
-        save_split_file(train_split, train_txt)
-        save_split_file(test_split, test_txt)
-
-        print(f"Generated splits: train={len(train_split)}, test={len(test_split)}")
-
-    convert_split(train_txt, "train", data_root, args.DATASET_ROOT)
-    convert_split(test_txt, "test", data_root, args.DATASET_ROOT)
-
-    print("All conversions complete.")
+    split_val(raw, args.dataset_root, ratio=args.val_ratio)
+    render_all(val, static_val, size=args.frame_size, T=args.num_frames, num_workers=args.num_workers)
+    print("🎉 EventBind-style RGB rendering complete.")
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-import argparse, os, logging
+import argparse, os, logging, shutil
 from datetime import datetime
 import torch
 import torch.distributed as dist
@@ -6,7 +6,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
-import shutil
 
 from model import UniBindModel
 from training import train_epoch
@@ -97,11 +96,11 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
 
     eval_attack = APGDAttack(
         AttackModel(model_val, val_mean, val_std),
-        norm='Linf',
+        norm='linf',
         n_restarts=1,
         n_iter=50,
         eps=args.epsilon,
-        loss=args.val_attack_loss,
+        loss_type=args.val_attack_loss,
         device=device,
         logger=logger
     )
@@ -120,6 +119,12 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
 
     best_acc = -1.0
     meters = {k: AverageMeter() for k in ["loss", "cos_sim", "rcos_sim", "acc", "racc"]}
+
+    if dist.get_rank() == 0:
+        writer.add_text("config/lora_rank", str(args.lora_rank))
+        writer.add_text("config/lora_alpha", str(args.lora_alpha))
+        writer.add_scalar("config/lora_rank", args.lora_rank, 0)
+        writer.add_scalar("config/lora_alpha", args.lora_alpha, 0)
 
     for epoch in range(2):
         logger.info(f"Epoch {epoch + 1}/2")
@@ -151,7 +156,7 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
         lora_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_lora.pt")
         if dist.get_rank() == 0:
             model_train.module.save_lora_weights(lora_path)
-        
+
         torch.cuda.empty_cache()
         dist.barrier()
 
@@ -206,7 +211,14 @@ def main():
     dist.init_process_group("nccl")
     rank = dist.get_rank()
 
-    args.output_dir = os.path.join(args.output_dir, "train", args.model_type, f"{args.train_dataset_name}__{args.val_dataset_name}", f"eps{args.epsilon}")
+    args.output_dir = os.path.join(
+        args.output_dir,
+        "train",
+        args.model_type,
+        f"{args.train_dataset_name}__{args.val_dataset_name}",
+        f"eps{args.epsilon}",
+        f"lora_r{args.lora_rank}_a{args.lora_alpha}"
+    )
     os.makedirs(args.output_dir, exist_ok=True)
 
     args.epsilon = args.epsilon / 255.0
@@ -225,6 +237,7 @@ def main():
     logger.handlers = [ch, fh]
 
     logger.info(f"[Train: {args.train_modality.upper()} | {args.train_dataset_name}] => [Val: {args.val_modality.upper()} | {args.val_dataset_name}]")
+    logger.info(f"LoRA config → rank: {args.lora_rank}, alpha: {args.lora_alpha}")
 
     raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
     train_lbl_to_idx = None
@@ -251,7 +264,13 @@ def main():
         max_samples=args.val_max_samples
     )
 
-    tb_path = os.path.join(args.output_dir, args.tensorboard_data_dir, f"rank{rank}", timestamp)
+    tb_path = os.path.join(
+        args.output_dir,
+        args.tensorboard_data_dir,
+        f"rank{rank}",
+        f"lora_r{args.lora_rank}_a{args.lora_alpha}",
+        timestamp
+    )
     writer = SummaryWriter(log_dir=tb_path)
 
     train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader)

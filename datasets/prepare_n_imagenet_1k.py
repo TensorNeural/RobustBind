@@ -82,11 +82,7 @@ def convert_npz_to_png_in_dir(data_split_dir):
                 continue
             npz_path = os.path.join(class_dir, f)
             png_path = npz_path.replace(".npz", ".png")
-            if plot_event_image(npz_path, png_path):
-                try:
-                    os.remove(npz_path)
-                except Exception as e:
-                    print(f"❌ Failed to delete {npz_path}: {e}")
+            plot_event_image(npz_path, png_path)
     print(f"✅ Finished rendering under: {data_split_dir}\n")
 
 def process_part_zip(zip_path, root, train_dir, max_workers):
@@ -111,23 +107,23 @@ def main():
     args = parser.parse_args()
 
     root = os.path.abspath(args.dataset_root)
-    train_dir = os.path.join(root, "train")
+    # train_dir = os.path.join(root, "train")
     val_dir = os.path.join(root, "val")
     val_zip = os.path.join(root, "extracted_val.zip")
 
-    # STEP 1 — unzip and prepare training
-    for fname in sorted(os.listdir(root)):
-        if fname.startswith("Part_") and fname.endswith(".zip"):
-            process_part_zip(os.path.join(root, fname), root, train_dir, args.max_workers)
+    # # STEP 1 — unzip and prepare training
+    # for fname in sorted(os.listdir(root)):
+    #     if fname.startswith("Part_") and fname.endswith(".zip"):
+    #         process_part_zip(os.path.join(root, fname), root, train_dir, args.max_workers)
 
     # STEP 2 — prepare validation
-    if os.path.exists(val_zip):
-        prepare_validation(val_zip, val_dir)
-    else:
-        print(f"⚠️ Missing val zip: {val_zip}")
+    # if os.path.exists(val_zip):
+    #     prepare_validation(val_zip, val_dir)
+    # else:
+    #     print(f"⚠️ Missing val zip: {val_zip}")
 
     # STEP 3 — convert all .npz → .png
-    for split_dir in [train_dir, val_dir]:
+    for split_dir in [val_dir]:
         if os.path.isdir(split_dir):
             convert_npz_to_png_in_dir(split_dir)
         else:

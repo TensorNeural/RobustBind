@@ -19,7 +19,7 @@ declare -A MODALITY_MAP=(
   [UCF-101]=video
 
   [N-Caltech-101]=event
-  # [N-ImageNet-1K]=event
+  [N-ImageNet-1K]=event
 )
 
 # === Embedding Suffix Mapping ===
@@ -95,10 +95,10 @@ declare -A CLEAN_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=1000
   [RGB-T]=16
-  [MSR-VTT]=40
-  [UCF-101]=40
-  [N-Caltech-101]=1000
-  [N-ImageNet-1K]=1000
+  [MSR-VTT]=80
+  [UCF-101]=80
+  [N-Caltech-101]=2000
+  [N-ImageNet-1K]=2000
 )
 
 # === Attack Validation Batch Size Mapping ===
@@ -111,10 +111,10 @@ declare -A ATTACK_VAL_BATCH_SIZE_MAP=(
   [UrbanSound8K]=90
   [LLVIP]=70
   [RGB-T]=16
-  [MSR-VTT]=10
+  [MSR-VTT]=6
   [UCF-101]=10
-  [N-Caltech-101]=70
-  [N-ImageNet-1K]=70
+  [N-Caltech-101]=80
+  [N-ImageNet-1K]=80
 )
 
 # === Clean Validation Max Samples Mapping ===
@@ -130,7 +130,7 @@ declare -A CLEAN_VAL_MAX_SAMPLES_MAP=(
   [MSR-VTT]=2990
   [UCF-101]=3783
   [N-Caltech-101]=2613
-  [N-ImageNet-1K]=3000
+  [N-ImageNet-1K]=50000
 )
 
 # === Attack Validation Max Samples Mapping ===
@@ -146,7 +146,7 @@ declare -A ATTACK_VAL_MAX_SAMPLES_MAP=(
   [MSR-VTT]=2990
   [UCF-101]=3783
   [N-Caltech-101]=2613
-  [N-ImageNet-1K]=3000
+  [N-ImageNet-1K]=50000
 )
 
 # === LoRA Weights List Mapping by Modality ===

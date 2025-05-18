@@ -59,11 +59,11 @@ def find_lr(
     optimizer = AdamW(trainable_params, lr=1e-3, weight_decay=1e-4, betas=(0.9, 0.95))
     attack = APGDAttack(
         model=AttackModel(model_train, train_mean, train_std),
-        norm='Linf',
+        norm='linf',
         n_restarts=1,
         n_iter=10,
         eps=epsilon,
-        loss=attack_loss_type,
+        loss_type=attack_loss_type,
         device=device,
         logger=logger
     )

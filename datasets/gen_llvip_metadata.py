@@ -2,6 +2,8 @@ import os
 import json
 import argparse
 
+CLASS_NAMES = ["person", "background"]
+
 def generate_llvip_metadata(dataset_root, split_name, output_base_dir):
     split_dir = os.path.join(dataset_root, split_name)
     output_path = os.path.join(output_base_dir, f"{split_name}_data.json")
@@ -11,7 +13,7 @@ def generate_llvip_metadata(dataset_root, split_name, output_base_dir):
         return
 
     metadata = []
-    for class_name in ["person", "background"]:
+    for class_name in CLASS_NAMES:
         class_dir = os.path.join(split_dir, class_name)
         if not os.path.isdir(class_dir):
             print(f"⚠️ Warning: missing class dir {class_dir}, skipping...")
@@ -32,15 +34,22 @@ def generate_llvip_metadata(dataset_root, split_name, output_base_dir):
 
     print(f"✅ Saved {len(metadata)} entries to {output_path}")
 
+def save_class_list(output_base_dir):
+    os.makedirs(output_base_dir, exist_ok=True)
+    class_file = os.path.join(output_base_dir, "classes_llvip.json")
+    with open(class_file, "w") as f:
+        json.dump(CLASS_NAMES, f, indent=2)
+    print(f"✅ Saved class names to {class_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate LLVIP JSONs with {data, label} entries.")
-    parser.add_argument("dataset_root", type=str, help="Path to LLVIP dataset root (contains train/ and val/)")
+    parser.add_argument("--dataset_root", type=str, help="Path to LLVIP dataset root (contains train/ and val/)")
     args = parser.parse_args()
 
     output_dir = os.path.join(os.getcwd(), "LLVIP")
 
     generate_llvip_metadata(args.dataset_root, "train", output_dir)
     generate_llvip_metadata(args.dataset_root, "val", output_dir)
+    save_class_list(output_dir)
 
-    print("🎉 Done. JSONs saved to ./LLVIP/train_data.json and val_data.json")
+    print("🎉 Done. JSONs saved to ./LLVIP/{train,val}_data.json and classes_llvip.json")
