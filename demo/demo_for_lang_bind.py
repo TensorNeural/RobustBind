@@ -1,5 +1,5 @@
 import torch
-from model import ForwardMode, LanguageBindModel, LANGUAGEBIND_MODEL_NAME_MAP, LANGUAGEBIND_TOKENIZER_MAP, LANGUAGEBIND_TOKENIZER_NAME_MAP
+from model import ForwardMode, LanguageBindClassifier, LANGUAGEBIND_MODEL_NAME_MAP, LANGUAGEBIND_TOKENIZER_MAP, LANGUAGEBIND_TOKENIZER_NAME_MAP
 from binds.languagebind import to_device,  transform_dict as lb_transform_dict, LanguageBindImageTokenizer
 
 # Class labels and input paths
@@ -9,8 +9,8 @@ audio_paths = ["assets/audio_car.wav", "assets/audio_airplane.wav"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Instantiate models for image and audio
-image_model = LanguageBindModel(device=device, modality="image", class_strings=class_names)
-audio_model = LanguageBindModel(device=device, modality="audio", class_strings=class_names)
+image_model = LanguageBindClassifier(device=device, modality="image", class_strings=class_names)
+audio_model = LanguageBindClassifier(device=device, modality="audio", class_strings=class_names)
 
 # === Separate text encoder logic ===
 # Use one tokenizer for all prompts (assuming text prompts shared across modalities)

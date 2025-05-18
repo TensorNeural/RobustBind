@@ -12,7 +12,7 @@ from datetime import datetime
 from collections import defaultdict
 
 from shared_types import Modality
-from model import UniBindModel, ForwardMode
+from model import UniBindClassifier, ForwardMode
 from attack import AttackModel, APGDAttack, two_stage_attack
 from data_util import get_transform_fn, get_normalization_tensors, load_label_mapping
 
@@ -138,7 +138,7 @@ def render_npz_to_png(src_path, dst_path, width=224, height=224):
 
 def build_model(args, device, modality, centre_emb, centre_labels, label_to_index, lora_path=None):
     logger = None
-    model = UniBindModel(
+    model = UniBindClassifier(
         device=device,
         pretrain_weights=args.pretrain_weights,
         modality=modality,

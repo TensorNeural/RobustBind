@@ -2,10 +2,10 @@ import time
 import torch
 import torch.distributed as dist
 from attack import AttackModel, APGDAttack, two_stage_attack
-from model import UniBindModel, ForwardMode
+from model import UniBindClassifier, ForwardMode
 from transform import unnormalize_inplace, normalize_inplace
 
-def evaluate_robust_one_stage(logger, device, model: UniBindModel, data_loader, one_attack: APGDAttack, mean, std):
+def evaluate_robust_one_stage(logger, device, model: UniBindClassifier, data_loader, one_attack: APGDAttack, mean, std):
     eval_start_time = time.time()
     model.eval()
     total_correct = 0
@@ -49,7 +49,7 @@ def evaluate_robust_one_stage(logger, device, model: UniBindModel, data_loader, 
     logger.info(f"Total one-stage eval time: {time.time() - eval_start_time:.2f} seconds")
     return robust_acc
 
-def evaluate_two_stage(logger, device, model: UniBindModel, data_loader, attack_loss_type, iteration_count, epsilon, mean, std):
+def evaluate_two_stage(logger, device, model: UniBindClassifier, data_loader, attack_loss_type, iteration_count, epsilon, mean, std):
     logger.info(f"Running two-stage robust evaluation: iteration_count={iteration_count}, eps={(epsilon * 255):.0f}/255")
 
     eval_start_time = time.time()
@@ -118,7 +118,7 @@ def evaluate_two_stage(logger, device, model: UniBindModel, data_loader, attack_
     return robust_acc
 
 @torch.no_grad()
-def evaluate_clean(logger, device, model: UniBindModel, data_loader):
+def evaluate_clean(logger, device, model: UniBindClassifier, data_loader):
     logger.info("Running CLEAN evaluation (no attack).")
 
     eval_start_time = time.time()

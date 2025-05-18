@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
 
-from model import UniBindModel
+from model import UniBindClassifier
 from training import train_epoch
 from eval import evaluate_robust_one_stage
 from attack import PGDAttack, APGDAttack, AttackModel
@@ -36,7 +36,7 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
     val_mean, val_std = get_normalization_tensors(args.val_modality, device)
 
     logger.info(f"Loading model for training: {args.train_modality.upper()}")
-    model_original = UniBindModel(
+    model_original = UniBindClassifier(
         device=device,
         pretrain_weights=args.pretrain_weights,
         modality=args.train_modality,
@@ -48,7 +48,7 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
     ).to(device)
     model_original.eval()
 
-    model_train = UniBindModel(
+    model_train = UniBindClassifier(
         device=device,
         pretrain_weights=args.pretrain_weights,
         modality=args.train_modality,
@@ -65,7 +65,7 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
 
     model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
 
-    model_val = UniBindModel(
+    model_val = UniBindClassifier(
         device=device,
         pretrain_weights=args.pretrain_weights,
         modality=args.val_modality,

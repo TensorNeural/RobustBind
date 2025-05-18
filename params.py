@@ -1,4 +1,4 @@
-from model import UniBindModel, ForwardMode
+from model import UniBindClassifier, ForwardMode
 from loss import l2_loss, ce_loss
 import torch
 from torch.optim import AdamW
@@ -24,7 +24,7 @@ def find_lr(
 ):
     logger.info("Finding learning rate ...")
     logger.info("Initializing original model ...")
-    model_original = UniBindModel(
+    model_original = UniBindClassifier(
         device=device,
         pretrain_weights=pretrain_weights,
         modality="image",
@@ -39,7 +39,7 @@ def find_lr(
     model_original.to(device)
 
     logger.info("Initializing training model ...")
-    model_train = UniBindModel(
+    model_train = UniBindClassifier(
         device=device,
         pretrain_weights=pretrain_weights,
         modality="image",

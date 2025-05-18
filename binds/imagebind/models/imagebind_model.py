@@ -34,7 +34,7 @@ ModalityType = SimpleNamespace(
 )
 
 
-class ImageBindModel(nn.Module):
+class ImageBindClassifier(nn.Module):
     def __init__(
         self,
         video_frames=2,
@@ -477,7 +477,7 @@ class ImageBindModel(nn.Module):
 
 
 def imagebind_huge(pretrained=False):
-    model = ImageBindModel(
+    model = ImageBindClassifier(
         vision_embed_dim=1280,
         vision_num_blocks=32,
         vision_num_heads=16,

@@ -306,11 +306,11 @@ def init_linear_as_identity(linear_layer):
     nn.init.zeros_(linear_layer.bias)
     return linear_layer
 
-# ============================ UniBindModel ============================
+# ============================ UniBindClassifier ============================
 # (as defined in your full version, unchanged)
-# Please assume your full UniBindModel code is already here.
+# Please assume your full UniBindClassifier code is already here.
 
-class UniBindModel(Model):
+class UniBindClassifier(Model):
     def __init__(
         self,
         device,
@@ -331,7 +331,7 @@ class UniBindModel(Model):
     ):
         super().__init__()
         self.logger = logger if logger else logging.getLogger(__name__)
-        self.logger.info("Initializing UniBindModel...")
+        self.logger.info("Initializing UniBindClassifier...")
         self.logger.info(f"Use LoRa: {use_lora}, LoRa rank: {lora_rank}, LoRa alpha: {lora_alpha}")
 
         self.unibind = UniBind(
@@ -432,8 +432,8 @@ class UniBindModel(Model):
         class_raw_scores = torch_scatter.scatter_logsumexp(similarity * temperature, self.centre_label_indices, dim=1)
         return class_raw_scores / temperature
 
-# ============================ LanguageBindModel ============================
-class LanguageBindModel(Model):
+# ============================ LanguageBindClassifier ============================
+class LanguageBindClassifier(Model):
     def __init__(self, device, modality, class_strings, logger=None):
         super().__init__()
         self.device = device
@@ -531,8 +531,8 @@ class LanguageBindModel(Model):
         logits = emb @ self.class_embeddings.T
         return logits / temperature, logits
 
-# ============================ ImageBindModel ============================
-class ImageBindModel(Model):
+# ============================ ImageBindClassifier ============================
+class ImageBindClassifier(Model):
     def __init__(self, device, modality, class_strings, logger=None):
         super().__init__()
         self.device = device

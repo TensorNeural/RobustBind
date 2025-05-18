@@ -1,5 +1,5 @@
 import torch
-from model import ImageBindModel, ForwardMode
+from model import ImageBindClassifier, ForwardMode
 from data_util import load_and_transform_audio_data, load_and_transform_vision_data, load_and_transform_text
 
 # Set your class names and input paths
@@ -12,9 +12,9 @@ audio_paths = ["assets/audio_car.wav", "assets/audio_airplane.wav"]
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Instantiate models for image and audio
-image_model = ImageBindModel(device=device, modality="image", class_strings=class_names)
-audio_model = ImageBindModel(device=device, modality="audio", class_strings=class_names)
-text_model = ImageBindModel(device=device, modality="text", class_strings=class_names)
+image_model = ImageBindClassifier(device=device, modality="image", class_strings=class_names)
+audio_model = ImageBindClassifier(device=device, modality="audio", class_strings=class_names)
+text_model = ImageBindClassifier(device=device, modality="text", class_strings=class_names)
 
 # Encode each modality and shared text embeddings
 

@@ -7,7 +7,7 @@ from datetime import datetime
 import gc
 import json
 
-from model import UniBindModel, LanguageBindModel, ImageBindModel, Modality
+from model import UniBindClassifier, LanguageBindClassifier, ImageBindClassifier, Modality
 from eval import evaluate_clean, evaluate_two_stage
 from data_util import (
     load_label_mapping,
@@ -45,7 +45,7 @@ def normalize_label(label: str) -> str:
 def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=False):
     logger.info(f"Building {args.model_type.value.upper()} model ...")
     if args.model_type == BindModelType.UNIBIND:
-        return UniBindModel(
+        return UniBindClassifier(
             device=device,
             pretrain_weights=args.pretrain_weights,
             modality=args.modality,
@@ -62,7 +62,7 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
 
     class_strings = [normalize_label(lbl) for lbl in class_strings]
     if args.model_type == BindModelType.LANGUAGEBIND:
-        return LanguageBindModel(
+        return LanguageBindClassifier(
             device=device,
             modality=args.modality,
             class_strings=class_strings,
@@ -70,7 +70,7 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
         ).to(device)
 
     if args.model_type == BindModelType.IMAGEBIND:
-        return ImageBindModel(
+        return ImageBindClassifier(
             device=device,
             modality=args.modality,
             class_strings=class_strings,

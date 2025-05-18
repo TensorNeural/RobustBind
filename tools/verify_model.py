@@ -11,7 +11,7 @@ def init_linear_as_identity(linear_layer):
     nn.init.zeros_(linear_layer.bias)
     return linear_layer
 
-class UniBindModel(nn.Module):
+class UniBindClassifier(nn.Module):
     def __init__(
         self,
         device,
@@ -60,7 +60,7 @@ def main():
     index_to_label = {v: k for k, v in label_to_index.items()}
 
     # === Initialize model ===
-    model = UniBindModel(
+    model = UniBindClassifier(
         device=device,
         pretrain_weights=pretrain_weights_path,
         modality="image",

@@ -12,7 +12,7 @@ from torch.utils.data import Subset, DataLoader
 from multiprocessing import Pool
 from functools import partial
 
-from model import UniBindModel, ForwardMode
+from model import UniBindClassifier, ForwardMode
 from attack import AttackModel, APGDAttack, two_stage_attack
 from data_util import JsonDataset, get_transform_fn, get_normalization_tensors, load_label_mapping
 from transform import unnormalize_inplace
@@ -140,7 +140,7 @@ def get_class_samples(modality, dataset_name, val_json, train_json, dataset_root
         return x.to(device)
 
 def build_model(device, pretrain_weights, modality, label_to_index, centre_embeddings, centre_labels, use_flash_attention, lora_weights=None):
-    model = UniBindModel(
+    model = UniBindClassifier(
         device=device,
         pretrain_weights=pretrain_weights,
         modality=modality,
