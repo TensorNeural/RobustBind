@@ -136,6 +136,23 @@ def render_npz_to_png(src_path, dst_path, width=224, height=224):
     except Exception as e:
         print(f"Error rendering {src_path}: {e}")
 
+def render_modelnet_pt_to_png(pt_path, png_path, elev=20, azim=45, width=224, height=224):
+    pts = torch.load(pt_path, map_location="cpu").numpy()
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+
+    fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
+    ax = fig.add_subplot(111, projection='3d')
+    ax.view_init(elev=elev, azim=azim)
+
+    ax.scatter(x, y, z, c=z, cmap='coolwarm', s=5, linewidth=0)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_zticks([])
+    ax.set_axis_off()
+
+    plt.savefig(png_path, dpi=100, bbox_inches='tight', transparent=True)
+    plt.close(fig)
+
 def build_model(args, device, modality, centre_emb, centre_labels, label_to_index, lora_path=None):
     logger = None
     model = UniBindClassifier(
@@ -227,10 +244,9 @@ def extract_audio_queries(args, device, rank, world_size, logger, out_base):
         for e in raw_entries:
             label = e["label"]
             if label not in args.label_map:
-                continue  # ❌ skip if not in label map
+                continue
             if not all(mod.value in args.label_map[label] for mod in [Modality.IMAGE, Modality.EVENT, Modality.POINT]):
-                continue  # ❌ skip if missing modality mapping
-
+                continue
             if class_counter[label] < NUM_QUERY_PER_CLASS:
                 filtered.append(e)
                 class_counter[label] += 1
@@ -238,7 +254,7 @@ def extract_audio_queries(args, device, rank, world_size, logger, out_base):
         logger.info(f"[Audio] Rank 0 kept {len(filtered)} filtered queries after label map validation.")
         partitions = [filtered[i::world_size] for i in range(world_size)]
 
-        query_dir = os.path.join(out_base, "cross_modality_search", "queries_by_class")
+        query_dir = os.path.join(out_base, "queries_by_class")
         os.makedirs(query_dir, exist_ok=True)
         per_class = defaultdict(list)
         for e in filtered:
@@ -254,14 +270,27 @@ def extract_audio_queries(args, device, rank, world_size, logger, out_base):
     entries = my_entries[0]
     logger.info(f"[Audio] Rank {rank} received {len(entries)} queries.")
 
+    # Compute global query index offset
+    num_local = torch.tensor([len(entries)], device=device)
+    all_counts = [torch.zeros_like(num_local) for _ in range(world_size)]
+    dist.all_gather(all_counts, num_local)
+    global_offset = sum(all_counts[i].item() for i in range(rank))
+
     emb, labels, label_to_index, _ = load_label_mapping(args.center_embs[Modality.AUDIO], device)
     transform = get_transform_fn(Modality.AUDIO)
     queries = []
-    for e in entries:
+
+    for local_idx, e in enumerate(entries):
         path = os.path.join(args.dataset_root, DATASET_NAMES[Modality.AUDIO], e["data"])
         try:
             x = transform([path], device=device)[0]
-            queries.append({"tensor": x, "label": e["label"], "path": path})
+            queries.append({
+                "tensor": x,
+                "label": e["label"],
+                "path": path,
+                "global_query_id": global_offset + local_idx,
+                "original_audio_path": e["data"]  # ✅ include original path
+            })
         except Exception as ex:
             logger.warning(f"Failed to load query {path}: {ex}")
     return emb, labels, label_to_index, queries
@@ -295,7 +324,7 @@ def evaluate_lora_variant(variant, lora_path, args, queries, all_targets, target
     for i, s in enumerate(queries):
         sims = torch.matmul(emb_x[i].unsqueeze(0), torch.nn.functional.normalize(target_matrix, dim=1).T).squeeze(0)
         topk = torch.topk(sims, k=TOP_K).indices
-        q_dir = os.path.join(out_dir, str(i))
+        q_dir = os.path.join(out_dir, f"{s['global_query_id']}")
         os.makedirs(q_dir, exist_ok=True)
         shutil.copyfile(s["path"], os.path.join(q_dir, "query_audio.wav"))
 
@@ -313,15 +342,18 @@ def evaluate_lora_variant(variant, lora_path, args, queries, all_targets, target
                 render_bin_to_png(t["path"], dst)
             elif t["path"].endswith(".npz"):
                 render_npz_to_png(t["path"], dst)
+            elif t["path"].endswith(".pt"):
+                render_modelnet_pt_to_png(t["path"], dst)
             elif os.path.exists(t["path"]):
                 shutil.copyfile(t["path"], dst)
             results.append({
-                "query_index": i,
+                "query_index": s["global_query_id"],
                 "query_class": s["label"],
                 "retrieved_label": t["label"],
                 "retrieved_modality": t["modality"].value,
                 "similarity": round(sims[idx].item(), 4),
-                "match": match
+                "match": match,
+                "original_audio_path": s.get("original_audio_path", "unknown")
             })
         if matched:
             hits += 1

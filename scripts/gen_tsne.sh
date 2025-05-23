@@ -1,4 +1,4 @@
-python eval/tsne_church_visualization.py \
+python ./tool/tsne_visualization.py \
   --dataset_root /home/user/datasets \
   --val_json_image ./datasets/Places365/val_data.json \
   --val_json_event ./datasets/N-ImageNet-1K/val_data.json \

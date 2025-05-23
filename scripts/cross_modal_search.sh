@@ -19,8 +19,10 @@ VAL_IMAGE="./datasets/Places365/val_data.json"
 VAL_EVENT="./datasets/N-ImageNet-1K/val_data.json"
 VAL_POINT="./datasets/ModelNet40/val_data.json"
 
+export PYTHONPATH=$(pwd):$PYTHONPATH
+
 # === Run Distributed Cross-Modality Search ===
-torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) cross_modality_search.py \
+torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) ./downstream/cross_modality_search.py \
   --dataset_root "${ROOT_DIR}" \
   --val_json_audio "${VAL_AUDIO}" \
   --val_json_image "${VAL_IMAGE}" \
