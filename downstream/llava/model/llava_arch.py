@@ -214,7 +214,7 @@ class LlavaMetaForCausalLM(ABC):
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
         print("[DEBUG] image_features shape (before split):", image_features.shape)
-        image_features = self.get_model().mm_projector(image_features)
+        image_features = self.get_model().mm_projector(image_features).to(torch.float16)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
@@ -338,10 +338,6 @@ class LlavaMetaForCausalLM(ABC):
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
-
-            print(f"[DEBUG] cur_new_input_embeds list (len={len(cur_new_input_embeds)}):")
-            for i, tensor in enumerate(cur_new_input_embeds):
-                print(f"  [{i}] shape: {tensor.shape}")
 
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)

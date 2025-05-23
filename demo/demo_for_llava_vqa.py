@@ -93,7 +93,7 @@ def load_model(model_dir: str, torch_dtype=torch.float16):
 def run_vqa_single(image_path: str, question: str, model, tokenizer, image_processor):
     image = Image.open(image_path).convert("RGB")
     image_tensor = image_processor.preprocess(image, return_tensors="pt")["pixel_values"].to("cuda")
-    # image_tensor = image_tensor.half()
+    image_tensor = image_tensor.to(model.get_vision_tower().dtype)
 
     conv = conv_templates["llava_v1"].copy()
     conv.append_message(conv.roles[0], f"""Answer strictly based on the image with yes/no or in 1 or 2 words. Answer in lowercase.
@@ -132,7 +132,7 @@ def main():
     output_dir = os.path.join(os.getcwd(), "output")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "vqa2_llava_results.json")
-    max_samples = 500
+    max_samples = 2
 
     # === Load model
     model_dir = download_weights(model_repo, local_cache)

@@ -45,6 +45,27 @@ STD_MAP = {
 
 NUM_FRAMES = 2
 
+IMAGE_TRANSFORM = transforms.Compose([
+    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
+])
+
+EVENT_TRANSFORM = transforms.Compose([
+    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN_MAP[Modality.EVENT], std=STD_MAP[Modality.EVENT]),
+])
+
+PATCHABLE_IMAGE_TRANSFORM = transforms.Compose([
+    transforms.Resize(336, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(336),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
+])
+
 # ===================
 # Dataset
 # ===================
@@ -86,20 +107,6 @@ def get_transform_fn(modality, minSample=False, model_type=None):
         Modality.POINT: load_and_transform_point_data
     }[modality]
 
-IMAGE_TRANSFORM = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
-])
-
-EVENT_TRANSFORM = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN_MAP[Modality.EVENT], std=STD_MAP[Modality.EVENT]),
-])
-
 def load_and_transform_vision_data(image_paths, device):
     images = []
     for p in image_paths:
@@ -108,11 +115,12 @@ def load_and_transform_vision_data(image_paths, device):
         images.append(IMAGE_TRANSFORM(img).to(device))
     return torch.stack(images)
 
-def load_and_transform_image_data(images):
-    images_list = []
+def load_and_transform_patchable_image_data(images):
+    transformed_list = []
     for image in images:
-        images_list.append(IMAGE_TRANSFORM(image))
-    return torch.stack(images)
+        transformed = PATCHABLE_IMAGE_TRANSFORM(image)  # [B, 3, H, W]
+        transformed_list.append(transformed)
+    return torch.stack(transformed_list)
 
 def load_and_transform_thermal_data(model_type=BindModelType.IMAGEBIND):
     def transform(thermal_paths, device):
