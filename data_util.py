@@ -108,6 +108,12 @@ def load_and_transform_vision_data(image_paths, device):
         images.append(IMAGE_TRANSFORM(img).to(device))
     return torch.stack(images)
 
+def load_and_transform_image_data(images):
+    images_list = []
+    for image in images:
+        images_list.append(IMAGE_TRANSFORM(image))
+    return torch.stack(images)
+
 def load_and_transform_thermal_data(model_type=BindModelType.IMAGEBIND):
     def transform(thermal_paths, device):
         # Determine expected channels and color mode
