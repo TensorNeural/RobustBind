@@ -6,8 +6,14 @@ from downstream.llava.constants import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX
 from downstream.llava.mm_utils import tokenizer_image_token
 
 class COCOCaptionDataset(Dataset):
-    def __init__(self, json_path, image_root, tokenizer, image_processor):
-        self.data = json.load(open(json_path))[:2]
+    def __init__(self, json_path, image_root, tokenizer, image_processor, max_samples=None, debug=False):
+        with open(json_path, "r") as f:
+            self.data = json.load(f)
+
+        if max_samples is not None and max_samples < len(self.data):
+            indices = torch.arange(max_samples) if debug else torch.randperm(len(self.data))[:max_samples]
+            self.data = [self.data[i] for i in indices]
+
         self.image_root = image_root
         self.tokenizer = tokenizer
         self.image_processor = image_processor
@@ -35,9 +41,9 @@ class COCOCaptionDataset(Dataset):
         return {"input_ids": input_ids, "labels": labels, "images": image_tensor}
 
     def collate_fn(self, batch):
-        input_id_list = [x["input_ids"] for x in batch]
-        input_ids = torch.nn.utils.rnn.pad_sequence(input_id_list, batch_first=True, padding_value=self.tokenizer.pad_token_id)
-        label_list = [x["labels"] for x in batch]
-        labels = torch.nn.utils.rnn.pad_sequence(label_list, batch_first=True, padding_value=IGNORE_INDEX)
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [x["input_ids"] for x in batch], batch_first=True, padding_value=self.tokenizer.pad_token_id)
+        labels = torch.nn.utils.rnn.pad_sequence(
+            [x["labels"] for x in batch], batch_first=True, padding_value=IGNORE_INDEX)
         images = torch.stack([x["images"] for x in batch])
         return {"input_ids": input_ids, "labels": labels, "images": images}

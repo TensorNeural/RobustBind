@@ -7,7 +7,7 @@ VQA_JSON="datasets/VQA2/train_data.json"
 DATASET_ROOT="/home/user/datasets"
 PRETRAINED_MODEL="liuhaotian/llava-v1.6-mistral-7b"
 UNIBIND_WEIGHTS="ckpts/pretrained_weights_flash_atten.pt"
-OUTPUT_DIR="output/mm_projector"
+OUTPUT_DIR="output/llava"
 
 # === Training params ===
 BATCH_SIZE=4
