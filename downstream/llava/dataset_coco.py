@@ -30,15 +30,35 @@ class COCOCaptionDataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         image_tensor = self.image_processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
 
+        # === Build LLaVA-style conversation ===
         caption = random.choice(item["captions"])
         conv = conv_templates["llava_v1"].copy()
-        conv.append_message(conv.roles[0], f"{DEFAULT_IMAGE_TOKEN}\nDescribe the image.")
+        user_message = f"{DEFAULT_IMAGE_TOKEN}\nDescribe the image."
+        conv.append_message(conv.roles[0], user_message)
         conv.append_message(conv.roles[1], caption)
         prompt = conv.get_prompt()
 
+        # === Tokenize full prompt ===
         input_ids = tokenizer_image_token(prompt, self.tokenizer, return_tensors="pt")
         labels = input_ids.clone()
-        return {"input_ids": input_ids, "labels": labels, "images": image_tensor}
+
+        # === Mask all tokens before the assistant reply ===
+        # Tokenize only up to assistant message to get instruction length
+        sep = conv.sep  # usually '</s>'
+        assistant_tag = conv.roles[1] + ": "  # 'ASSISTANT: '
+
+        instruction_only = conv.roles[0] + ": " + user_message + sep + assistant_tag
+        instruction_len = len(tokenizer_image_token(instruction_only, self.tokenizer))
+
+        # Mask everything before the caption
+        labels[:instruction_len] = IGNORE_INDEX
+        labels[input_ids == self.tokenizer.pad_token_id] = IGNORE_INDEX
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "images": image_tensor,
+        }
 
     def collate_fn(self, batch):
         input_ids = torch.nn.utils.rnn.pad_sequence(

@@ -24,20 +24,46 @@ class VQADataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         image_path = os.path.join(self.image_root, item["image"])
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
         image = Image.open(image_path).convert("RGB")
         image_tensor = self.image_processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
 
+        # Get majority answer
         question = item["question"]
         answer = max(set(item["answers"]), key=item["answers"].count)
 
+        # Build conversation
         conv = conv_templates["llava_v1"].copy()
-        conv.append_message(conv.roles[0], f"{DEFAULT_IMAGE_TOKEN}\nQuestion: {question}\nAnswer:")
+        user_message = f"{DEFAULT_IMAGE_TOKEN}\nQuestion: {question}\nAnswer:"
+        conv.append_message(conv.roles[0], user_message)
         conv.append_message(conv.roles[1], answer)
         prompt = conv.get_prompt()
 
+        # Tokenize full prompt
         input_ids = tokenizer_image_token(prompt, self.tokenizer, return_tensors="pt")
         labels = input_ids.clone()
-        return {"input_ids": input_ids, "labels": labels, "images": image_tensor}
+
+        # === Mask all tokens before the answer ===
+        # LLaVA-style instruction: USER: <image>\nQuestion: ...\nAnswer: [sep] ASSISTANT: answer
+        sep = conv.sep  # usually "</s>"
+        assistant_tag = conv.roles[1] + ": "  # e.g., "ASSISTANT: "
+
+        # Tokenize instruction only to get prefix length
+        instruction_prompt = conv.roles[0] + ": " + user_message + sep + assistant_tag
+        instruction_ids = tokenizer_image_token(instruction_prompt, self.tokenizer, return_tensors="pt")
+        instruction_len = len(instruction_ids)
+
+        # Mask all tokens before answer
+        labels[:instruction_len] = IGNORE_INDEX
+        labels[input_ids == self.tokenizer.pad_token_id] = IGNORE_INDEX
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "images": image_tensor,
+        }
 
     def collate_fn(self, batch):
         input_ids = torch.nn.utils.rnn.pad_sequence(
