@@ -61,7 +61,6 @@ class ImageProcessor:
             raise TypeError(f"Unsupported input type: {type(image)}")
 
         tensor = self.processor_fn(images)  # [B, N_patches, 3, 224, 224]
-        print(f"[DEBUG] tensor shape: {tensor.shape}")
         if return_tensors == "pt":
             return {"pixel_values": tensor}
         raise ValueError("Only return_tensors='pt' is supported")
@@ -109,7 +108,6 @@ class UniBindVisionTower(nn.Module):
         if not self.is_loaded:
             raise RuntimeError("UniBind model is not loaded. Call `load_model()` first.")
         
-        print(f"[DEBUG] images shape: {images.shape}")
         B, C, H, W = images.shape
         assert H % GRID_SIZE == 0 and W % GRID_SIZE == 0, \
             f"H and W must be divisible by GRID_SIZE={GRID_SIZE}"
@@ -129,7 +127,6 @@ class UniBindVisionTower(nn.Module):
 
         # Step 4: Reshape back to [B, N, D]
         encoded = encoded.view(B, GRID_SIZE * GRID_SIZE, -1)
-        print(f"[DEBUG] output shape: {encoded.shape}")
         return encoded
     
     def patchify_and_resize(images: torch.Tensor, grid_size: int = 14, target_size: int = 224) -> torch.Tensor:

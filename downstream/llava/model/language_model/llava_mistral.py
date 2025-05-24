@@ -53,6 +53,11 @@ class LlavaMistralForCausalLM(MistralForCausalLM, LlavaMetaForCausalLM):
 
     def get_model(self):
         return self.model
+    
+    def freeze_head(self):
+        """Freeze the language model head."""
+        for param in self.lm_head.parameters():
+            param.requires_grad = False
 
     def forward(
         self,

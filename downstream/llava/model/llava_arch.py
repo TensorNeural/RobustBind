@@ -80,6 +80,9 @@ class LlavaMetaModel:
             - freeze_projector (bool)
         """
         print(f"Using UniBind vision tower and projector: args={args}")
+        for param in self.parameters():
+            param.requires_grad = False
+
         # Step 1: Replace vision tower (always frozen)
         self.vision_tower = UniBindVisionTower(UniBindVisionTowerArgs(
             pretrain_weights=args.unibind_pretrain_weights,
@@ -118,7 +121,6 @@ class LlavaMetaModel:
             print("Requiring grad for projector")
             for p in self.mm_projector.parameters():
                 p.requires_grad = True
-
 
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
@@ -213,7 +215,6 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
-        print("[DEBUG] image_features shape (before split):", image_features.shape)
         image_features = self.get_model().mm_projector(image_features).to(torch.float16)
         return image_features
 

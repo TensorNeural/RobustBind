@@ -136,6 +136,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                         freeze_unibind=unbind_kwargs['freeze_unibind'] or True,
                     )
                     model.get_model().use_unibind_vision_tower(unbind_vision_args)
+                    model.freeze_head()  # Freeze the language model head
             else:
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
                 model = LlavaLlamaForCausalLM.from_pretrained(
