@@ -1,4 +1,4 @@
-import argparse, os, logging, shutil
+import argparse, os, logging, shutil, math
 import time
 from datetime import datetime
 
@@ -28,7 +28,16 @@ class RelativePathFormatter(logging.Formatter):
         return super().format(record)
 
 
-def train_one_epoch(logger, writer, model, dataloader, optimizer, scaler, device, epoch, total_epochs, stage):
+def get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def train_one_epoch(logger, writer, model, dataloader, optimizer, scheduler, scaler, device, epoch, total_epochs, stage, rank):
     model.train()
     start_time = time.time()
     step_base = epoch * len(dataloader)
@@ -55,40 +64,38 @@ def train_one_epoch(logger, writer, model, dataloader, optimizer, scaler, device
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        scheduler.step()
 
         loss_val = loss.item()
         total_loss += loss_val
         batch_size = batch["input_ids"].shape[0]
         total_samples += batch_size
 
-        if dist.get_rank() == 0:
-            logger.info(
-                f"[{stage.upper()}] Epoch {epoch+1}/{total_epochs}, Step {step+1}/{len(dataloader)}, "
-                f"BatchSize={batch_size}, Loss={loss_val:.4f}"
-            )
-            writer.add_scalar(f"{stage}/loss_step", loss_val, step_global)
+        # Log for all ranks
+        current_lr = optimizer.param_groups[0]["lr"]
+        logger.info(
+            f"[{stage.upper()}] Epoch {epoch+1}/{total_epochs}, Step {step+1}/{len(dataloader)}, "
+            f"BatchSize={batch_size}, Loss={loss_val:.4f}, LR={current_lr:.6f}"
+        )
+        writer.add_scalar(f"{stage}/loss_step", loss_val, step_global)
+        writer.add_scalar(f"{stage}/lr_step", current_lr, step_global)
 
         batch_end = time.time()
-        if dist.get_rank() == 0:
-            logger.info(f"[{stage.upper()}] Batch {step+1} time: {batch_end - batch_start:.2f}s, Total samples: {total_samples}")
+        logger.info(f"[{stage.upper()}] Batch {step+1} time: {batch_end - batch_start:.2f}s, Total samples: {total_samples}")
 
-    # Average loss for epoch
     avg_loss = total_loss / len(dataloader)
 
-    if dist.get_rank() == 0:
-        logger.info(f"[{stage.upper()}] Epoch {epoch+1} completed in {time.time() - start_time:.2f}s")
-        logger.info(f"[{stage.upper()}] Avg Loss: {avg_loss:.4f}, Samples: {total_samples}")
-        writer.add_scalar(f"{stage}/loss_epoch", avg_loss, epoch)
-        writer.add_scalar(f"{stage}/lr", optimizer.param_groups[0]["lr"], epoch)
+    logger.info(f"[{stage.upper()}] Epoch {epoch+1} completed in {time.time() - start_time:.2f}s")
+    logger.info(f"[{stage.upper()}] Avg Loss: {avg_loss:.4f}, Samples: {total_samples}")
+    writer.add_scalar(f"{stage}/loss_epoch", avg_loss, epoch)
+    writer.add_scalar(f"{stage}/lr_epoch", optimizer.param_groups[0]["lr"], epoch)
 
-    # Sync total sample count across processes
     sample_tensor = torch.tensor(total_samples, dtype=torch.float64, device=device)
     dist.all_reduce(sample_tensor, op=dist.ReduceOp.SUM)
-
-    if dist.get_rank() == 0:
-        logger.info(f"[{stage.upper()}] Epoch {epoch+1} total global samples: {int(sample_tensor.item())}")
+    logger.info(f"[{stage.upper()}] Epoch {epoch+1} total global samples: {int(sample_tensor.item())}")
 
     return avg_loss
+
 
 def train(args, logger, writer, device, rank):
     logger.info("Loading LLaVA model with UniBind encoder...")
@@ -136,6 +143,8 @@ def train(args, logger, writer, device, rank):
         num_workers=args.num_workers,
         pin_memory=True
     )
+    num_steps_coco = args.coco_epochs * len(coco_loader)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps=int(0.1 * num_steps_coco), total_steps=num_steps_coco)
 
     logger.info(f"Training on COCO for {args.coco_epochs} epoch(s)...")
     for epoch in range(args.coco_epochs):
@@ -145,11 +154,13 @@ def train(args, logger, writer, device, rank):
             model=ddp_model,
             dataloader=coco_loader,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
             device=device,
             epoch=epoch,
             total_epochs=args.coco_epochs,
-            stage="coco"
+            stage="coco",
+            rank=rank
         )
 
     if rank == 0:
@@ -174,6 +185,8 @@ def train(args, logger, writer, device, rank):
         num_workers=args.num_workers,
         pin_memory=True
     )
+    num_steps_vqa = args.vqa_epochs * len(vqa_loader)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps=int(0.1 * num_steps_vqa), total_steps=num_steps_vqa)
 
     logger.info(f"Fine-tuning on VQA for {args.vqa_epochs} epoch(s)...")
     for epoch in range(args.vqa_epochs):
@@ -183,11 +196,13 @@ def train(args, logger, writer, device, rank):
             model=ddp_model,
             dataloader=vqa_loader,
             optimizer=optimizer,
+            scheduler=scheduler,
             scaler=scaler,
             device=device,
             epoch=epoch,
             total_epochs=args.vqa_epochs,
-            stage="vqa"
+            stage="vqa",
+            rank=rank
         )
 
     if rank == 0:
@@ -220,8 +235,8 @@ def main():
     dist.init_process_group("nccl")
     rank = dist.get_rank()
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    args.output_dir = os.path.join(args.output_dir, f"train_{timestamp}")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    args.output_dir = os.path.join(args.output_dir, f"{timestamp}")
     os.makedirs(args.output_dir, exist_ok=True)
 
     log_path = os.path.join(args.output_dir, f"rank{rank}.log")

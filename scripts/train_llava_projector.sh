@@ -11,7 +11,7 @@ OUTPUT_DIR="output/llava"
 
 # === Training params ===
 BATCH_SIZE=4
-NUM_WORKERS=4
+NUM_WORKERS=2
 
 # === Launch training ===
 torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) -m downstream.llava.train_mm_projector \
