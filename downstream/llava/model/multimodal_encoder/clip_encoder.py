@@ -52,12 +52,8 @@ class CLIPVisionTower(nn.Module):
                 image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
         else:
-            print("images is a tensor, using batch processing.")
-            print(f"images shape: {images.shape}")
             image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
-            print(f"image_forward_outs shape: {image_forward_outs.hidden_states[self.select_layer].shape}")
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
-            print(f"image_features shape: {image_features.shape}")
 
         return image_features
 
