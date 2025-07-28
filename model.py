@@ -86,6 +86,7 @@ MODALITY_MAP = {
     Modality.THERMAL: ModalityType.THERMAL,
     Modality.EVENT: ModalityType.VISION,
     Modality.POINT: ModalityType.POINT,
+    Modality.TEXT: ModalityType.TEXT,
 }
 
 
@@ -383,6 +384,10 @@ class UniBindClassifier(Model):
     
     def data_to_device(self, x, device):
         return x.to(device)
+    
+    def encode_text(self, x):
+        input_dict = {ModalityType.TEXT: x}
+        return self.unibind.encode_text(input_dict)
 
     def _logits(self, x, temperature=1000.0):
         embeddings = self._encode(x)

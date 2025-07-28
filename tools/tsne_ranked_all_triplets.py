@@ -11,16 +11,12 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from itertools import product
 from torch.utils.data import Subset, DataLoader
-from multiprocessing import get_context, Queue, Process, set_start_method
+from multiprocessing import get_context, Process, set_start_method
 from datetime import datetime
 import torch.nn.functional as F
 import itertools
 import heapq
 from collections import defaultdict
-import itertools
-import matplotlib.pyplot as plt
-import numpy as np
-import os
 
 from model import UniBindClassifier, ForwardMode
 from data_util import JsonDataset, get_transform_fn, load_label_mapping
@@ -28,7 +24,7 @@ from shared_types import Modality
 set_start_method("spawn", force=True)
 
 # === Constants
-NUM_SAMPLES = 40
+NUM_SAMPLES = 60
 PERPLEXITY = 5
 MODALITY_COLOR = {
     Modality.IMAGE: "blue",
@@ -59,7 +55,7 @@ def load_json_safe(path):
 
 def sample_class_indices(label, val_data, train_data):
     def match(data): return [i for i, e in enumerate(data) if label in e["label"].lower()]
-    for data in [val_data, train_data, val_data + train_data]:
+    for data in [train_data, val_data, val_data + train_data]:
         indices = match(data)
         if len(indices) >= NUM_SAMPLES:
             return random.sample(indices, NUM_SAMPLES), data
@@ -139,7 +135,18 @@ def draw_arrows(A, B, A_coords, B_coords, max_lines=10):
 
 def fit_tsne(X, perplexity):
     if TSNE_BACKEND == "cuml":
-        coords = CuMLTSNE(n_components=2, perplexity=perplexity).fit_transform(cp.asarray(X))
+        tsne = CuMLTSNE(
+            n_components=2,            # 2D plot
+            perplexity=PERPLEXITY,              # ↓ lower = more local structure → more mixing
+            # learning_rate=800,         # ↑ higher = more spread out
+            # early_exaggeration=4.0,    # ↓ lower = less tight clustering
+            # n_iter=300,                # ↓ fewer = prevents full separation
+            random_state=42,           # reproducibility
+            # metric='cosine',        # you can try 'cosine' if embeddings are cosine-aligned
+            # init='random',             # or 'pca' – 'random' introduces more overlap
+            # method='fft',       # or 'fft' if dataset is large
+        )
+        coords = tsne.fit_transform(cp.asarray(X))
         coords = cp.asnumpy(coords)
     else:
         tsne = OpenTSNE(n_components=2, perplexity=perplexity, n_jobs=-1, random_state=42)
@@ -147,83 +154,51 @@ def fit_tsne(X, perplexity):
     coords = (coords - coords.min(0)) / (coords.max(0) - coords.min(0))
     return coords
 
-def plot_tsne_triplet(embeddings, labels, rank, output_dir,
+def plot_tsne_triplet(embedding_tuples, rank, output_dir,
                       center_emb_dict=None, use_center_only=False):
     """
-    Plot a t-SNE chart of modality embeddings for a given triplet.
-
     Args:
-        embeddings: Arbitrary number of modality-specific embedding arrays.
-        labels: Corresponding class label strings (one per modality).
-        rank: Rank index of the triplet (used for filename and title).
-        output_dir: Where to save the output PNG.
-        center_emb_dict: Optional dict for center-only mode visualization.
-        use_center_only: Whether to skip plotting individual embeddings and show only centers.
+        embedding_tuples: List of (modality, label, embeddings ndarray)
+        rank: Triplet rank
+        output_dir: Save dir
+        center_emb_dict: Optional centers
+        use_center_only: Whether only centers were used
     """
-    assert len(embeddings) == len(labels), "Mismatch between embeddings and labels"
-
-    # Determine modality order — use keys from center_emb_dict if available
-    modality_list = list(center_emb_dict.keys()) if center_emb_dict else list(MODALITY_COLOR.keys())
-    modality_list = modality_list[:len(labels)]
-
     plt.figure(figsize=(8, 6))
 
-    # if not use_center_only:
-    # === Plot per-sample embeddings ===
-    colors = [MODALITY_COLOR[m] for m, e in zip(modality_list, embeddings) for _ in range(len(e))]
-    X = np.concatenate(embeddings).astype(np.float32)
+    # Flatten for t-SNE
+    X = np.concatenate([e for (_, _, e) in embedding_tuples], axis=0).astype(np.float32)
+    colors = [MODALITY_COLOR[m] for m, _, e in embedding_tuples for _ in range(len(e))]
     perplexity = max(1, min(PERPLEXITY, len(X) - 1))
     coords = fit_tsne(X, perplexity)
 
-    # === Plot each modality's embeddings ===
     offset = 0
     coord_dict = {}
-    for i, (label, mod) in enumerate(zip(labels, modality_list)):
-        count = len(embeddings[i])
+
+    for modality, label, emb in embedding_tuples:
+        count = len(emb)
         current_coords = coords[offset:offset + count]
+        current_colors = colors[offset:offset + count]
+
         plt.scatter(current_coords[:, 0], current_coords[:, 1],
-                    c=MODALITY_COLOR[mod], label=label, s=40)
-        coord_dict[mod] = current_coords
+                    c=current_colors, label=f"{modality.name}: {label}", s=40)
+        coord_dict[modality] = current_coords
         offset += count
 
-    # === Chamfer Distance annotation (pairwise) ===
+    # === Chamfer annotation ===
     chamfer_lines = ["Chamfer Distances:"]
-    for (i, j) in itertools.combinations(range(len(embeddings)), 2):
-        mod_i, mod_j = modality_list[i], modality_list[j]
-        score = chamfer(embeddings[i], embeddings[j])
+    for (i, j) in itertools.combinations(range(len(embedding_tuples)), 2):
+        mod_i, _, emb_i = embedding_tuples[i]
+        mod_j, _, emb_j = embedding_tuples[j]
+        score = chamfer(emb_i, emb_j)
         chamfer_lines.append(f"{mod_i.name}↔{mod_j.name}: {score:.2f}")
     chamfer_text = "\n".join(chamfer_lines)
 
     plt.text(1.02, 0.5, chamfer_text, transform=plt.gca().transAxes,
-                fontsize=10, va='center', ha='left',
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+             fontsize=10, va='center', ha='left',
+             bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
 
-        # === Optional: draw arrows between modalities ===
-        # if Modality.IMAGE in coord_dict and Modality.AUDIO in coord_dict:
-        #     draw_arrows(
-        #         embeddings[modality_list.index(Modality.IMAGE)],
-        #         embeddings[modality_list.index(Modality.AUDIO)],
-        #         coord_dict[Modality.IMAGE],
-        #         coord_dict[Modality.AUDIO]
-        #     )
-
-    # === Optional: Plot center embeddings ===
-    # if center_emb_dict:
-    #     for label, mod in zip(labels, modality_list):
-    #         centers = center_emb_dict.get(mod, {}).get(label, [])
-    #         if len(centers) < 2:
-    #             continue
-    #         center_mat = np.stack(centers).astype(np.float32)
-    #         perplexity = max(1, min(PERPLEXITY, len(center_mat) - 1))
-    #         coords_center = fit_tsne(center_mat, perplexity)
-    #         for i, pt in enumerate(coords_center):
-    #             plt.scatter(pt[0], pt[1],
-    #                         c=MODALITY_COLOR[mod], marker='X', s=90,
-    #                         edgecolors='black', linewidths=1.0, alpha=0.4,
-    #                         label=f"{label} center" if i == 0 else None)
-
-    # === Save plot ===
-    fname = f"{rank:03d}_" + "_".join(labels).replace(" ", "_") + ".png"
+    fname = f"{rank:03d}_" + "_".join(label for _, label, _ in embedding_tuples).replace(" ", "_") + ".png"
     plt.title(f"Triplet Rank {rank} ({TSNE_BACKEND})")
     plt.legend()
     plt.tight_layout()
@@ -260,8 +235,8 @@ def chamfer_score(A, B):
     return (D.min(1).values.mean() + D.min(0).values.mean())
 
 def score_triplet(triplet, metric):
-    labels, embeddings = zip(*triplet)  # unzip into label list and embedding list
-    embeddings = [to_gpu(e) for e in embeddings]
+    labels = [(mod, lbl) for mod, lbl, _ in triplet]
+    embeddings = [to_gpu(emb) for _, _, emb in triplet]
 
     scores = []
     for A, B in itertools.combinations(embeddings, 2):
@@ -276,12 +251,7 @@ def score_triplet(triplet, metric):
 
     scores = torch.stack(scores)
 
-    if metric == "cosine":
-        final_score = scores.min()   # more overlap = higher similarity → pick lowest
-    else:
-        final_score = scores.max()   # more distance = worse → pick highest
-
-    return (labels, -final_score.item())
+    return (labels, scores.mean().item(), scores)
 
 
 def gpu_score_worker(rank, chunk, metric, queue, top_k):
@@ -290,8 +260,8 @@ def gpu_score_worker(rank, chunk, metric, queue, top_k):
     print(f"[GPU WORKER {rank}] Scoring {len(chunk)} triplets...", flush=True)
     heap = []
     for triplet in tqdm(chunk, desc=f"[GPU {rank}] Scoring", position=rank):
-        label_triplet, score = score_triplet(triplet, metric)
-        heapq.heappush(heap, (score, label_triplet))
+        label_triplet, score, scores = score_triplet(triplet, metric)
+        heapq.heappush(heap, (score, (label_triplet, scores.cpu().tolist())))
         if len(heap) > top_k * 2:
             heap = heapq.nlargest(top_k, heap)
     queue.put(heap)
@@ -379,7 +349,7 @@ def load_precomputed_embeddings(embedding_dir):
             modname, lbl = fname.replace(".npy", "").split("_", 1)
             mod = Modality(modname)
             if mod not in MODALITY_COLOR:
-                log("MAIN", f"Skipping unknown modality: {modname}")
+                # log("MAIN", f"Skipping unknown modality: {modname}")
                 continue
 
             emb_dict[mod][lbl] = np.load(os.path.join(embedding_dir, fname))
@@ -441,7 +411,12 @@ def sample_and_extract_embeddings(args, output_dir, center_emb_dict):
 
     return load_precomputed_embeddings(output_dir)
 
-def score_triplets_parallel(triplet_data, metric, top_k):
+def score_triplets_parallel(triplet_data, metric, top_k, top_prefer):
+    if metric == "cosine":
+        prefer_high = (top_prefer == "close")  # high similarity is good
+    else:
+        prefer_high = (top_prefer == "far")    # high distance is bad (close → low)
+        
     queue = get_context("spawn").Queue()
     device_count = torch.cuda.device_count()
     chunk_size = (len(triplet_data) + device_count - 1) // device_count
@@ -456,17 +431,23 @@ def score_triplets_parallel(triplet_data, metric, top_k):
     heap = []
     for _ in range(device_count):
         local = queue.get()
-        for score, labels in local:
-            heapq.heappush(heap, (-score, labels))
+        for score, (labels, scores) in local:
+            score_key = score if prefer_high else -score
+            heapq.heappush(heap, (score_key, (labels, scores)))
             if len(heap) > top_k:
-                 heapq.heappop(heap)
+                heapq.heappop(heap)
 
     for p in processes:
         p.join()
 
     return sorted(heap, reverse=True)
 
-def score_center_triplets_parallel(center_emb_dict, metric, top_k):
+def score_center_triplets_parallel(center_emb_dict, metric, top_k, top_prefer):
+    if metric == "cosine":
+        prefer_high = (top_prefer == "close")  # high similarity is good
+    else:
+        prefer_high = (top_prefer == "far")    # high distance is bad (close → low)
+
     triplet_data = list(product(
         center_emb_dict[Modality.IMAGE].items(),
         center_emb_dict[Modality.AUDIO].items(),
@@ -475,8 +456,9 @@ def score_center_triplets_parallel(center_emb_dict, metric, top_k):
 
     heap = []
     for triplet in tqdm(triplet_data, desc="[MAIN] Scoring center triplets"):
-        labels, score = score_triplet(triplet, metric)
-        heapq.heappush(heap, (-score, labels))
+        labels, score, scores = score_triplet(triplet, metric)
+        score_key = score if prefer_high else -score
+        heapq.heappush(heap, (score_key, (labels, scores)))
         if len(heap) > top_k:
             heapq.heappop(heap)
     return sorted(heap, reverse=True)
@@ -484,24 +466,18 @@ def score_center_triplets_parallel(center_emb_dict, metric, top_k):
 def plot_top_triplets(top_triplets, emb_dict, center_emb_dict, output_dir, use_center_only):
     print(f"Top triplets: {len(top_triplets)}")
 
-    for rank, (score, labels) in enumerate(tqdm(top_triplets, desc="[MAIN] Plotting", unit="triplet")):
-        print(f"Plotting triplet {rank + 1}/{len(top_triplets)}: {labels} (score: {score:.2f})")
-        embeddings = []
-
-        modality_list = list(MODALITY_COLOR.keys())
-
-        for modality, label in zip(modality_list, labels):
-            if use_center_only:
-                emb = np.stack(center_emb_dict[modality][label])
-            else:
-                emb = emb_dict[modality][label]
-            embeddings.append(emb)
+    for rank, (score, (labels, scores)) in enumerate(tqdm(top_triplets, desc="[MAIN] Plotting", unit="triplet")):
+        print(f"Plotting triplet {rank + 1}/{len(top_triplets)}: {labels} (score: {score:.2f}, all scores: {scores})")
+        embedding_tuples = []
+        for (modality, label) in labels:
+            emb = (np.stack(center_emb_dict[modality][label])
+                if use_center_only else emb_dict[modality][label])
+            embedding_tuples.append((modality, label, emb))
 
         plot_tsne_triplet(
-            embeddings,                # unpack dynamic modality embeddings
-            labels,                     # list of class labels
-            rank, 
-            output_dir,
+            embedding_tuples=embedding_tuples,
+            rank=rank,
+            output_dir=output_dir,
             center_emb_dict=center_emb_dict,
             use_center_only=use_center_only
         )
@@ -525,7 +501,7 @@ def main(args):
             )
 
         print(f"Center embeddings loaded for {center_emb_dict[Modality.IMAGE].keys()} image classes")
-        top_triplets = score_center_triplets_parallel(center_emb_dict, args.score_metric, args.top_k_plots)
+        top_triplets = score_center_triplets_parallel(center_emb_dict, args.score_metric, args.top_k_plots, args.top_prefer)
         print(f"Found {len(top_triplets)} top triplets using center embeddings")
         plot_top_triplets(
             top_triplets,
@@ -537,26 +513,34 @@ def main(args):
         log("MAIN", f"✅ Center-only t-SNEs saved to {output_dir}")
         return
 
-    # emb_dict = (load_precomputed_embeddings(args.embedding_dir)
-    #             if args.skip_embed else sample_and_extract_embeddings(args, output_dir, center_emb_dict))
+    emb_dict = (load_precomputed_embeddings(args.embedding_dir)
+                if args.skip_embed else sample_and_extract_embeddings(args, output_dir, center_emb_dict))
 
-    # if args.image_class:
-    #     filter_image_class(emb_dict, center_emb_dict, args.image_class, args.use_center_only)
+    if args.image_class:
+        filter_image_class(emb_dict, center_emb_dict, args.image_class, args.use_center_only)
 
-    # triplet_source = center_emb_dict if args.use_center_only else emb_dict
-    # triplet_data = list(product(
-    #     triplet_source[Modality.IMAGE].items(),
-    #     # triplet_source[Modality.EVENT].items(),
-    #     triplet_source[Modality.AUDIO].items(),
-    #     triplet_source[Modality.POINT].items()
-    # ))
+    triplet_source = center_emb_dict if args.use_center_only else emb_dict
+    triplet_data = [
+        [
+            (Modality.IMAGE, lbl_i, emb_i),
+            # (Modality.EVENT, lbl_e, emb_e),
+            (Modality.AUDIO, lbl_a, emb_a),
+            (Modality.POINT, lbl_p, emb_p),
+        ]
+        for (lbl_i, emb_i), (lbl_a, emb_a), (lbl_p, emb_p) in product(
+            triplet_source[Modality.IMAGE].items(),
+            # triplet_source[Modality.EVENT].items(),
+            triplet_source[Modality.AUDIO].items(),
+            triplet_source[Modality.POINT].items(),
+        )
+    ]
 
-    # top_triplets = score_triplets_parallel(triplet_data, args.score_metric, args.top_k_plots)
+    top_triplets = score_triplets_parallel(triplet_data, args.score_metric, args.top_k_plots, args.top_prefer)
 
-    # log("MAIN", f"Plotting t-SNE for top {len(top_triplets)} triplets...")
-    # plot_top_triplets(top_triplets, emb_dict, center_emb_dict, output_dir, args.use_center_only)
+    log("MAIN", f"Plotting t-SNE for top {len(top_triplets)} triplets...")
+    plot_top_triplets(top_triplets, emb_dict, center_emb_dict, output_dir, args.use_center_only)
 
-    # log("MAIN", f"✅ Done. Top {args.top_k_plots} plots saved to {output_dir}")
+    log("MAIN", f"✅ Done. Top {args.top_k_plots} plots saved to {output_dir}")
 
 
 if __name__ == "__main__":
@@ -577,12 +561,12 @@ if __name__ == "__main__":
     parser.add_argument("--pretrain_weights", default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--skip_embed", action="store_true", default=True, help="Skip embedding & sampling")
-    parser.add_argument("--embedding_dir", type=str, default="output/alignment/2025-07-27_07-25-25" ,help="Path to precomputed .npy embeddings")
-    parser.add_argument("--top_k_plots", type=int, default=20)
-    parser.add_argument("--center_prefer", choices=["close", "far"], default="close")
-    parser.add_argument("--score_metric", choices=["cosine", "centroid", "chamfer"], default="chamfer")
-    parser.add_argument("--image_class", type=str, default="airliner", help="If set, only use this image class label for scoring")
-    parser.add_argument("--use_center_only", action="store_true", default=True, help="If set, rank and plot using only class center embeddings.")
+    parser.add_argument("--embedding_dir", type=str, default="output/alignment/2025-07-27_23-27-43", help="Path to precomputed .npy embeddings")
+    parser.add_argument("--top_k_plots", type=int, default=5)
+    parser.add_argument("--top_prefer", choices=["close", "far"], default="close")
+    parser.add_argument("--score_metric", choices=["cosine", "centroid", "chamfer"], default="centroid")
+    parser.add_argument("--image_class", type=str, default="sports car, sport car", help="If set, only use this image class label for scoring")
+    parser.add_argument("--use_center_only", action="store_true", default=False, help="If set, rank and plot using only class center embeddings.")
 
     args = parser.parse_args()
     main(args)
