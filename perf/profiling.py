@@ -41,7 +41,7 @@ class GpuMemoryTracker:
         if self.message:
             parts.append(self.message)
 
-        self.logger.debug(" | ".join(parts))
+        self.logger.info(" | ".join(parts))
 
     def _format_bytes(self, num_bytes):
         abs_bytes = abs(num_bytes)
@@ -80,7 +80,7 @@ class ProfileModelMemory:
         # Manually enter the top-level tracker
         self.top_tracker.__enter__()
         # Register hooks on all modules (including containers)
-        # self._register_hooks(self.model, prefix="", depth=0)
+        self._register_hooks(self.model, prefix="", depth=0)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -171,7 +171,7 @@ class ProfileModelGradient:
         self.hooks = []
 
     def __enter__(self):
-        # self._register_hooks(self.model, prefix="", depth=0)
+        self._register_hooks(self.model, prefix="", depth=0)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -203,7 +203,7 @@ class ProfileModelGradient:
                 f"input_requires_grad: {input_requires_grad} | "
                 f"output_requires_grad: {output_requires_grad}"
             )
-            # self.logger.info(f"{self.label}::{module_name} | {msg}")
+            self.logger.info(f"{self.label}::{module_name} | {msg}")
 
         # Only use forward hook to detect requirement status
         fwd_handle = module.register_forward_hook(_forward_hook)

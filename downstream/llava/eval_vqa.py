@@ -13,6 +13,7 @@ from downstream.llava.utils import disable_torch_init
 from downstream.llava.constants import IMAGE_TOKEN_INDEX
 from downstream.llava.conversation import conv_templates
 from downstream.llava.mm_utils import tokenizer_image_token
+from perf.profiling import ProfileModelMemory
 
 
 class RelativePathFormatter(logging.Formatter):
@@ -64,20 +65,29 @@ def vqa_soft_accuracy(prediction, answers):
 
 
 @torch.inference_mode()
-def generate(model, tokenizer, image_processor, image_path, prompt, device):
-    image = Image.open(image_path).convert("RGB")
-    image_tensor = image_processor.preprocess(image, return_tensors="pt")["pixel_values"].to(device, dtype=model.get_vision_tower().dtype)
+def generate_batch(logger, model, tokenizer, image_processor, image_paths, prompts, device):
+    images = [Image.open(p).convert("RGB") for p in image_paths]
+    image_tensors = [image_processor.preprocess(img, return_tensors="pt")["pixel_values"][0] for img in images]
+    image_tensor_batch = torch.stack(image_tensors).to(device, dtype=model.get_vision_tower().dtype)
 
-    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(device)
+    input_ids_batch = [tokenizer_image_token(p, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt") for p in prompts]
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    input_ids_batch = torch.nn.utils.rnn.pad_sequence(input_ids_batch, batch_first=True, padding_value=tokenizer.pad_token_id)
+    attention_mask = (input_ids_batch != tokenizer.pad_token_id).long().to(device)
+    input_ids_batch = input_ids_batch.to(device)
 
+    # with ProfileModelMemory(model, logger):
     output_ids = model.generate(
-        inputs=input_ids,
-        images=image_tensor,
+        inputs=input_ids_batch,
+        attention_mask=attention_mask,
+        images=image_tensor_batch,
         do_sample=False,
         temperature=0.0,
-        max_new_tokens=8
+        max_new_tokens=8,
+        pad_token_id=tokenizer.pad_token_id
     )
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+    torch.cuda.empty_cache()
+    return [tokenizer.decode(ids, skip_special_tokens=True).strip() for ids in output_ids]
 
 
 def ddp_scatter(data, rank, world_size):
@@ -94,11 +104,13 @@ def main():
     parser.add_argument("--projector_weight", required=True)
     parser.add_argument("--val_json", required=True)
     parser.add_argument("--image_root", required=True)
-    parser.add_argument("--output_dir", required=True, help="Directory to save logs and results")
-    parser.add_argument("--max_samples", type=str, default="5000", help="Integer or 'None' to evaluate all samples")
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--max_samples", type=int, default=2500)
+    parser.add_argument("--batch_size", type=int, default=5)
+    parser.add_argument("--use_unibind", action='store_true', default=True, help="Use Unibind for encoder")
     args = parser.parse_args()
 
-    max_samples = None if args.max_samples.lower() == "none" else int(args.max_samples)
+    batch_size = args.batch_size
 
     dist.init_process_group("nccl")
     rank = dist.get_rank()
@@ -106,21 +118,18 @@ def main():
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
 
-    # Add timestamp subdirectory
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     output_path = os.path.join(args.output_dir, timestamp)
     os.makedirs(output_path, exist_ok=True)
-
     logger = setup_logger(output_path, rank)
 
-    if rank == 0:
-        logger.info("🚀 Starting VQA Evaluation")
-        logger.info(f"📁 Model Dir: {args.model_dir}")
-        logger.info(f"📂 Val JSON: {args.val_json}")
-        logger.info(f"🖼️  Image Root: {args.image_root}")
-        logger.info(f"💾 Output Dir: {output_path}")
-        logger.info(f"📦 Max Samples: {max_samples}")
-        logger.info(f"🧠 Using {world_size} GPUs")
+    logger.info("Starting VQA Evaluation")
+    logger.info(f"Model Dir: {args.model_dir}")
+    logger.info(f"Val JSON: {args.val_json}")
+    logger.info(f"Image Root: {args.image_root}")
+    logger.info(f"Output Dir: {output_path}")
+    logger.info(f"Max Samples: {args.max_samples}")
+    logger.info(f"Using {world_size} GPUs | Batch size: {batch_size}")
 
     disable_torch_init()
     tokenizer, model, image_processor, _ = load_pretrained_model(
@@ -130,7 +139,7 @@ def main():
         torch_dtype=torch.float16,
         device=device,
         device_map=None,
-        use_unibind=True,
+        use_unibind=args.use_unibind,
         unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten.pt",
         projector_weights_path=args.projector_weight,
         freeze_projector=True,
@@ -142,43 +151,46 @@ def main():
     logger.info(f"model.get_vision_tower() dtype: {model.get_vision_tower().dtype}")
     model = model.to(device)
 
-    logger.info("✅ Model loaded. Loading data...")
-
     with open(args.val_json) as f:
         data = json.load(f)
-    if max_samples is not None:
-        data = data[:max_samples]
+    if args.max_samples is not None:
+        data = data[:args.max_samples]
 
     data = ddp_scatter(data, rank, world_size)
-
     logger.info(f"📊 Rank {rank} processing {len(data)} samples...")
 
     results = []
-    for idx, item in enumerate(tqdm(data, disable=(rank != 0))):
-        image_path = os.path.join(args.image_root, item["image"])
-        question = item["question"]
-        conv = conv_templates["llava_v1"].copy()
-        conv.append_message(conv.roles[0], f"<image>\nQuestion: {question}\nAnswer:")
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+    for i in tqdm(range(0, len(data), batch_size), disable=(rank != 0)):
+        batch = data[i:i+batch_size]
 
-        pred = normalize_answer(generate(model, tokenizer, image_processor, image_path, prompt, device))
-        acc = vqa_soft_accuracy(pred, item.get("answers", []))
+        image_paths = [os.path.join(args.image_root, item["image"]) for item in batch]
+        questions = [item["question"] for item in batch]
+        answers = [item.get("answers", []) for item in batch]
 
-        if rank == 0:
+        prompts = []
+        for q in questions:
+            conv = conv_templates["llava_v1"].copy()
+            conv.append_message(conv.roles[0], f"<image>\nQuestion: {q}\nAnswer:")
+            conv.append_message(conv.roles[1], None)
+            prompts.append(conv.get_prompt())
+
+        preds = [normalize_answer(p) for p in generate_batch(logger, model, tokenizer, image_processor, image_paths, prompts, device)]
+        accs = [vqa_soft_accuracy(p, a) for p, a in zip(preds, answers)]
+
+        for item, pred, acc in zip(batch, preds, accs):
             logger.info(f"Image: {item['image']}")
-            logger.info(f"Q: {question}")
+            logger.info(f"Q: {item['question']}")
             logger.info(f"A(pred): {pred}")
             logger.info(f"A(gt): {item.get('answers', [])}")
             logger.info(f"Acc: {acc:.2f}")
 
-        results.append({
-            "image_id": item["image_id"],
-            "question_id": item["question_id"],
-            "question": question,
-            "predicted_answer": pred,
-            "vqa_soft_accuracy": acc
-        })
+            results.append({
+                "image_id": item["image_id"],
+                "question_id": item["question_id"],
+                "question": item["question"],
+                "predicted_answer": pred,
+                "vqa_soft_accuracy": acc
+            })
 
     gathered = [None for _ in range(world_size)]
     dist.all_gather_object(gathered, results)
