@@ -32,8 +32,8 @@ class ImageProcessor:
     def __init__(self, processor_fn):
         self.processor_fn = processor_fn
 
-        self.size = {'shortest_edge': INPUT_IMAGE_SIZE}
-        self.crop_size = {'height': INPUT_IMAGE_SIZE, 'width': INPUT_IMAGE_SIZE}
+        self.size = {'shortest_edge': UNIBIND_IMAGE_SIZE}
+        self.crop_size = {'height': UNIBIND_IMAGE_SIZE, 'width': UNIBIND_IMAGE_SIZE}
 
     def preprocess(self, image_path, return_tensors=None):
         # Wrap single image path into a list
@@ -67,7 +67,7 @@ class ImageProcessor:
         else:
             raise TypeError(f"Unsupported input type: {type(image)}")
 
-        tensor = self.processor_fn(images)  # [B, N_patches, 3, 224, 224]
+        tensor = self.processor_fn(images)
         if return_tensors == "pt":
             return {"pixel_values": tensor}
         raise ValueError("Only return_tensors='pt' is supported")
@@ -126,16 +126,13 @@ class UniBindVisionTower(nn.Module):
         # [BatchSize, PATCH_COUNT, EMBEDDING_DIM]
         patch_embeddings = patch_embeddings.view(B, N, -1)
 
-        # TODO: support with CLS token
         # [BatchSize, EMBEDDING_DIM]
-        # image_global_embeddings = self.unibind.encode_vision_with_mlp({modality_key: x})
+        image_global_embeddings = self.unibind.encode_vision_with_mlp({modality_key: images})
         # [BatchSize, 1, EMBEDDING_DIM]
-        # cls = image_global_embeddings.unsqueeze(1)
+        cls = image_global_embeddings.unsqueeze(1)
 
-        # TODO: support with CLS token
         # [BatchSize, PATCH_COUNT+1, EMBEDDING_DIM]
-        # return torch.cat([cls, patch_embeddings], dim=1)
-        return patch_embeddings
+        return torch.cat([cls, patch_embeddings], dim=1)
 
     def patchify_and_resize(self, images: torch.Tensor, grid_size: int = GRID_SIZE, target_size: int = UNIBIND_IMAGE_SIZE):
         # BatchSize, Channels, Height, Width

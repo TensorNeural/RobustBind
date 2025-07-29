@@ -317,6 +317,53 @@ def two_stage_attack(logger, model, inputs, labels, attack_stage1, attack_stage2
 
     return adv_final
 
+def two_stage_attack_l2(logger, model, inputs, emb_orig, attack_stage1, attack_stage2, mean, std, cosine_threshold=0.2):
+    logger.info("Running two-stage attack (L∞, L2-loss + cosine filtering)...")
+
+    # === Clone and unnormalize input
+    inputs_unorm = inputs.detach().clone()
+    unnormalize_inplace(inputs_unorm, mean, std)
+
+    # === Stage 1 (with autocast to bfloat16)
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        adv_stage1 = attack_stage1.perturb(inputs_unorm, None, emb_orig)
+    normalize_inplace(adv_stage1, mean, std)
+
+    # === Evaluate cosine similarity and L2 distance
+    with torch.no_grad():
+        emb_stage1 = model(adv_stage1, mode="embeddings")
+
+        # Cosine similarity between each pair: [B]
+        cosine_sim = F.cosine_similarity(emb_stage1, emb_orig, dim=1)
+        l2_dists = torch.norm(emb_stage1 - emb_orig, dim=1)
+
+        logger.info(f"Stage1 Cosine similarity | min: {cosine_sim.min():.4f}, "
+                    f"mean: {cosine_sim.mean():.4f}, max: {cosine_sim.max():.4f}")
+        logger.info(f"Stage1 L2 distances       | min: {l2_dists.min():.4f}, "
+                    f"mean: {l2_dists.mean():.4f}, max: {l2_dists.max():.4f}")
+
+        # Keep only samples still too close to original
+        keep_idx = (cosine_sim >= cosine_threshold).nonzero(as_tuple=True)[0]
+
+    adv_final = adv_stage1.detach().clone()
+
+    # === Stage 2 (refine only filtered samples)
+    if len(keep_idx) > 0:
+        logger.info(f"Refining {len(keep_idx)} samples in Stage 2 (cosine ≥ {cosine_threshold})")
+        with torch.no_grad():
+            inputs_unorm2 = adv_stage1[keep_idx].detach().clone()
+            unnormalize_inplace(inputs_unorm2, mean, std)
+
+        adv_stage2 = attack_stage2.perturb(inputs_unorm2, None, emb_orig[keep_idx])
+
+        with torch.no_grad():
+            normalize_inplace(adv_stage2, mean, std)
+            adv_final[keep_idx] = adv_stage2
+    else:
+        logger.info("No samples required Stage 2 refinement.")
+
+    return adv_final
+
 
 # =========================== Norm Helpers ===========================
 

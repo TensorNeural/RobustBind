@@ -96,12 +96,15 @@ class Model(nn.Module):
     def forward(self, x, mode: ForwardMode):
         pass
 
+    @abc.abstractmethod
     def extract_tensor(self, x):
         pass
 
+    @abc.abstractmethod
     def wrap_tensor(self, x):
         pass
-    
+
+    @abc.abstractmethod
     def data_to_device(self, x, device):
         pass
 
