@@ -12,8 +12,9 @@ from PIL import Image
 from model import UniBind
 
 INPUT_IMAGE_SIZE = 336
-GRID_SIZE = 14
-PATCH_SIZE = INPUT_IMAGE_SIZE // GRID_SIZE
+# Match ViT-L 14
+PATCH_SIZE = 14
+GRID_SIZE = INPUT_IMAGE_SIZE // PATCH_SIZE
 EMBEDDING_DIM = 1024
 
 UNIBIND_IMAGE_SIZE = 224
@@ -31,10 +32,8 @@ class ImageProcessor:
     def __init__(self, processor_fn):
         self.processor_fn = processor_fn
 
-        # self.size = {'shortest_edge': INPUT_IMAGE_SIZE}
-        # self.crop_size = {'height': INPUT_IMAGE_SIZE, 'width': INPUT_IMAGE_SIZE}
-        self.size = {'shortest_edge': UNIBIND_IMAGE_SIZE}
-        self.crop_size = {'height': UNIBIND_IMAGE_SIZE, 'width': UNIBIND_IMAGE_SIZE}
+        self.size = {'shortest_edge': INPUT_IMAGE_SIZE}
+        self.crop_size = {'height': INPUT_IMAGE_SIZE, 'width': INPUT_IMAGE_SIZE}
 
     def preprocess(self, image_path, return_tensors=None):
         # Wrap single image path into a list
@@ -169,8 +168,5 @@ class UniBindVisionTower(nn.Module):
     def config(self):
         class DummyConfig:
             image_size = INPUT_IMAGE_SIZE
-
-            # TODO: fix patch size
-            # patch_size = PATCH_SIZE
-            patch_size = 14
+            patch_size = PATCH_SIZE
         return DummyConfig()
