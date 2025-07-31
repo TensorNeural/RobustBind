@@ -6,48 +6,29 @@ import torch.distributed as dist
 from datetime import datetime
 from tqdm import tqdm
 from torchvision import transforms
-from types import SimpleNamespace
-import logging
+from transformers import CLIPProcessor, CLIPModel
 
-from model import Model, UniBind, ForwardMode, MODALITY_MAP
 from attack import APGDAttack, AttackModel, two_stage_attack_l2
 from transform import normalize_inplace, unnormalize_inplace
-from data_util import (
-    load_and_transform_vision_data,
-    get_normalization_tensors
-)
+from data_util import load_and_transform_vision_data, get_normalization_tensors
 from shared_types import Modality
+from model import ForwardMode
 
-class UniBindModel(Model):
-    def __init__(self, pretrain_weights, logger, lora_weights=None):
+
+class CLIPWrapper(torch.nn.Module):
+    def __init__(self, device):
         super().__init__()
-        self.unibind = UniBind(
-            SimpleNamespace(pretrain_weights=pretrain_weights, modality=Modality.IMAGE),
-            use_flash_attention=True,
-            fine_tuned_weights=None,
-            lora_weights=lora_weights,
-            logger=logger,
-            use_lora=(lora_weights is not None),
-            lora_rank=4,
-            lora_alpha=8.0,
-            use_fine_tune=False
-        )
-        self.modality_key = MODALITY_MAP[Modality.IMAGE]
+        self.model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14-336").eval().to(device)
+        self.device = device
 
     def forward(self, x, mode=ForwardMode.EMBEDDINGS):
-        return self.unibind.encode_vision_with_mlp({self.modality_key: x})
+        if mode == ForwardMode.EMBEDDINGS:
+            return self.model.get_image_features(x)
+        raise ValueError(f"Unsupported mode: {mode}")
 
-    def extract_tensor(self, x):
-        return x
-
-    def wrap_tensor(self, x):
-        return x
-
-    def data_to_device(self, x, device):
-        return x.to(device)
-
-    def load_lora_weights(self, lora_path):
-        self.unibind.load_lora_weights(lora_path)
+    def extract_tensor(self, x): return x
+    def wrap_tensor(self, x): return x
+    def data_to_device(self, x, device): return x.to(device)
 
 
 def save_adv_image(tensor, out_path):
@@ -67,6 +48,7 @@ def setup_distributed():
 
 
 def setup_logger(rank, output_path):
+    import logging
     logger = logging.getLogger(f"EvalLogger-Rank{rank}")
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter(f"[RANK {rank}] %(asctime)s - %(message)s")
@@ -79,14 +61,13 @@ def setup_logger(rank, output_path):
     logger.handlers = []
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
-
     return logger
 
 
 def main(args):
     local_rank, rank, world_size, device = setup_distributed()
 
-    args.output_dir = "output/llava/attack/vqa"
+    args.output_dir = "output/clip/attack"
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
@@ -107,65 +88,34 @@ def main(args):
 
     mean, std = get_normalization_tensors(Modality.IMAGE, device)
 
-    LORA_WEIGHTS = {
-        "robustbind2": "./ckpts/vision_eps2_lora_weights.pt",
-        "robustbind4": "./ckpts/vision_eps4_lora_weights.pt",
-    }
-
-    configs = []
     for eps in [2, 4]:
-        for model_tag in ["unibind", "robustbind2", "robustbind4"]:
-            if model_tag == "unibind":
-                lora_path = None
-            elif model_tag == "robustbind2":
-                lora_path = LORA_WEIGHTS["robustbind2"]
-            elif model_tag == "robustbind4":
-                lora_path = LORA_WEIGHTS["robustbind4"]
-            else:
-                continue
-            configs.append((eps, model_tag, lora_path))
-
-    for eps, model_tag, lora_path in configs:
-        logger.info(f"Generating adversarial examples for {model_tag.upper()} at ε={eps}/255")
-        model = UniBindModel(args.pretrain_weights, logger, lora_weights=lora_path).eval().to(device)
+        logger.info(f"Generating adversarial examples for CLIP at ε={eps}/255")
+        model = CLIPWrapper(device).eval()
         attack_model = AttackModel(model, mean=mean, std=std)
 
         stage1 = APGDAttack(
-            logger=logger,
-            model=attack_model,
-            norm="linf",
-            n_restarts=1,
-            n_iter=args.steps,
-            eps=eps / 255.0,
-            loss_type="l2",
-            device=device
+            logger=logger, model=attack_model, norm="linf", n_restarts=1,
+            n_iter=args.steps, eps=eps / 255.0, loss_type="l2", device=device
         )
 
         stage2 = APGDAttack(
-            logger=logger,
-            model=attack_model,
-            norm="linf",
-            n_restarts=1,
-            n_iter=args.steps,
-            eps=eps / 255.0,
-            loss_type="l2",
-            device=device
+            logger=logger, model=attack_model, norm="linf", n_restarts=1,
+            n_iter=args.steps, eps=eps / 255.0, loss_type="l2", device=device
         )
 
-        adv_dir = os.path.join(args.image_root, f"val_adv_eps{eps}_{model_tag}")
+        adv_dir = os.path.join(args.image_root, f"val_adv_eps{eps}_clip")
         adv_data_rank = []
 
         batches = [all_data[i:i + args.batch_size] for i in range(0, len(all_data), args.batch_size)]
-        for batch in tqdm(batches, desc=f"[Rank {rank}] eps={eps} {model_tag}", disable=(rank != 0)):
+        for batch in tqdm(batches, desc=f"[Rank {rank}] eps={eps} clip", disable=(rank != 0)):
             image_paths = [os.path.join(args.image_root, s["image"]) for s in batch]
-            image_tensor = load_and_transform_vision_data(image_paths, device)
+            image_tensor = load_and_transform_vision_data(image_paths, device, resize=336)
 
             with torch.no_grad():
                 emb_orig = model(image_tensor, mode=ForwardMode.EMBEDDINGS)
 
             input = image_tensor.clone()
             unnormalize_inplace(input, mean, std)
-
             adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std)
 
             for j, sample in enumerate(batch):
@@ -181,7 +131,7 @@ def main(args):
 
         if rank == 0:
             final_data = [x for group in all_adv_data for x in group]
-            json_path = os.path.join(os.path.dirname(args.val_json), f"val_data_adv_eps{eps}_{model_tag}.json")
+            json_path = os.path.join(os.path.dirname(args.val_json), f"val_data_adv_eps{eps}_clip.json")
             with open(json_path, "w") as f:
                 json.dump(final_data, f, indent=2)
             logger.info(f"[✔] Wrote {len(final_data)} entries to {json_path}")
@@ -195,7 +145,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--val_json", type=str, required=True)
     parser.add_argument("--image_root", type=str, required=True)
-    parser.add_argument("--pretrain_weights", type=str, required=True)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--max_samples", type=int, default=5000)
     parser.add_argument("--batch_size", type=int, default=100)

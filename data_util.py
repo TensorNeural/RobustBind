@@ -45,13 +45,6 @@ STD_MAP = {
 
 NUM_FRAMES = 2
 
-IMAGE_TRANSFORM = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
-])
-
 EVENT_TRANSFORM = transforms.Compose([
     transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
     transforms.CenterCrop(224),
@@ -92,6 +85,14 @@ class JsonDataset(Dataset):
         label = self.label_to_index_fn[label_str] if self.label_to_index_fn else 0
         return tensor, label
 
+def image_transform_fn(resize=224):
+    return transforms.Compose([
+        transforms.Resize(resize, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(resize),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
+    ])
+
 # ===================
 # Transforms
 # ===================
@@ -107,12 +108,12 @@ def get_transform_fn(modality, minSample=False, model_type=None):
         Modality.POINT: load_and_transform_point_data
     }[modality]
 
-def load_and_transform_vision_data(image_paths, device):
+def load_and_transform_vision_data(image_paths, device, resize=224):
     images = []
     for p in image_paths:
         with open(p, "rb") as f:
             img = Image.open(f).convert("RGB")
-        images.append(IMAGE_TRANSFORM(img).to(device))
+        images.append(image_transform_fn(resize=resize)(img).to(device))
     return torch.stack(images)
 
 def load_and_transform_patchable_image_data(images):

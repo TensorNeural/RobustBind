@@ -46,16 +46,11 @@ class UniBindModel(Model):
     def data_to_device(self, x, device):
         return x.to(device)
 
-    def load_lora_weights(self, lora_path):
-        self.unibind.load_lora_weights(lora_path)
-
-
 def save_adv_image(tensor, out_path):
     tensor = tensor.squeeze(0).clamp(0, 1).cpu()
     image = transforms.ToPILImage()(tensor)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     image.save(out_path)
-
 
 def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -65,35 +60,30 @@ def setup_distributed():
     world_size = dist.get_world_size()
     return local_rank, rank, world_size, torch.device("cuda", local_rank)
 
-
 def setup_logger(rank, output_path):
-    logger = logging.getLogger(f"EvalLogger-Rank{rank}")
+    logger = logging.getLogger(f"CaptionAttack-Rank{rank}")
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter(f"[RANK {rank}] %(asctime)s - %(message)s")
-
     file_handler = logging.FileHandler(output_path)
     file_handler.setFormatter(formatter)
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
-
     logger.handlers = []
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
-
     return logger
-
 
 def main(args):
     local_rank, rank, world_size, device = setup_distributed()
 
-    args.output_dir = "output/llava/attack/vqa"
+    args.output_dir = "output/llava/attack/caption"
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
     logger = setup_logger(rank, log_path)
 
     if rank == 0:
-        with open(args.val_json, "r") as f:
+        with open(args.caption_json, "r") as f:
             all_data = json.load(f)
         if args.max_samples:
             all_data = all_data[:args.max_samples]
@@ -115,14 +105,7 @@ def main(args):
     configs = []
     for eps in [2, 4]:
         for model_tag in ["unibind", "robustbind2", "robustbind4"]:
-            if model_tag == "unibind":
-                lora_path = None
-            elif model_tag == "robustbind2":
-                lora_path = LORA_WEIGHTS["robustbind2"]
-            elif model_tag == "robustbind4":
-                lora_path = LORA_WEIGHTS["robustbind4"]
-            else:
-                continue
+            lora_path = None if model_tag == "unibind" else LORA_WEIGHTS[model_tag]
             configs.append((eps, model_tag, lora_path))
 
     for eps, model_tag, lora_path in configs:
@@ -130,29 +113,10 @@ def main(args):
         model = UniBindModel(args.pretrain_weights, logger, lora_weights=lora_path).eval().to(device)
         attack_model = AttackModel(model, mean=mean, std=std)
 
-        stage1 = APGDAttack(
-            logger=logger,
-            model=attack_model,
-            norm="linf",
-            n_restarts=1,
-            n_iter=args.steps,
-            eps=eps / 255.0,
-            loss_type="l2",
-            device=device
-        )
+        stage1 = APGDAttack(logger, attack_model, norm="linf", n_restarts=1, n_iter=args.steps, eps=eps / 255.0, loss_type="l2", device=device)
+        stage2 = APGDAttack(logger, attack_model, norm="linf", n_restarts=1, n_iter=args.steps, eps=eps / 255.0, loss_type="l2", device=device)
 
-        stage2 = APGDAttack(
-            logger=logger,
-            model=attack_model,
-            norm="linf",
-            n_restarts=1,
-            n_iter=args.steps,
-            eps=eps / 255.0,
-            loss_type="l2",
-            device=device
-        )
-
-        adv_dir = os.path.join(args.image_root, f"val_adv_eps{eps}_{model_tag}")
+        adv_dir = os.path.join(args.image_root, f"adv_eps{eps}_{model_tag}")
         adv_data_rank = []
 
         batches = [all_data[i:i + args.batch_size] for i in range(0, len(all_data), args.batch_size)]
@@ -165,23 +129,22 @@ def main(args):
 
             input = image_tensor.clone()
             unnormalize_inplace(input, mean, std)
-
             adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])
                 out_path = os.path.join(adv_dir, filename)
                 save_adv_image(adv_input[j:j + 1], out_path)
-                updated_sample = sample.copy()
-                updated_sample["image"] = f"{os.path.basename(adv_dir)}/{filename}"
-                adv_data_rank.append(updated_sample)
+                updated = sample.copy()
+                updated["image"] = f"{os.path.basename(adv_dir)}/{filename}"
+                adv_data_rank.append(updated)
 
         all_adv_data = [None for _ in range(world_size)]
         dist.all_gather_object(all_adv_data, adv_data_rank)
 
         if rank == 0:
             final_data = [x for group in all_adv_data for x in group]
-            json_path = os.path.join(os.path.dirname(args.val_json), f"val_data_adv_eps{eps}_{model_tag}.json")
+            json_path = os.path.join(os.path.dirname(args.caption_json), f"data_adv_eps{eps}_{model_tag}.json")
             with open(json_path, "w") as f:
                 json.dump(final_data, f, indent=2)
             logger.info(f"[✔] Wrote {len(final_data)} entries to {json_path}")
@@ -190,14 +153,13 @@ def main(args):
 
     dist.destroy_process_group()
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--val_json", type=str, required=True)
+    parser.add_argument("--caption_json", type=str, required=True)
     parser.add_argument("--image_root", type=str, required=True)
     parser.add_argument("--pretrain_weights", type=str, required=True)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--max_samples", type=int, default=5000)
-    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=50)
     args = parser.parse_args()
     main(args)

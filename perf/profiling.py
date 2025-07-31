@@ -144,21 +144,58 @@ class ProfileModelMemory:
         def inner_post_hook(module, inputs, output):
             tracker = self.ctx_map.pop(module, None)
             if tracker is not None:
-                # Update label for post-forward
+                # === Set post-forward label
                 tracker.label = "{}{}::Post::{}({})".format(
                     indent, self.label, name, module.__class__.__name__
                 )
 
-                # If there's an output shape, append to the message
-                if hasattr(output, 'shape'):
-                    if tracker.message:
-                        tracker.message = "{} | Output shape: {}".format(
-                            tracker.message, list(output.shape)
-                        )
-                    else:
-                        tracker.message = "Output shape: {}".format(list(output.shape))
+                # === Compute memory size in bytes ===
+                def tensor_nbytes(t):
+                    return t.numel() * t.element_size()
 
-                # Manually exit => logs memory usage
+                def compute_memory_stats(out):
+                    grad_bytes = 0
+                    non_grad_bytes = 0
+                    if isinstance(out, torch.Tensor):
+                        if out.requires_grad:
+                            grad_bytes += tensor_nbytes(out)
+                        else:
+                            non_grad_bytes += tensor_nbytes(out)
+                    elif isinstance(out, (list, tuple)):
+                        for o in out:
+                            if isinstance(o, torch.Tensor):
+                                if o.requires_grad:
+                                    grad_bytes += tensor_nbytes(o)
+                                else:
+                                    non_grad_bytes += tensor_nbytes(o)
+                    return grad_bytes, non_grad_bytes
+
+                def any_input_requires_grad(inputs):
+                    if isinstance(inputs, torch.Tensor):
+                        return inputs.requires_grad
+                    elif isinstance(inputs, (list, tuple)):
+                        return any(
+                            isinstance(i, torch.Tensor) and i.requires_grad for i in inputs
+                        )
+                    return False
+
+                input_grad = any_input_requires_grad(inputs)
+                grad_bytes, non_grad_bytes = compute_memory_stats(output)
+
+                # === Format and append to message ===
+                grad_str = tracker._format_bytes(grad_bytes)
+                nongrad_str = tracker._format_bytes(non_grad_bytes)
+
+                tracker.message = (tracker.message or "")
+                tracker.message += (
+                    f" | input_requires_grad: {input_grad}"
+                    f" | Grad Output: {grad_str}"
+                    f" | Non-Grad Output: {nongrad_str}"
+                )
+
+                if hasattr(output, 'shape'):
+                    tracker.message += f" | Output shape: {list(output.shape)}"
+
                 tracker.__exit__(None, None, None)
         return inner_post_hook
 

@@ -331,7 +331,7 @@ def two_stage_attack_l2(logger, model, inputs, emb_orig, attack_stage1, attack_s
 
     # === Evaluate cosine similarity and L2 distance
     with torch.no_grad():
-        emb_stage1 = model(adv_stage1, mode="embeddings")
+        emb_stage1 = model(adv_stage1, mode=ForwardMode.EMBEDDINGS)
 
         # Cosine similarity between each pair: [B]
         cosine_sim = F.cosine_similarity(emb_stage1, emb_orig, dim=1)
