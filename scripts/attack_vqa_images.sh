@@ -3,7 +3,7 @@ set -e
 
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 
-VAL_JSON=./datasets/VQA2/val_data.json
+VAL_JSON=./datasets/VQA2/val_data_filtered.json
 IMAGE_ROOT=/home/user/datasets/VQA2
 PRETRAIN_WEIGHTS=./ckpts/pretrained_weights_flash_atten.pt
 

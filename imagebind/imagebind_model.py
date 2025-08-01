@@ -483,17 +483,13 @@ class ImageBindClassifier(nn.Module):
 
         return nn.ModuleDict(modality_postprocessors)
 
-    def forward(self, inputs):
+    def forward(self, inputs, only_cls=True):
         outputs = {}
         for modality_key, modality_value in inputs.items():
-            reduce_list = (
-                modality_value.ndim >= 5
-            )  # Audio and Video inputs consist of multiple clips
+            reduce_list = modality_value.ndim >= 5  # Audio/Video clips
             if reduce_list:
                 B, S = modality_value.shape[:2]
-                modality_value = modality_value.reshape(
-                    B * S, *modality_value.shape[2:]
-                )
+                modality_value = modality_value.reshape(B * S, *modality_value.shape[2:])
 
             if modality_value is not None:
                 modality_value = self.modality_preprocessors[modality_key](
@@ -502,6 +498,10 @@ class ImageBindClassifier(nn.Module):
                 trunk_inputs = modality_value["trunk"]
                 head_inputs = modality_value["head"]
                 modality_value = self.modality_trunks[modality_key](**trunk_inputs)
+                if not only_cls and modality_key != ModalityType.POINT:
+                    outputs[modality_key] = modality_value  # [B, N, D]
+                    continue
+                
                 modality_value = self.modality_heads[modality_key](
                     modality_value, **head_inputs
                 )
@@ -516,7 +516,6 @@ class ImageBindClassifier(nn.Module):
                 outputs[modality_key] = modality_value
 
         return outputs
-
 
 def imagebind_huge(
         use_flash_attn=False, 

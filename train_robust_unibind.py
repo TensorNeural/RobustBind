@@ -193,7 +193,7 @@ def main():
     parser.add_argument("--val_batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--train_max_samples", type=int)
-    parser.add_argument("--val_max_samples", type=int, default=3000)
+    parser.add_argument("--val_max_samples", type=int, default=200)
     parser.add_argument("--train_attack_loss", default="l2")
     parser.add_argument("--val_attack_loss", default="ce")
     parser.add_argument("--train_loss", default="l2")
@@ -201,6 +201,10 @@ def main():
     parser.add_argument("--lora_alpha", type=float, default=8)
     parser.add_argument("--epsilon", type=int, default=4)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
+    parser.add_argument('--use_full_finetune', action='store_true', default=True, help='Enable full fine-tuning (backbone + MLPs)')
+    parser.add_argument('--save_checkpoint',type=str, default="ckpts/full_fine_tune_{modality}.pt",
+        help='Checkpoint save path format, e.g. ckpts/unibind_{modality}.pt'
+    )
     parser.add_argument("--tensorboard_data_dir", default="tensorboard")
     parser.add_argument("--output_dir", default="output")
     args = parser.parse_args()

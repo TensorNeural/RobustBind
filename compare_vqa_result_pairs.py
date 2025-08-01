@@ -56,15 +56,15 @@ def extract_run_metadata(result_json_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--result_jsons', type=str, nargs='+', default=[
-        "output/llava/eval/vqa/2025-07-30_17-58/unibind/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_17-58/robustbind2/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_17-58/robustbind4/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_08-54/unibind/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_09-06/robustbind2/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_09-19/robustbind4/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_09-33/unibind/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_09-45/robustbind2/vqa_results.json",
-        "output/llava/eval/vqa/2025-07-30_09-58/robustbind4/vqa_results.json",
+        'output/llava/eval/vqa/2025-07-31_09-08/clean/unibind/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/clean/robustbind2/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/clean/robustbind4/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/eps2/unibind/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/eps2/robustbind2/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/eps2/robustbind4/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/eps4/unibind/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/eps4/robustbind2/vqa_results.json',
+        'output/llava/eval/vqa/2025-07-31_09-08/eps4/robustbind4/vqa_results.json'
     ], help="List of VQA result JSON files to compare.")
     parser.add_argument('--output_dir', type=str,
         default="output/llava/eval/vqa/filtered_pairwise",

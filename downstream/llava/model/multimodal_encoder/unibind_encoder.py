@@ -127,12 +127,13 @@ class UniBindVisionTower(nn.Module):
         patch_embeddings = patch_embeddings.view(B, N, -1)
 
         # [BatchSize, EMBEDDING_DIM]
-        image_global_embeddings = self.unibind.encode_vision_with_mlp({modality_key: images})
+        # image_global_embeddings = self.unibind.encode_vision_with_mlp({modality_key: images})
         # [BatchSize, 1, EMBEDDING_DIM]
-        cls = image_global_embeddings.unsqueeze(1)
+        # cls = image_global_embeddings.unsqueeze(1)
 
         # [BatchSize, PATCH_COUNT+1, EMBEDDING_DIM]
-        return torch.cat([cls, patch_embeddings], dim=1)
+        # return torch.cat([cls, patch_embeddings], dim=1)
+        return torch.cat([patch_embeddings], dim=1)
 
     def patchify_and_resize(self, images: torch.Tensor, grid_size: int = GRID_SIZE, target_size: int = UNIBIND_IMAGE_SIZE):
         # BatchSize, Channels, Height, Width

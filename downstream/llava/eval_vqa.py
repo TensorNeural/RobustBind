@@ -123,18 +123,19 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     root_dir = os.path.join(args.output_dir, timestamp)
 
-    model_tags = ["unibind", "robustbind2", "robustbind4"]
+    # model_tags = ["unibind", "robustbind2", "robustbind4"]
+    model_tags = ["unibind"]
     settings = [
-        {
-            "name": "clean",
-            "val_json_template": "datasets/VQA2/val_data.json",
-            "use_random_image": False
-        },
-        {
-            "name": "random",
-            "val_json_template": "datasets/VQA2/val_data.json",
-            "use_random_image": True
-        },
+        # {
+        #     "name": "clean",
+        #     "val_json_template": "datasets/VQA2/val_data_filtered.json",
+        #     "use_random_image": False
+        # },
+        # {
+        #     "name": "random",
+        #     "val_json_template": "datasets/VQA2/val_data_filtered.json",
+        #     "use_random_image": True
+        # },
         {
             "name": "eps2",
             "val_json_template": "datasets/VQA2/val_data_adv_eps2_{model_tag}.json",

@@ -113,8 +113,20 @@ def main(args):
     }
 
     configs = []
+    # for eps in [2, 4]:
+    #     for model_tag in ["unibind", "robustbind2", "robustbind4"]:
+    #         if model_tag == "unibind":
+    #             lora_path = None
+    #         elif model_tag == "robustbind2":
+    #             lora_path = LORA_WEIGHTS["robustbind2"]
+    #         elif model_tag == "robustbind4":
+    #             lora_path = LORA_WEIGHTS["robustbind4"]
+    #         else:
+    #             continue
+    #         configs.append((eps, model_tag, lora_path))
+    
     for eps in [2, 4]:
-        for model_tag in ["unibind", "robustbind2", "robustbind4"]:
+        for model_tag in ["unibind"]:
             if model_tag == "unibind":
                 lora_path = None
             elif model_tag == "robustbind2":
