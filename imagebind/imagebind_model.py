@@ -419,7 +419,6 @@ class ImageBindClassifier(nn.Module):
 
         modality_heads[ModalityType.VISION] = nn.Sequential(
             nn.LayerNorm(normalized_shape=vision_embed_dim, eps=1e-6),
-            SelectElement(index=0),
             nn.Linear(vision_embed_dim, out_embed_dim, bias=False),
         )
 
@@ -498,13 +497,12 @@ class ImageBindClassifier(nn.Module):
                 trunk_inputs = modality_value["trunk"]
                 head_inputs = modality_value["head"]
                 modality_value = self.modality_trunks[modality_key](**trunk_inputs)
-                if not only_cls and modality_key != ModalityType.POINT:
-                    outputs[modality_key] = modality_value  # [B, N, D]
-                    continue
-                
-                modality_value = self.modality_heads[modality_key](
-                    modality_value, **head_inputs
-                )
+                modality_value = self.modality_heads[modality_key][0](modality_value)
+
+                if only_cls:
+                    modality_value = modality_value[:, 0]
+
+                modality_value = self.modality_heads[modality_key][1](modality_value)
                 modality_value = self.modality_postprocessors[modality_key](
                     modality_value
                 )

@@ -3,15 +3,17 @@ from imagebind.imagebind_model import ModalityType
 import argparse
 from utils.utils import load_centre_embeddings
 from model import UniBind
+from shared_types import Modality
 from utils.data_transform import load_and_transform_vision_data
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     parser = argparse.ArgumentParser("")
     parser.add_argument("--pretrain_weights", type=str, default='./ckpts/pretrained_weights.pt', required=False)
-    parser.add_argument("--modality", type=str, default='image', required=False)
+    parser.add_argument("--modality", type=str, default="image", required=False)
     parser.add_argument("--centre_embeddings_path", type=str, default='./centre_embs/image_in_center_embeddings.pkl', required=False)
     args = parser.parse_args()
+    args.modality = Modality(args.modality)
 
     model = UniBind(args)
     model.to(device)
@@ -22,6 +24,9 @@ if __name__ == '__main__':
         ModalityType.VISION: load_and_transform_vision_data(images, device),
     }
     visual_embeddings = model.encode_vision(inputs)
+    visual_embeddings_tokens = model.encode_vision(inputs, only_cls=False)
+    print(f"Visual embeddings CLS token shape: {visual_embeddings.shape}")
+    print(f"Visual embeddings all tokens shape: {visual_embeddings_tokens.shape}")
     logic = (visual_embeddings @ centre_embeddings.t()).softmax(dim=-1)
     predictions = []
     for i in range(logic.shape[0]):

@@ -110,8 +110,8 @@ def main():
     parser.add_argument("--projector_weight", required=True)
     parser.add_argument("--image_root", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--max_samples", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--max_samples", type=int, default=5000)
+    parser.add_argument("--batch_size", type=int, default=200)
     args = parser.parse_args()
 
     torch.distributed.init_process_group("nccl")
@@ -126,26 +126,26 @@ def main():
     # model_tags = ["unibind", "robustbind2", "robustbind4"]
     model_tags = ["unibind"]
     settings = [
-        # {
-        #     "name": "clean",
-        #     "val_json_template": "datasets/VQA2/val_data_filtered.json",
-        #     "use_random_image": False
-        # },
+        {
+            "name": "clean",
+            "val_json_template": "datasets/VQA2/val_data.json",
+            "use_random_image": False
+        },
         # {
         #     "name": "random",
         #     "val_json_template": "datasets/VQA2/val_data_filtered.json",
         #     "use_random_image": True
         # },
-        {
-            "name": "eps2",
-            "val_json_template": "datasets/VQA2/val_data_adv_eps2_{model_tag}.json",
-            "use_random_image": False
-        },
-        {
-            "name": "eps4",
-            "val_json_template": "datasets/VQA2/val_data_adv_eps4_{model_tag}.json",
-            "use_random_image": False
-        },
+        # {
+        #     "name": "eps2",
+        #     "val_json_template": "datasets/VQA2/val_data_adv_eps2_{model_tag}.json",
+        #     "use_random_image": False
+        # },
+        # {
+        #     "name": "eps4",
+        #     "val_json_template": "datasets/VQA2/val_data_adv_eps4_{model_tag}.json",
+        #     "use_random_image": False
+        # },
     ]
 
     lora_weights_map = {

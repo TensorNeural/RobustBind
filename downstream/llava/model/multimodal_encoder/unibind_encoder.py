@@ -106,53 +106,10 @@ class UniBindVisionTower(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         if not self.is_loaded:
             raise RuntimeError("UniBind model is not loaded. Call `load_model()` first.")
-        
-        # BatchSize, Channels, Height, Width
-        B, C, H, W = images.shape
-        assert H % GRID_SIZE == 0 and W % GRID_SIZE == 0, \
-            f"H and W must be divisible by GRID_SIZE={GRID_SIZE}"
-        
-        # Patchify + resize
-        # [BatchSize * PATCH_COUNT, Channels, UNIBIND_IMAGE_SIZE, UNIBIND_IMAGE_SIZE]
-        patches = self.patchify_and_resize(images)
         modality_key = MODALITY_MAP[Modality.IMAGE]
-
-        # [BatchSize * PATCH_COUNT, EMBEDDING_DIM]
-        patch_embeddings = self.unibind.encode_vision_with_mlp({modality_key: patches})
-
-        # PATCH_COUNT
-        N = patches.size(0) // B
-
-        # [BatchSize, PATCH_COUNT, EMBEDDING_DIM]
-        patch_embeddings = patch_embeddings.view(B, N, -1)
-
-        # [BatchSize, EMBEDDING_DIM]
-        # image_global_embeddings = self.unibind.encode_vision_with_mlp({modality_key: images})
-        # [BatchSize, 1, EMBEDDING_DIM]
-        # cls = image_global_embeddings.unsqueeze(1)
-
-        # [BatchSize, PATCH_COUNT+1, EMBEDDING_DIM]
-        # return torch.cat([cls, patch_embeddings], dim=1)
-        return torch.cat([patch_embeddings], dim=1)
-
-    def patchify_and_resize(self, images: torch.Tensor, grid_size: int = GRID_SIZE, target_size: int = UNIBIND_IMAGE_SIZE):
-        # BatchSize, Channels, Height, Width
-        B, C, H, W = images.shape
-        patch_H = H // grid_size
-        patch_W = W // grid_size
-        assert H % grid_size == 0 and W % grid_size == 0, "H and W must be divisible by grid_size"
-        # [BatchSize, Channels, grid_size, grid_size, patch_H, patch_W]
-        patches = images.unfold(2, patch_H, patch_H).unfold(3, patch_W, patch_W)
-
-        # [BatchSize, grid_size, grid_size, Channels, patch_H, patch_W]
-        patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous()
-
-        # [BatchSize * PATCH_COUNT, Channels, patch_H, patch_W]
-        patches = patches.view(B * grid_size * grid_size, C, patch_H, patch_W)
-
-        # [BatchSize * PATCH_COUNT, Channels, target_size, target_size]
-        patches = F.interpolate(patches, size=(target_size, target_size), mode="bicubic", align_corners=False)
-        return patches
+        patch_embeddings = self.unibind.encode_vision_with_mlp({modality_key: images}, only_cls=False)
+        # Output shape: [B, N, 1024]
+        return patch_embeddings
 
     @property
     def dtype(self):

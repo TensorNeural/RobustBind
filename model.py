@@ -154,23 +154,23 @@ class UniBind(nn.Module):
             self.logger.info(f"[UniBind init] Loading MLP submodules from '{fine_tuned_weights}'...")
             self.load_fine_tuned_weights(fine_tuned_weights)
 
-    def forward(self, inputs):
+    def forward(self, inputs, only_cls=True):
         if self.modality == Modality.IMAGE:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_image(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.VIDEO:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_video(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.AUDIO:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_audio(outputs[ImageBindModalityType.AUDIO])
@@ -184,7 +184,7 @@ class UniBind(nn.Module):
             else:
                 vision_embeddings = outputs[ImageBindModalityType.THERMAL]
         elif self.modality == Modality.EVENT:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_event(outputs[ImageBindModalityType.VISION])
@@ -194,7 +194,7 @@ class UniBind(nn.Module):
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
             pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
             pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
-            outputs = self.__bind({ImageBindModalityType.TEXT: inputs['text']})
+            outputs = self.__bind({ImageBindModalityType.TEXT: inputs['text']}, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_point(pc_embeddings)
@@ -205,21 +205,21 @@ class UniBind(nn.Module):
         vision_embeddings = vision_embeddings / vision_embeddings.norm(dim=-1, keepdim=True)
         return text_embeddings, vision_embeddings
 
-    def encode_vision(self, inputs):
+    def encode_vision(self, inputs, only_cls=True):
         if self.modality == Modality.IMAGE:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.VIDEO:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.AUDIO:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             vision_embeddings = outputs[ImageBindModalityType.AUDIO]
         elif self.modality == Modality.THERMAL:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             vision_embeddings = outputs[ImageBindModalityType.THERMAL]
         elif self.modality == Modality.EVENT:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.POINT:
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
@@ -228,33 +228,33 @@ class UniBind(nn.Module):
 
         return vision_embeddings / vision_embeddings.norm(dim=-1, keepdim=True)
 
-    def encode_vision_with_mlp(self, inputs):
+    def encode_vision_with_mlp(self, inputs, only_cls=True):
         if self.modality == Modality.IMAGE:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_image(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.VIDEO:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_video(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.AUDIO:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_audio(outputs[ImageBindModalityType.AUDIO])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.AUDIO]
         elif self.modality == Modality.THERMAL:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_thermal(outputs[ImageBindModalityType.THERMAL])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.THERMAL]
         elif self.modality == Modality.EVENT:
-            outputs = self.__bind(inputs)
+            outputs = self.__bind(inputs, only_cls)
             if self.use_fine_tune:
                 vision_embeddings = self.mlp_for_event(outputs[ImageBindModalityType.VISION])
             else:
@@ -301,8 +301,8 @@ class UniBind(nn.Module):
         self.logger.info(f"[save_lora_weights] Saving LoRA weights to '{checkpoint_path}'...")
         save_lora_weights(self.backbone, checkpoint_path)
 
-    def __bind(self, inputs):
-        return self.backbone.bind(inputs)
+    def __bind(self, inputs, only_cls=True):
+        return self.backbone.bind(inputs, only_cls)
 
 def init_linear_as_identity(linear_layer):
     assert linear_layer.in_features == linear_layer.out_features
@@ -371,11 +371,11 @@ class UniBindClassifier(Model):
             mask = F.one_hot(self.centre_label_indices, num_classes=self.num_classes).T.bool()
             self.register_buffer("centre_class_mask", mask)
     
-    def forward(self, x, mode: ForwardMode):
+    def forward(self, x, mode: ForwardMode, only_cls=True):
         if mode == ForwardMode.EMBEDDINGS:
-            return self._encode(x)
+            return self._encode(x, only_cls=only_cls)
         elif mode == ForwardMode.LOGITS:
-            return self._logits(x)
+            return self._logits(x, only_cls=only_cls)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
@@ -392,16 +392,16 @@ class UniBindClassifier(Model):
         input_dict = {ModalityType.TEXT: x}
         return self.unibind.encode_text(input_dict)
 
-    def _logits(self, x, temperature=1000.0):
-        embeddings = self._encode(x)
+    def _logits(self, x, temperature=1000.0, only_cls=True):
+        embeddings = self._encode(x, only_cls=only_cls)
         similarity = embeddings @ self.centre_embeddings.t()
         logits = self._compute_class_logits(similarity, temperature)
         return logits, similarity
 
-    def _encode(self, x):
+    def _encode(self, x, only_cls=True):
         modality = MODALITY_MAP[self.modality]
         inp_dict = {modality: x}
-        emb = self.unibind.encode_vision_with_mlp(inp_dict)
+        emb = self.unibind.encode_vision_with_mlp(inp_dict, only_cls=only_cls)
         return emb / emb.norm(dim=-1, keepdim=True)
     
     def save_lora_weights(self, path: str):
