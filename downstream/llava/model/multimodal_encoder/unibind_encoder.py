@@ -14,8 +14,6 @@ from model import UniBind
 INPUT_IMAGE_SIZE = 336
 # Match ViT-L 14
 PATCH_SIZE = 14
-GRID_SIZE = INPUT_IMAGE_SIZE // PATCH_SIZE
-EMBEDDING_DIM = 1024
 
 UNIBIND_IMAGE_SIZE = 224
 
@@ -94,11 +92,11 @@ class UniBindVisionTower(nn.Module):
             ),
             use_flash_attention=True,
             use_lora=self.args.use_lora,
-            use_fine_tune=False,
+            use_modality_head_mlp=False,
             lora_rank=self.args.lora_rank,
             lora_alpha=self.args.lora_alpha,
             lora_weights=self.args.lora_weights,
-            fine_tuned_weights=None
+            modality_head_mlp_weights=None
         )
         self.is_loaded = True
 

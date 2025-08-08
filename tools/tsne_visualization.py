@@ -127,7 +127,7 @@ def build_model(device, pretrain_weights, modality, label_to_index, centre_embed
         centre_labels=centre_labels,
         label_to_index=label_to_index,
         use_flash_attention=use_flash_attention,
-        use_fine_tune=True,
+        use_modality_head_mlp=False,
         use_lora=(lora_weights is not None),
         lora_weights=lora_weights
     )

@@ -10,7 +10,7 @@ UNIBIND_WEIGHTS="ckpts/pretrained_weights_flash_atten.pt"
 OUTPUT_DIR="output/llava"
 
 # === Training params ===
-BATCH_SIZE=4
+BATCH_SIZE=200
 NUM_WORKERS=2
 
 # === Launch training ===

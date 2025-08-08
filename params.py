@@ -34,7 +34,7 @@ def find_lr(
         index_to_label=idx_to_lbl,
         logger=logger,
         use_flash_attention=use_flash_attention,
-        fine_tuned_weights=None
+        modality_head_mlp_weights=None
     )
     model_original.to(device)
 
@@ -50,7 +50,7 @@ def find_lr(
         logger=logger,
         use_flash_attention=use_flash_attention,
         use_lora=True,
-        use_fine_tune=False,
+        use_modality_head_mlp=False,
         fine_tuned_weights=None,
     )
     model_train.to(device)

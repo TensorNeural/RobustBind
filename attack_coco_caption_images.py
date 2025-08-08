@@ -24,13 +24,13 @@ class UniBindModel(Model):
         self.unibind = UniBind(
             SimpleNamespace(pretrain_weights=pretrain_weights, modality=Modality.IMAGE),
             use_flash_attention=True,
-            fine_tuned_weights=None,
+            modality_head_mlp_weights=None,
             lora_weights=lora_weights,
             logger=logger,
             use_lora=(lora_weights is not None),
             lora_rank=4,
             lora_alpha=8.0,
-            use_fine_tune=False
+            use_modality_head_mlp=False
         )
         self.modality_key = MODALITY_MAP[Modality.IMAGE]
 

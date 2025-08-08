@@ -57,13 +57,22 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
         label_to_index=lbl_to_idx,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
-        use_lora=True,
+        use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
-        use_fine_tune=False,
+        use_modality_head_mlp=False,
     ).to(device)
 
     model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
+    # === Control training mode ===
+    if args.use_full_finetune:
+        logger.info("[Mode] Full fine-tuning: unfreezing backbone, keeping MLP frozen")
+        model_train.module.unibind.unfreeze_backbone()
+    elif args.use_lora:
+        logger.info("[Mode] LoRA training: enabling LoRA params only")
+        model_train.module.unibind.enable_lora_training()
+    else:
+        logger.info("[Mode] Frozen model — no parameters will be trained")
 
     model_val = UniBindClassifier(
         device=device,
@@ -74,10 +83,10 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
         label_to_index=lbl_to_idx,
         logger=logger,
         use_flash_attention=args.use_flash_attention,
-        use_lora=True,
+        use_lora=args.use_lora,
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_alpha,
-        use_fine_tune=False
+        use_modality_head_mlp=False
     ).to(device)
     model_val.eval()
 
@@ -152,25 +161,37 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
             writer=writer
         )
 
-        # === Save LoRA weights (rank 0 only)
-        lora_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_lora.pt")
         if dist.get_rank() == 0:
-            model_train.module.save_lora_weights(lora_path)
+            if args.use_full_finetune:
+                ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_backbone_{args.model_type}.pt")
+                model_train.module.save_backbone(ckpt_path)
+            elif args.use_lora:
+                ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_lora_{args.model_type}.pt")
+                model_train.module.save_lora_weights(ckpt_path)
 
         torch.cuda.empty_cache()
         dist.barrier()
 
         # === Reinitialize model for validation modality and load weights
-        logger.info(f"[EPOCH {epoch + 1}] Loading LoRA weights for validation: {args.val_modality.upper()}")
-        model_val.load_lora_weights(lora_path)
+        logger.info(f"[EPOCH {epoch + 1}] Loading LoRA weights for validation: {args.model_type}")
+        if args.use_full_finetune:
+            logger.info(f"[EPOCH {epoch + 1}] Loading backbone weights for validation: {args.model_type}")
+            model_val.load_backbone(ckpt_path)
+        elif args.use_lora:
+            logger.info(f"[EPOCH {epoch + 1}] Loading LoRA weights for validation: {args.model_type}")
+            model_val.load_lora_weights(ckpt_path)
 
         acc = evaluate_robust_one_stage(logger, device, model_val, val_loader, eval_attack, val_mean, val_std)
         logger.info(f"[Epoch {epoch + 1}] robust acc on {args.val_modality.upper()} = {acc:.4f}")
 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
-            best_lora_path = os.path.join(args.output_dir, "best_lora_weights.pt")
-            shutil.copyfile(lora_path, best_lora_path)
+            if args.use_full_finetune:
+                best_ckpt_path = os.path.join(args.output_dir, f"best_backbone_weights_{args.model_type}.pt")
+            elif args.use_lora:
+                best_ckpt_path = os.path.join(args.output_dir, f"best_lora_weights_{args.model_type}.pt")
+
+            shutil.copyfile(ckpt_path, best_ckpt_path)
 
     writer.close()
     logger.info(f"Best robust accuracy: {best_acc:.4f}")
@@ -202,9 +223,7 @@ def main():
     parser.add_argument("--epsilon", type=int, default=4)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
     parser.add_argument('--use_full_finetune', action='store_true', default=True, help='Enable full fine-tuning (backbone + MLPs)')
-    parser.add_argument('--save_checkpoint',type=str, default="ckpts/full_fine_tune_{modality}.pt",
-        help='Checkpoint save path format, e.g. ckpts/unibind_{modality}.pt'
-    )
+    parser.add_argument("--use_lora", action="store_true", default=False, help="Enable LoRA adapter training instead of full fine-tuning")
     parser.add_argument("--tensorboard_data_dir", default="tensorboard")
     parser.add_argument("--output_dir", default="output")
     args = parser.parse_args()

@@ -94,7 +94,7 @@ def extract_worker(device_id, config):
             label_to_index=label_to_index,
             logger=None,
             use_flash_attention=use_flash,
-            use_fine_tune=True
+            use_modality_head_mlp=False
         ).to(device)
 
         selected_labels = set(label_shards[mod])

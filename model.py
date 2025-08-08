@@ -109,12 +109,12 @@ class Model(nn.Module):
         pass
 
 class UniBind(nn.Module):
-    def __init__(self, args, use_flash_attention=False, use_lora=False, lora_rank=4, lora_alpha=8, use_fine_tune=False, lora_weights=None, fine_tuned_weights=None, logger=None):
+    def __init__(self, args, use_flash_attention=False, use_lora=False, lora_rank=4, lora_alpha=8, use_modality_head_mlp=False, lora_weights=None, modality_head_mlp_weights=None, logger=None):
         super(UniBind, self).__init__()
         self.logger = logger or logging.getLogger(__name__)
 
         self.modality = args.modality
-        self.use_fine_tune = use_fine_tune
+        self.use_modality_head_mlp = use_modality_head_mlp
         self.backbone = PointBind_models.PointBind_I2PMAE(use_flash_attention=use_flash_attention, use_lora=use_lora, lora_rank=lora_rank, lora_alpha=lora_alpha)
 
         state_dict = torch.load(args.pretrain_weights, weights_only=True, map_location='cpu')
@@ -131,62 +131,65 @@ class UniBind(nn.Module):
         # Create modality-specific MLP
         if self.modality == Modality.IMAGE:
             self.mlp_for_image = init_linear_as_identity(nn.Linear(1024, 1024))
-            self.mlp_for_image.requires_grad_(use_fine_tune)
+            self.mlp_for_image.requires_grad_(use_modality_head_mlp)
         elif self.modality == Modality.VIDEO:
             self.mlp_for_video = init_linear_as_identity(nn.Linear(1024, 1024))
-            self.mlp_for_video.requires_grad_(use_fine_tune)
+            self.mlp_for_video.requires_grad_(use_modality_head_mlp)
         elif self.modality == Modality.AUDIO:
             self.mlp_for_audio = init_linear_as_identity(nn.Linear(1024, 1024))
-            self.mlp_for_audio.requires_grad_(use_fine_tune)
+            self.mlp_for_audio.requires_grad_(use_modality_head_mlp)
         elif self.modality == Modality.THERMAL:
             self.mlp_for_thermal = init_linear_as_identity(nn.Linear(1024, 1024))
-            self.mlp_for_thermal.requires_grad_(use_fine_tune)
+            self.mlp_for_thermal.requires_grad_(use_modality_head_mlp)
         elif self.modality == Modality.POINT:
             self.mlp_for_point = init_linear_as_identity(nn.Linear(1024, 1024))
-            self.mlp_for_point.requires_grad_(use_fine_tune)
+            self.mlp_for_point.requires_grad_(use_modality_head_mlp)
         elif self.modality == Modality.EVENT:
             self.mlp_for_event = init_linear_as_identity(nn.Linear(1024, 1024))
-            self.mlp_for_event.requires_grad_(use_fine_tune)
+            self.mlp_for_event.requires_grad_(use_modality_head_mlp)
         else:
             raise ValueError(f"Unsupported modality: {self.modality}")
 
-        if fine_tuned_weights is not None:
-            self.logger.info(f"[UniBind init] Loading MLP submodules from '{fine_tuned_weights}'...")
-            self.load_fine_tuned_weights(fine_tuned_weights)
+        if modality_head_mlp_weights is not None:
+            self.logger.info(f"[UniBind init] Loading MLP submodules from '{modality_head_mlp_weights}'...")
+            self.load_modality_head_mlp_weights(modality_head_mlp_weights)
+        
+        self.logger.info(f"[UniBind init] freeze all parameters")
+        self.freeze_all()
 
     def forward(self, inputs, only_cls=True):
         if self.modality == Modality.IMAGE:
             outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_image(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.VIDEO:
             outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_video(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.AUDIO:
             outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_audio(outputs[ImageBindModalityType.AUDIO])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.AUDIO]
         elif self.modality == Modality.THERMAL:
             outputs = self.__bind(inputs)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_thermal(outputs[ImageBindModalityType.THERMAL])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.THERMAL]
         elif self.modality == Modality.EVENT:
             outputs = self.__bind(inputs, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_event(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
@@ -196,7 +199,7 @@ class UniBind(nn.Module):
             pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
             outputs = self.__bind({ImageBindModalityType.TEXT: inputs['text']}, only_cls)
             text_embeddings = outputs[ImageBindModalityType.TEXT]
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_point(pc_embeddings)
             else:
                 vision_embeddings = pc_embeddings
@@ -231,31 +234,31 @@ class UniBind(nn.Module):
     def encode_vision_with_mlp(self, inputs, only_cls=True):
         if self.modality == Modality.IMAGE:
             outputs = self.__bind(inputs, only_cls)
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_image(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.VIDEO:
             outputs = self.__bind(inputs, only_cls)
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_video(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
         elif self.modality == Modality.AUDIO:
             outputs = self.__bind(inputs, only_cls)
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_audio(outputs[ImageBindModalityType.AUDIO])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.AUDIO]
         elif self.modality == Modality.THERMAL:
             outputs = self.__bind(inputs, only_cls)
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_thermal(outputs[ImageBindModalityType.THERMAL])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.THERMAL]
         elif self.modality == Modality.EVENT:
             outputs = self.__bind(inputs, only_cls)
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_event(outputs[ImageBindModalityType.VISION])
             else:
                 vision_embeddings = outputs[ImageBindModalityType.VISION]
@@ -263,7 +266,7 @@ class UniBind(nn.Module):
             pc_embeddings = self.backbone.encode_pc(inputs['point'])
             pc_embeddings = self.backbone.bind.modality_head_point(pc_embeddings)
             pc_embeddings = self.backbone.bind.modality_postprocessor_point(pc_embeddings)
-            if self.use_fine_tune:
+            if self.use_modality_head_mlp:
                 vision_embeddings = self.mlp_for_point(pc_embeddings)
             else:
                 vision_embeddings = pc_embeddings
@@ -274,23 +277,24 @@ class UniBind(nn.Module):
         text_embeddings = self.__bind(inputs)[ImageBindModalityType.TEXT]
         return text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
 
-    def save_fine_tuned_weights(self, checkpoint_path: str):
+    def save_modality_head_mlp_weights(self, checkpoint_path: str):
         mlps_dict = {}
         for mod, mlp_attr in MODALITY_TO_MLP.items():
             if hasattr(self, mlp_attr):
                 mlp_module = getattr(self, mlp_attr)
                 mlps_dict[mlp_attr] = mlp_module.state_dict()
-        torch.save(mlps_dict, checkpoint_path)
-        self.logger.info(f"[save_modality_mlps] Saved all MLP submodules to '{checkpoint_path}'.")
 
-    def load_fine_tuned_weights(self, checkpoint_path: str, map_location='cpu'):
+        torch.save(mlps_dict, checkpoint_path)
+        self.logger.info(f"[save_modality_head_mlp_weights] Saved all MLP submodules to '{checkpoint_path}'.")
+
+    def load_modality_head_mlp_weights(self, checkpoint_path: str, map_location='cpu'):
         mlps_dict = torch.load(checkpoint_path, weights_only=True, map_location=map_location)
         for mlp_attr, state_dict in mlps_dict.items():
             if hasattr(self, mlp_attr):
                 getattr(self, mlp_attr).load_state_dict(state_dict)
-                self.logger.info(f"[load_fine_tuned_weights] Loaded '{mlp_attr}' from '{checkpoint_path}'.")
+                self.logger.info(f"[load_modality_head_mlp_weights] Loaded '{mlp_attr}' from '{checkpoint_path}'.")
             else:
-                self.logger.warning(f"[load_fine_tuned_weights] This model has no '{mlp_attr}' attribute. Skipping.")
+                self.logger.warning(f"[load_modality_head_mlp_weights] This model has no '{mlp_attr}' attribute. Skipping.")
 
     def load_lora_weights(self, checkpoint_path: str):
         self.logger.info(f"[load_lora_weights] Loading LoRA weights from '{checkpoint_path}'...")
@@ -300,6 +304,46 @@ class UniBind(nn.Module):
     def save_lora_weights(self, checkpoint_path: str):
         self.logger.info(f"[save_lora_weights] Saving LoRA weights to '{checkpoint_path}'...")
         save_lora_weights(self.backbone, checkpoint_path)
+    
+    def freeze_all(self):
+        """Freeze all parameters in the model."""
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def unfreeze_backbone(self):
+        """
+        Unfreeze the entire backbone for training but keep modality-specific
+        MLPs frozen (they are for cross-modality alignment).
+        """
+        for n, p in self.backbone.named_parameters():
+            p.requires_grad = True
+
+        # Ensure modality-specific MLPs remain frozen
+        for mlp_attr in MODALITY_TO_MLP.values():
+            if hasattr(self, mlp_attr):
+                for p in getattr(self, mlp_attr).parameters():
+                    p.requires_grad = False
+
+    def enable_lora_training(self):
+        """
+        Enable training only for LoRA adapter parameters.
+        """
+        for n, p in self.named_parameters():
+            p.requires_grad = ("lora_down" in n or "lora_up" in n)
+
+    def unfreeze_all(self):
+        """Unfreeze all parameters, including modality-specific MLPs."""
+        for p in self.parameters():
+            p.requires_grad = True
+
+    def save_backbone(self, path: str):
+        """Save only the backbone weights (for full fine-tuning)."""
+        torch.save(self.backbone.state_dict(), path)
+
+    def load_backbone(self, path: str, strict: bool = True):
+        """Load only the backbone weights (for full fine-tuning)."""
+        sd = torch.load(path, map_location="cpu", weights_only=True)
+        self.backbone.load_state_dict(sd, strict=strict)
 
     def __bind(self, inputs, only_cls=True):
         return self.backbone.bind(inputs, only_cls)
@@ -328,9 +372,9 @@ class UniBindClassifier(Model):
         use_lora=False,
         lora_rank=4,
         lora_alpha=8,
-        use_fine_tune=False,
+        use_modality_head_mlp=False,
         lora_weights=None,
-        fine_tuned_weights=None,
+        modality_head_mlp_weights=None,
         use_masked_logsumexp=False,
     ):
         super().__init__()
@@ -341,13 +385,13 @@ class UniBindClassifier(Model):
         self.unibind = UniBind(
             SimpleNamespace(pretrain_weights=pretrain_weights, modality=modality),
             use_flash_attention=use_flash_attention,
-            fine_tuned_weights=fine_tuned_weights,
+            modality_head_mlp_weights=modality_head_mlp_weights,
             lora_weights=lora_weights,
             logger=self.logger,
             use_lora=use_lora,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
-            use_fine_tune=use_fine_tune,
+            use_modality_head_mlp=use_modality_head_mlp,
         )
 
         self.modality = modality
@@ -412,13 +456,13 @@ class UniBindClassifier(Model):
         self.logger.info(f"[load_lora_weights] Loading LoRA weights from '{path}'...")
         self.unibind.load_lora_weights(path)
 
-    def save_fine_tuned_weights(self, path: str):
-        self.logger.info(f"[save_fine_tuned_weights] Saving fine tuned weights to '{path}'...")
-        self.unibind.save_fine_tuned_weights(path)
+    def save_modality_head_mlp_weights(self, path: str):
+        self.logger.info(f"[save_modality_head_mlp_weights] Saving fine tuned weights to '{path}'...")
+        self.unibind.save_modality_head_mlp_weights(path)
 
-    def load_fine_tuned_weights(self, path: str):
-        self.logger.info(f"[load_fine_tuned_weights] Loading fine tuned weights from '{path}'...")
-        self.unibind.load_fine_tuned_weights(path)
+    def load_modality_head_mlp_weights(self, path: str):
+        self.logger.info(f"[load_modality_head_mlp_weights] Loading fine tuned weights from '{path}'...")
+        self.unibind.load_modality_head_mlp_weights(path)
     
     def _compute_class_logits(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
         if self.use_masked_logsumexp:
