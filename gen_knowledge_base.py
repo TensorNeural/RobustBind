@@ -9,12 +9,12 @@ import argparse
 import multiprocessing as mp
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from PIL import Image
 import numpy as np
 
 from google import genai
@@ -76,73 +76,203 @@ def guess_mime_type(modality: str, file_path: Path) -> str:
 
 
 # ==========================================================
-# Event rendering
+# Event rendering (EventBind-style frames: pos→cyan, neg→yellow)
 # ==========================================================
 
-def render_event_npz_to_png(event_abs_path: Path) -> Path:
-    data = np.load(str(event_abs_path))
+def read_events_from_bin(path: Path):
+    with open(path, "rb") as f:
+        buf = f.read()
+
+    n = len(buf) // 5
+    if n == 0:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    raw = np.frombuffer(buf, dtype=np.uint8, count=n * 5).reshape(-1, 5)
+    x = raw[:, 0].astype(np.uint32)
+    y = raw[:, 1].astype(np.uint32)
+    p = ((raw[:, 2] >> 7) & 1).astype(np.uint8)
+    t = (((raw[:, 2] & 0x7F).astype(np.uint32) << 16) |
+         (raw[:, 3].astype(np.uint32) << 8) |
+          raw[:, 4].astype(np.uint32))
+    return x, y, p, t
+
+def read_events_from_npz(path: Path):
+    data = np.load(str(path))
     if "event_data" in data:
         ev = data["event_data"]
-        xs, ys, ps = ev["x"], ev["y"], ev["p"]
+        x = ev["x"].astype(np.uint32)
+        y = ev["y"].astype(np.uint32)
+        p = (ev["p"] > 0).astype(np.uint8)
+        t = ev["t"].astype(np.uint32) if "t" in ev.dtype.names else np.arange(len(x), dtype=np.uint32)
     else:
-        xs, ys, ps = data["x"], data["y"], data["p"]
+        x = data["x"].astype(np.uint32)
+        y = data["y"].astype(np.uint32)
+        p = (data["p"] > 0).astype(np.uint8)
+        t = data["t"].astype(np.uint32) if "t" in data.files else np.arange(len(x), dtype=np.uint32)
+    return x, y, p, t
 
-    xs_norm = (xs - xs.min()) / max(xs.max() - xs.min(), 1e-5) * 223
-    ys_norm = (ys - ys.min()) / max(ys.max() - ys.min(), 1e-5) * 223
+def _eventbind_colorize(pos: np.ndarray, neg: np.ndarray, gain: float = 1.5, gamma: float = 0.8) -> np.ndarray:
+    """
+    EventBind Eq.(8) mapping with optional gain/gamma to improve visibility:
+      R = neg, G = pos + neg, B = pos  (scaled 0..255)
+    """
+    pmax = float(pos.max()) if pos.size and pos.max() > 0 else 1.0
+    nmax = float(neg.max()) if neg.size and neg.max() > 0 else 1.0
+    p = np.power(np.clip(pos / pmax, 0, 1) * gain, gamma)
+    n = np.power(np.clip(neg / nmax, 0, 1) * gain, gamma)
 
-    fig = plt.figure(figsize=(2.24, 2.24), dpi=100)
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.scatter(xs_norm[ps > 0], ys_norm[ps > 0], c="b", s=0.1)
-    ax.scatter(xs_norm[ps <= 0], ys_norm[ps <= 0], c="r", s=0.1)
-    ax.set_xlim(0, 224)
-    ax.set_ylim(0, 224)
-    ax.set_axis_off()
-    ax.invert_yaxis()
+    R = n * 255.0
+    G = (p + n).clip(0, 1) * 255.0
+    B = p * 255.0
+    return np.stack([R, G, B], axis=-1).clip(0, 255).astype(np.uint8)
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-    plt.savefig(tmp.name, dpi=100, transparent=True)
-    plt.close(fig)
-    return Path(tmp.name)
+def _accumulate_histogram(x, y, p, H, W):
+    pos = np.zeros((H, W), dtype=np.float32)
+    neg = np.zeros((H, W), dtype=np.float32)
+    mpos = (p == 1)
+    if np.any(mpos):
+        np.add.at(pos, (y[mpos], x[mpos]), 1.0)
+    if np.any(~mpos):
+        np.add.at(neg, (y[~mpos], x[~mpos]), 1.0)
+    return pos, neg
+
+def _normalize_coords(x, y, size):
+    x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+    y = ((y - y.min()) / (y.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+    return x, y
+
+def render_event_to_frames(event_abs_path: Path, target_size: int = 224, T: int = 8,
+                           group_by: str = "time") -> List[Path]:
+    """
+    Read .bin or .npz and render ALL frames (frame_000.png ..) to temp files.
+    - EventBind colorization: pos→cyan, neg→yellow
+    - group_by='time': split by normalized timestamps into T equal bins (default)
+    Returns list of frame PNG Paths.
+    """
+    ext = event_abs_path.suffix.lower()
+    if ext == ".bin":
+        x, y, p, t = read_events_from_bin(event_abs_path)
+    elif ext == ".npz":
+        x, y, p, t = read_events_from_npz(event_abs_path)
+    else:
+        return []
+
+    if len(x) == 0:
+        # still produce a single empty frame to keep pipeline consistent
+        tmp = Path(tempfile.NamedTemporaryFile(suffix=".png", delete=False).name)
+        Image.fromarray(np.zeros((target_size, target_size, 3), dtype=np.uint8)).save(tmp, format="PNG", compress_level=6)
+        return [tmp]
+
+    # Sort temporally
+    order = np.argsort(t, kind="stable")
+    x, y, p, t = x[order], y[order], p[order], t[order]
+
+    # Build at supersampled grid for clarity, then downsample
+    supersample = 3
+    ssz = target_size * supersample
+    x_ss, y_ss = _normalize_coords(x, y, ssz)
+
+    frame_paths: List[Path] = []
+    if group_by == "time":
+        t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+        edges = np.linspace(0.0, 1.0, T + 1, dtype=np.float32)
+        fidx = 0
+        for i in range(T):
+            m = (t_norm >= edges[i]) & (t_norm < edges[i + 1])
+            if not np.any(m):
+                continue
+            pos, neg = _accumulate_histogram(x_ss[m], y_ss[m], p[m], ssz, ssz)
+            rgb_hi = _eventbind_colorize(pos, neg, gain=1.5, gamma=0.8)
+            img = Image.fromarray(rgb_hi, mode="RGB").resize((target_size, target_size), Image.LANCZOS)
+
+            tmp = Path(tempfile.NamedTemporaryFile(suffix=".png", delete=False).name)
+            img.save(tmp, format="PNG", compress_level=6)
+            frame_paths.append(tmp)
+            fidx += 1
+    else:
+        # future: count-based grouping can be added if needed
+        return render_event_to_frames(event_abs_path, target_size=target_size, T=T, group_by="time")
+
+    # If no non-empty bins (extreme edge case), at least one empty
+    if not frame_paths:
+        tmp = Path(tempfile.NamedTemporaryFile(suffix=".png", delete=False).name)
+        Image.fromarray(np.zeros((target_size, target_size, 3), dtype=np.uint8)).save(tmp, format="PNG", compress_level=6)
+        frame_paths = [tmp]
+
+    return frame_paths
 
 
 # ==========================================================
 # Gemini call with label hint + backoff (DI: client passed in)
 # ==========================================================
 
-def gemini_describe(client: genai.Client, file_abs_path: Path, modality: str, model: str,
-                    logger: logging.Logger, label: Optional[str] = None):
-    if label:
-        prompt = (
-            f"This {modality} belongs to the class '{label}'. "
-            f"Provide a concise, factual description of the main content in this {modality}. "
-            "Start directly with the subject matter without phrases like "
-            "'This image shows', 'This audio recording features', 'The audio features' or 'The video contains'. "
-            "Describe the content with as much detail as possible."
-            "Don't include unncessary words or phrases which is unrelated to the content directly"
-            "Use 1 short, clear sentence and focus only on relevant details."
-        )
+def _build_event_prompt(label: Optional[str], num_frames: int) -> str:
+    label_part = f"This event sample belongs to the class '{label}'. " if label else ""
+    # Special prompt explaining rendering so Gemini knows what it's looking at.
+    return (
+        f"{label_part}"
+        "You are given a sequence of event frames rendered from a neuromorphic event stream. "
+        "Frames are constructed by partitioning the timeline into equal temporal bins and aggregating per-pixel event counts. "
+        "Colorization follows the EventBind mapping: positive events are mapped to cyan (green+blue channels), "
+        "negative events to yellow (red+green channels); brighter colors indicate higher event density. "
+        f"There are {num_frames} frames in temporal order. "
+        "Describe the persistent scene/content succinctly, focusing on stable structure across frames. "
+        "Start directly (no 'This image shows...'). Use one short, precise sentence."
+    )
+
+def gemini_describe(client: genai.Client,
+                    files: Union[Path, List[Path]],
+                    modality: str,
+                    model: str,
+                    logger: logging.Logger,
+                    label: Optional[str] = None):
+    """
+    If `files` is a Path: single-file behavior (old flow).
+    If `files` is a list[Path] (event): upload all frames + special prompt.
+    """
+    is_multi = isinstance(files, list)
+    parts = []
+    total_bytes = 0
+
+    if is_multi:
+        # Build parts for each frame
+        for fp in files:
+            bs = read_file_bytes(fp)
+            total_bytes += len(bs)
+            parts.append(types.Part.from_bytes(data=bs, mime_type="image/png"))
+
+        prompt = _build_event_prompt(label, num_frames=len(files))
+        contents = parts + [prompt]
+
     else:
-        prompt = (
-            f"Provide a concise, factual description of the main content in this {modality}. "
-            "Start directly with the subject matter without phrases like "
-            "'This image shows', 'This audio recording features', 'The audio features' or 'The video contains'. "
-            "Describe the content with as much detail as possible."
-            "Don't include unncessary words or phrases which is unrelated to the content directly"
-            "Use 1 short, clear sentence and focus only on relevant details."
-        )
+        file_abs_path: Path = files
+        file_size = file_abs_path.stat().st_size
+        mime_type = guess_mime_type(modality, file_abs_path)
 
-    file_size = file_abs_path.stat().st_size
-    mime_type = guess_mime_type(modality, file_abs_path)
+        if file_size <= 20 * 1024 * 1024:
+            part = types.Part.from_bytes(data=read_file_bytes(file_abs_path), mime_type=mime_type)
+            contents = [part]
+        else:
+            uploaded = client.files.upload(file=str(file_abs_path))
+            contents = [uploaded]
 
-    t0_upload = time.perf_counter()
-    if file_size <= 20 * 1024 * 1024:
-        part = types.Part.from_bytes(data=read_file_bytes(file_abs_path), mime_type=mime_type)
-        contents = [part, prompt]
-    else:
-        uploaded = client.files.upload(file=str(file_abs_path))
-        contents = [uploaded, prompt]
-    upload_latency = time.perf_counter() - t0_upload
+        # Use generic (non-event) prompt wording
+        if label:
+            prompt = (
+                f"This {modality} belongs to the class '{label}'. "
+                f"Provide a concise, factual description of the main content in this {modality}. "
+                "Start directly without phrases like 'This image shows' or 'This video contains'. "
+                "Use one short, precise sentence focused only on relevant details."
+            )
+        else:
+            prompt = (
+                f"Provide a concise, factual description of the main content in this {modality}. "
+                "Start directly without phrases like 'This image shows' or 'This video contains'. "
+                "Use one short, precise sentence focused only on relevant details."
+            )
+        contents.append(prompt)
 
+    # Call model
     t0_predict = time.perf_counter()
     resp = client.models.generate_content(
         model=model,
@@ -155,13 +285,17 @@ def gemini_describe(client: genai.Client, file_abs_path: Path, modality: str, mo
 
     description = (getattr(resp, "text", None) or "").strip()
 
-    logger.info(f"OK | {file_abs_path} | label='{label}' | upload={upload_latency:.3f}s | predict={predict_latency:.3f}s")
+    # Logging
+    if is_multi:
+        logger.info(f"OK | {len(files)} event frames | label='{label}' | predict={predict_latency:.3f}s")
+    else:
+        logger.info(f"OK | {files} | label='{label}' | predict={predict_latency:.3f}s")
 
     usage_info = {
         "model": model,
         "created_at": datetime.utcnow().isoformat(),
-        "upload_latency_sec": round(upload_latency, 4),
-        "predict_latency_sec": round(predict_latency, 4)
+        "predict_latency_sec": round(predict_latency, 4),
+        "num_frames": len(files) if is_multi else 1
     }
     return description, usage_info
 
@@ -182,29 +316,39 @@ def describe_one(client: genai.Client, entry: Tuple[int, dict], dataset_root: Pa
     label = payload.get("label", "")
     abs_path = dataset_root / rel_path
 
-    working_path = abs_path
-    if modality == "event" and abs_path.suffix.lower() == ".npz":
-        if abs_path.exists():
-            working_path = render_event_npz_to_png(abs_path)
-        else:
+    # Prepare media
+    if modality == "event":
+        if not abs_path.exists():
             logger.error(f"Missing event file | {abs_path}")
             return None
+        
+        frame_paths = render_event_to_frames(abs_path, target_size=224, T=8, group_by="time")
+        if not frame_paths:
+            logger.error(f"Failed to render event frames | {abs_path}")
+            return None
 
-    if not working_path.exists():
-        logger.error(f"Missing media file | {working_path}")
-        return None
+        files_for_model = frame_paths  # include ALL frames
 
+    else:
+        # other modalities: just pass through original file
+        files_for_model = abs_path
+        if not abs_path.exists():
+            logger.error(f"Missing media file | {abs_path}")
+            return None
+
+    # Inference with retries
     max_tries = 5
     for attempt in range(max_tries):
         try:
-            return idx, rel_path, label, *gemini_describe(client, working_path, modality, model, logger, label)
+            desc_txt, usage = gemini_describe(client, files_for_model, modality, model, logger, label)
+            return idx, rel_path, label, desc_txt, usage
+        
         except Exception as e:
             logger.warning(f"Retry {attempt+1}/{max_tries} after error: {e}")
             time.sleep((2 ** attempt) + random.uniform(0, 0.5))
 
-    logger.error(f"Max retries exceeded | {working_path}")
+    logger.error(f"Max retries exceeded | {abs_path}")
     return None
-
 
 def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, modality: str, model: str,
                     limit: Optional[int], num_threads: int, num_shards: int, shard_index: int, shard_dir: Path):
@@ -248,6 +392,8 @@ def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, m
 
 def merge_shards(json_path: Path, modality: str, num_shards: int, output_base: Path):
     stem = f"{json_path.parent.name}_{modality}"
+    print(f"[INFO] Merging {num_shards} shards for {stem}...")
+
     parts, parts_meta = [], []
 
     for i in range(num_shards):
@@ -267,8 +413,8 @@ def merge_shards(json_path: Path, modality: str, num_shards: int, output_base: P
     merged = [item for part in parts for item in part]
     merged_meta = [item for part in parts_meta for item in part]
 
-    save_output_json(output_base / f"{stem}_align.json", merged)
-    save_output_json(output_base / f"{stem}_align_meta.json", merged_meta)
+    save_output_json(json_path.parent / f"train_data_align.json", merged)
+    save_output_json(json_path.parent / f"train_data_align_meta.json", merged_meta)
 
 
 # ==========================================================
@@ -294,14 +440,16 @@ def main():
     parser.add_argument("--model", default="gemini-2.5-flash-lite")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--skip_modalities", nargs="*", default=[
-        # "image", 
-        # "audio",
-        # "thermal", 
-        # "video", 
+        "image",
+        "audio",
+        "thermal",
+        "video",
         "event"
         ])
     parser.add_argument("--per_process_threads", type=int, default=1)
     parser.add_argument("--max_cores", type=int, default=None)
+
+    parser.add_argument("--event_frames", type=int, default=8, help="Number of temporal bins for event rendering.")
     args = parser.parse_args()
 
     run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -316,7 +464,7 @@ def main():
         ("audio",  "ESC-50"),
         ("thermal", "LLVIP"),
         ("video",  "MSR-VTT"),
-        ("event",  "N-ImageNet-1K"),
+        ("event",  "N-Caltech-101"),
     ]
     mapping = [m for m in mapping if m[0] not in args.skip_modalities]
 
