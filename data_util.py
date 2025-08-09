@@ -101,7 +101,6 @@ def get_transform_fn(modality, minSample=False, model_type=None):
         Modality.TEXT: load_and_transform_text,
         Modality.IMAGE: load_and_transform_vision_data,
         Modality.EVENT: load_and_transform_event_data,
-        # Modality.EVENT: load_and_transform_vision_data,
         Modality.THERMAL: load_and_transform_thermal_data(model_type=model_type),
         Modality.VIDEO: load_and_transform_video_data(minSample=minSample, model_type=model_type),
         Modality.AUDIO: load_and_transform_audio_data(model_type),
@@ -472,34 +471,6 @@ def split_events_temporally(events, num_bins):
     events = events[events[:, 2].argsort()]
     return torch.tensor_split(events, num_bins)
 
-def render_event_frame_gpu(events: torch.Tensor, H: int, W: int, device: torch.device):
-    x = events[:, 0].clamp(0, W - 1).long()
-    y = events[:, 1].clamp(0, H - 1).long()
-    p = events[:, 3].long()
-
-    h_pos = torch.zeros((H, W), dtype=torch.float32, device=device)
-    h_neg = torch.zeros((H, W), dtype=torch.float32, device=device)
-
-    pos_mask = p > 0
-    neg_mask = ~pos_mask
-
-    indices_pos = y[pos_mask] * W + x[pos_mask]
-    indices_neg = y[neg_mask] * W + x[neg_mask]
-
-    h_pos.view(-1).index_add_(0, indices_pos, torch.ones_like(indices_pos, dtype=torch.float32, device=device))
-    h_neg.view(-1).index_add_(0, indices_neg, torch.ones_like(indices_neg, dtype=torch.float32, device=device))
-
-    h_pos /= h_pos.max().clamp(min=1e-6)
-    h_neg /= h_neg.max().clamp(min=1e-6)
-
-    rgb = torch.stack([
-        h_neg,                 # R
-        h_pos + h_neg,        # G
-        h_pos                 # B
-    ], dim=0)  # [3, H, W]
-
-    return rgb.clamp(0, 1)
-
 def _load_event_segment_cpu(path):
     try:
         events = load_event_file(path)
@@ -513,8 +484,74 @@ def _load_event_segment_cpu(path):
         print(f"[ERROR] Failed to read {path} — {e}")
         return None
 
+def load_and_transform_text(text, device):
+    if text is None:
+        return None
+    tokenizer = SimpleTokenizer(bpe_path=BPE_PATH)
+    tokens = [tokenizer(t).unsqueeze(0).to(device) for t in text]
+    tokens = torch.cat(tokens, dim=0)
+    return tokens
+
+def _eventbind_colorize_torch(h_pos: torch.Tensor, h_neg: torch.Tensor, gain=2.0, gamma=0.7):
+    """
+    h_pos, h_neg: [H, W] float32 >= 0
+    returns: [3, H, W] in [0,1]
+    """
+    pmax = torch.clamp(h_pos.max(), min=1e-6)
+    nmax = torch.clamp(h_neg.max(), min=1e-6)
+    p = torch.pow(torch.clamp(h_pos / pmax, 0, 1) * gain, gamma)
+    n = torch.pow(torch.clamp(h_neg / nmax, 0, 1) * gain, gamma)
+    r = n
+    g = torch.clamp(p + n, 0, 1)
+    b = p
+    return torch.stack([r, g, b], dim=0).clamp(0, 1)
+
+def _render_event_frames_eventbind(events: torch.Tensor, H: int, W: int, device: torch.device, T: int = 2):
+    """
+    events: [N, 4] -> x,y,t,p
+    returns: [T, 3, H, W] in [0,1]
+    """
+    if events.numel() == 0:
+        return torch.zeros((T, 3, H, W), dtype=torch.float32, device=device)
+
+    # sort by time and split into T bins
+    _, idx = torch.sort(events[:, 2])
+    ev_sorted = events[idx]
+    bins = torch.linspace(0, ev_sorted.shape[0], steps=T + 1, device=device).long()
+
+    frames = []
+    for i in range(T):
+        s, e = bins[i].item(), bins[i + 1].item()
+        seg = ev_sorted[s:e]
+        if seg.numel() == 0:
+            frames.append(torch.zeros((3, H, W), dtype=torch.float32, device=device))
+            continue
+
+        x = seg[:, 0].clamp(0, W - 1).long()
+        y = seg[:, 1].clamp(0, H - 1).long()
+        p = (seg[:, 3] > 0)
+
+        h_pos = torch.zeros((H, W), dtype=torch.float32, device=device)
+        h_neg = torch.zeros((H, W), dtype=torch.float32, device=device)
+
+        if p.any():
+            idx_pos = y[p] * W + x[p]
+            h_pos.view(-1).index_add_(0, idx_pos, torch.ones_like(idx_pos, dtype=torch.float32))
+        if (~p).any():
+            idx_neg = y[~p] * W + x[~p]
+            h_neg.view(-1).index_add_(0, idx_neg, torch.ones_like(idx_neg, dtype=torch.float32))
+
+        frames.append(_eventbind_colorize_torch(h_pos, h_neg))  # [3,H,W]
+
+    return torch.stack(frames, dim=0)  # [T,3,H,W]
+
 def load_and_transform_event_data(event_paths, device):
-    images = []
+    """
+    ImageBind-only.
+    Renders each event file into T=2 EventBind frames.
+    Output shape: [B, V=1, C=3, T=2, H=224, W=224]
+    """
+    samples = []
 
     for path in event_paths:
         result = _load_event_segment_cpu(path)
@@ -523,23 +560,31 @@ def load_and_transform_event_data(event_paths, device):
 
         segment, H, W = result
         segment = segment.to(device)
-        rgb_tensor = render_event_frame_gpu(segment, H, W, device)
-        img = transforms.ToPILImage()(rgb_tensor.cpu())
-        images.append(EVENT_TRANSFORM(img).to(device))
 
-    if not images:
-        print("[ERROR] All event files failed. Returning dummy.")
-        return torch.zeros((1, 3, 224, 224), device=device)
+        # Render [T=2, 3, H, W]
+        frames = _render_event_frames_eventbind(segment, H, W, device, T=2)
 
-    return torch.stack(images)
+        # Apply EVENT_TRANSFORM to each frame -> [T, 3, 224, 224]
+        frames_224 = []
+        for t in range(frames.shape[0]):
+            pil = transforms.ToPILImage()(frames[t].cpu())
+            frames_224.append(EVENT_TRANSFORM(pil).to(device))
+        frames_224 = torch.stack(frames_224, dim=0)  # [T,3,224,224]
 
-def load_and_transform_text(text, device):
-    if text is None:
-        return None
-    tokenizer = SimpleTokenizer(bpe_path=BPE_PATH)
-    tokens = [tokenizer(t).unsqueeze(0).to(device) for t in text]
-    tokens = torch.cat(tokens, dim=0)
-    return tokens
+        # Permute to [3, T, 224, 224] to match video channel/time order
+        frames_cthw = frames_224.permute(1, 0, 2, 3)  # [3,2,224,224]
+
+        # Add spatial crop dim V=1 -> [1, 3, 2, 224, 224]
+        frames_vcthw = frames_cthw.unsqueeze(0)
+
+        samples.append(frames_vcthw)
+
+    if not samples:
+        # Return dummy with shape [B=1, V=1, C=3, T=2, 224, 224]
+        return torch.zeros((1, 1, 3, 2, 224, 224), device=device)
+
+    # Stack into [B, 1, 3, 2, 224, 224]
+    return torch.stack(samples, dim=0)
 
 # ===================
 # Loader & Utility
@@ -579,7 +624,7 @@ def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBI
     if modality == Modality.IMAGE:
         return mean.view(1, 3, 1, 1), std.view(1, 3, 1, 1)
     elif modality == Modality.EVENT:
-        return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)
+        return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
     elif modality == Modality.POINT:
         return mean.view(1, 1, 3), std.view(1, 1, 3)
     elif modality == Modality.THERMAL:

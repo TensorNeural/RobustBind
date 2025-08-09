@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# File: prepare_n_imagenet_pngs.py
 
 import os
 import zipfile
@@ -9,6 +10,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import concurrent.futures
 from tqdm import tqdm
+from PIL import Image
+
+# =========================
+# Archive helpers (unchanged)
+# =========================
 
 def unzip_file(zip_path, extract_to):
     print(f"📦 Unzipping {os.path.basename(zip_path)} ...")
@@ -45,21 +51,33 @@ def move_class_folders_to_train(part_path, train_dir):
         for f in os.listdir(src_class):
             shutil.move(os.path.join(src_class, f), os.path.join(dst_class, f))
 
-def plot_event_image(event_path, output_path):
+# =========================
+# Scatter rendering (original Script 1)
+# =========================
+
+def _read_npz(path):
+    ev = np.load(path)
+    if "event_data" in ev:
+        xs, ys, ps = ev["event_data"]["x"], ev["event_data"]["y"], ev["event_data"]["p"]
+    else:
+        xs, ys, ps = ev["x"], ev["y"], ev["p"]
+    return xs.astype(np.float32), ys.astype(np.float32), (ps > 0)
+
+def plot_event_image_scatter(npz_path, output_path):
     try:
-        ev = np.load(event_path)
-        ev = ev['event_data']
-        xs, ys, ps = ev['x'], ev['y'], ev['p']
+        xs, ys, pos = _read_npz(npz_path)
+        if xs.size == 0:
+            return False
 
         x_min, x_max = xs.min(), xs.max()
         y_min, y_max = ys.min(), ys.max()
-        xs_norm = (xs - x_min) / max(x_max - x_min, 1e-5) * 223
-        ys_norm = (ys - y_min) / max(y_max - y_min, 1e-5) * 223
+        xs_norm = (xs - x_min) / max(x_max - x_min, 1e-5) * 223.0
+        ys_norm = (ys - y_min) / max(y_max - y_min, 1e-5) * 223.0
 
         fig = plt.figure(figsize=(2.24, 2.24), dpi=100)
         ax = fig.add_axes([0, 0, 1, 1])
-        ax.scatter(xs_norm[ps > 0], ys_norm[ps > 0], c='b', s=0.1)
-        ax.scatter(xs_norm[ps <= 0], ys_norm[ps <= 0], c='r', s=0.1)
+        ax.scatter(xs_norm[pos],  ys_norm[pos],  c='b', s=0.1)
+        ax.scatter(xs_norm[~pos], ys_norm[~pos], c='r', s=0.1)
         ax.set_xlim(0, 224)
         ax.set_ylim(0, 224)
         ax.set_axis_off()
@@ -68,68 +86,170 @@ def plot_event_image(event_path, output_path):
         plt.close()
         return True
     except Exception as e:
-        print(f"❌ Failed to render {event_path}: {e}")
+        tqdm.write(f"❌ Failed to render scatter {npz_path}: {e}")
         return False
 
-def convert_npz_to_png_in_dir(data_split_dir):
-    print(f"🎨 Processing .npz in: {data_split_dir}")
+# =========================
+# EventBind rendering
+# =========================
+
+def _eventbind_colorize(pos, neg, gain=2.0, gamma=0.7):
+    pmax = float(pos.max()) if pos.size and pos.max() > 0 else 1.0
+    nmax = float(neg.max()) if neg.size and neg.max() > 0 else 1.0
+    p = np.power(np.clip(pos / pmax, 0, 1) * gain, gamma)
+    n = np.power(np.clip(neg / nmax, 0, 1) * gain, gamma)
+    R = n * 255.0
+    G = (p + n).clip(0, 1) * 255.0
+    B = p * 255.0
+    return np.stack([R, G, B], axis=-1).clip(0, 255).astype(np.uint8)
+
+def render_eventbind_frames_from_npz(npz_path, out_dir, size=224, T=8,
+                                     group_by="time", total_events=None, events_per_frame=None,
+                                     gain=2.0, gamma=0.7):
+    xs, ys, pos = _read_npz(npz_path)
+    if xs.size == 0:
+        return
+
+    t = np.arange(xs.shape[0], dtype=np.float32)
+    xs = ((xs - xs.min()) / (xs.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+    ys = ((ys - ys.min()) / (ys.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    if group_by == "count":
+        N = xs.shape[0]
+        P = min(total_events, N) if total_events is not None else N
+        Q = max(1, P // max(1, T)) if not events_per_frame else events_per_frame
+        T_eff = max(1, P // Q)
+        N_used = T_eff * Q
+        xs, ys, pos = xs[:N_used], ys[:N_used], pos[:N_used]
+
+        for i in range(T_eff):
+            s, e = i * Q, (i + 1) * Q
+            pmap = np.zeros((size, size), dtype=np.float32)
+            nmap = np.zeros((size, size), dtype=np.float32)
+            mpos = pos[s:e]
+            if np.any(mpos):
+                np.add.at(pmap, (ys[s:e][mpos], xs[s:e][mpos]), 1.0)
+            if np.any(~mpos):
+                np.add.at(nmap, (ys[s:e][~mpos], xs[s:e][~mpos]), 1.0)
+            rgb = _eventbind_colorize(pmap, nmap, gain=gain, gamma=gamma)
+            Image.fromarray(rgb).save(os.path.join(out_dir, f"frame_{i:03d}.png"), format="PNG")
+    else:
+        t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+        edges = np.linspace(0.0, 1.0, T + 1)
+        fidx = 0
+        for i in range(T):
+            m = (t_norm >= edges[i]) & (t_norm < edges[i + 1])
+            if not np.any(m):
+                continue
+            pmap = np.zeros((size, size), dtype=np.float32)
+            nmap = np.zeros((size, size), dtype=np.float32)
+            if np.any(pos[m]):
+                np.add.at(pmap, (ys[m][pos[m]], xs[m][pos[m]]), 1.0)
+            negm = ~pos[m]
+            if np.any(negm):
+                np.add.at(nmap, (ys[m][negm], xs[m][negm]), 1.0)
+            rgb = _eventbind_colorize(pmap, nmap, gain=gain, gamma=gamma)
+            Image.fromarray(rgb).save(os.path.join(out_dir, f"frame_{fidx:03d}.png"), format="PNG")
+            fidx += 1
+
+# =========================
+# Directory traversal + PROGRESS
+# =========================
+
+def _gather_npz(data_split_dir):
+    """Return list of (class_name, npz_abs_path)."""
+    items = []
     for class_name in sorted(os.listdir(data_split_dir)):
         class_dir = os.path.join(data_split_dir, class_name)
         if not os.path.isdir(class_dir):
             continue
         for f in sorted(os.listdir(class_dir)):
-            if not f.endswith(".npz"):
-                continue
-            npz_path = os.path.join(class_dir, f)
-            png_path = npz_path.replace(".npz", ".png")
-            plot_event_image(npz_path, png_path)
-    print(f"✅ Finished rendering under: {data_split_dir}\n")
+            if f.endswith(".npz"):
+                items.append((class_name, os.path.join(class_dir, f)))
+    return items
 
-def process_part_zip(zip_path, root, train_dir, max_workers):
-    unzip_file(zip_path, root)
-    part_name = os.path.basename(zip_path).replace(".zip", "")
-    part_path = os.path.join(root, part_name)
-    extract_all_tar_gz_in_dir_parallel(part_path, max_workers=max_workers)
-    move_class_folders_to_train(part_path, train_dir)
-    shutil.rmtree(part_path)
-    print(f"🧹 Deleted {part_path}")
+def convert_npz_to_outputs(data_split_dir, vis_dir, val_dir,
+                           scatter_size=224, eventbind_size=224, T=8,
+                           group_by="time", total_events=None, events_per_frame=None,
+                           gain=2.0, gamma=0.7):
+    print(f"🎨 Processing .npz in: {data_split_dir}")
 
-def prepare_validation(val_zip_path, val_dir):
-    print(f"📦 Unzipping validation from {val_zip_path} ...")
-    os.makedirs(val_dir, exist_ok=True)
-    with zipfile.ZipFile(val_zip_path, 'r') as zf:
-        zf.extractall(val_dir)
+    items = _gather_npz(data_split_dir)
+    if not items:
+        print("⚠️ No .npz files found.")
+        return
+
+    ok_scatter = ok_eventbind = 0
+    with tqdm(total=len(items), desc="Rendering (scatter + EventBind)", unit="file") as pbar:
+        for class_name, npz_path in items:
+            base = os.path.splitext(os.path.basename(npz_path))[0]
+
+            # Scatter → static/vis
+            scatter_out = os.path.join(vis_dir, class_name, base + ".png")
+            os.makedirs(os.path.dirname(scatter_out), exist_ok=True)
+            ok_scatter += 1 if plot_event_image_scatter(npz_path, scatter_out) else 0
+
+            # EventBind → static/val
+            eb_out_dir = os.path.join(val_dir, class_name, base)
+            try:
+                render_eventbind_frames_from_npz(
+                    npz_path, eb_out_dir,
+                    size=eventbind_size, T=T,
+                    group_by=group_by, total_events=total_events, events_per_frame=events_per_frame,
+                    gain=gain, gamma=gamma
+                )
+                ok_eventbind += 1
+            except Exception as e:
+                tqdm.write(f"❌ Failed to render EventBind {npz_path}: {e}")
+
+            pbar.set_postfix(scatter=ok_scatter, eventbind=ok_eventbind)
+            pbar.update(1)
+
+    print(f"✅ Finished rendering under vis={vis_dir} and val={val_dir}")
+    print(f"   Scatter OK:    {ok_scatter}/{len(items)}")
+    print(f"   EventBind OK:  {ok_eventbind}/{len(items)}\n")
+
+# =========================
+# CLI
+# =========================
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare N-ImageNet-1K → PNGs in train/ and val/")
-    parser.add_argument("--dataset_root", required=True)
-    parser.add_argument("--max-workers", type=int, default=12)
+    parser = argparse.ArgumentParser(description="Prepare N-ImageNet-1K static/vis (scatter) and static/val (EventBind)")
+    parser.add_argument("--dataset_root", default="/home/user/datasets/N-ImageNet-1K", type=str)
+    parser.add_argument("--frame_size", type=int, default=224)
+    parser.add_argument("--num_frames", type=int, default=2)
+    parser.add_argument("--group_by", choices=["time", "count"], default="time")
+    parser.add_argument("--total_events", type=int, default=None)
+    parser.add_argument("--events_per_frame", type=int, default=None)
+    parser.add_argument("--gain", type=float, default=2.0)
+    parser.add_argument("--gamma", type=float, default=0.7)
     args = parser.parse_args()
 
     root = os.path.abspath(args.dataset_root)
-    # train_dir = os.path.join(root, "train")
-    val_dir = os.path.join(root, "val")
-    val_zip = os.path.join(root, "extracted_val.zip")
+    val_dir_in = os.path.join(root, "val")
+    static_vis = os.path.join(root, "static", "vis")
+    static_val = os.path.join(root, "static", "val")
 
-    # # STEP 1 — unzip and prepare training
-    # for fname in sorted(os.listdir(root)):
-    #     if fname.startswith("Part_") and fname.endswith(".zip"):
-    #         process_part_zip(os.path.join(root, fname), root, train_dir, args.max_workers)
+    if os.path.isdir(val_dir_in):
+        convert_npz_to_outputs(
+            val_dir_in,
+            vis_dir=static_vis,
+            val_dir=static_val,
+            scatter_size=args.frame_size,
+            eventbind_size=args.frame_size,
+            T=args.num_frames,
+            group_by=args.group_by,
+            total_events=args.total_events,
+            events_per_frame=args.events_per_frame,
+            gain=args.gain,
+            gamma=args.gamma
+        )
+    else:
+        print(f"⚠️ Split missing: {val_dir_in}")
 
-    # STEP 2 — prepare validation
-    # if os.path.exists(val_zip):
-    #     prepare_validation(val_zip, val_dir)
-    # else:
-    #     print(f"⚠️ Missing val zip: {val_zip}")
-
-    # STEP 3 — convert all .npz → .png
-    for split_dir in [val_dir]:
-        if os.path.isdir(split_dir):
-            convert_npz_to_png_in_dir(split_dir)
-        else:
-            print(f"⚠️ Split missing: {split_dir}")
-
-    print("🎉 Done: N-ImageNet-1K extracted, visualized, and cleaned!")
+    print("🎉 Done: static/vis (scatter) and static/val (EventBind) created!")
 
 if __name__ == "__main__":
     main()
