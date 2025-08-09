@@ -7,7 +7,6 @@ import logging
 import abc
 from enum import Enum, auto
 from types import SimpleNamespace
-# import traceback
 
 # PointBind / UniBind
 from models import PointBind_models
@@ -15,7 +14,7 @@ from imagebind.lora import lora_load_state_dict, save_lora_weights, load_lora_we
 
 from binds.languagebind import (
     LanguageBind, to_device,
-    LanguageBindImageTokenizer, LanguageBindVideoTokenizer, LanguageBindAudioTokenizer, 
+    LanguageBindImageTokenizer, LanguageBindVideoTokenizer, LanguageBindAudioTokenizer,
     LanguageBindThermalTokenizer, LanguageBindDepthTokenizer
 )
 
@@ -89,7 +88,6 @@ MODALITY_MAP = {
     Modality.TEXT: ModalityType.TEXT,
 }
 
-
 # ============================ Shared Model Base ============================
 class Model(nn.Module):
     @abc.abstractmethod
@@ -109,13 +107,16 @@ class Model(nn.Module):
         pass
 
 class UniBind(nn.Module):
-    def __init__(self, args, use_flash_attention=False, use_lora=False, lora_rank=4, lora_alpha=8, use_modality_head_mlp=False, lora_weights=None, modality_head_mlp_weights=None, logger=None):
+    def __init__(self, args, use_flash_attention=False, use_lora=False, lora_rank=4, lora_alpha=8,
+                 use_modality_head_mlp=False, lora_weights=None, modality_head_mlp_weights=None, logger=None):
         super(UniBind, self).__init__()
         self.logger = logger or logging.getLogger(__name__)
 
         self.modality = args.modality
         self.use_modality_head_mlp = use_modality_head_mlp
-        self.backbone = PointBind_models.PointBind_I2PMAE(use_flash_attention=use_flash_attention, use_lora=use_lora, lora_rank=lora_rank, lora_alpha=lora_alpha)
+        self.backbone = PointBind_models.PointBind_I2PMAE(
+            use_flash_attention=use_flash_attention, use_lora=use_lora, lora_rank=lora_rank, lora_alpha=lora_alpha
+        )
 
         state_dict = torch.load(args.pretrain_weights, weights_only=True, map_location='cpu')
 
@@ -128,7 +129,7 @@ class UniBind(nn.Module):
 
         lora_load_state_dict(self.backbone, state_dict)
 
-        # Create modality-specific MLP
+        # Create modality-specific MLP (frozen by default unless use_modality_head_mlp=True)
         if self.modality == Modality.IMAGE:
             self.mlp_for_image = init_linear_as_identity(nn.Linear(1024, 1024))
             self.mlp_for_image.requires_grad_(use_modality_head_mlp)
@@ -153,7 +154,7 @@ class UniBind(nn.Module):
         if modality_head_mlp_weights is not None:
             self.logger.info(f"[UniBind init] Loading MLP submodules from '{modality_head_mlp_weights}'...")
             self.load_modality_head_mlp_weights(modality_head_mlp_weights)
-        
+
         self.logger.info(f"[UniBind init] freeze all parameters")
         self.freeze_all()
 
@@ -304,44 +305,46 @@ class UniBind(nn.Module):
     def save_lora_weights(self, checkpoint_path: str):
         self.logger.info(f"[save_lora_weights] Saving LoRA weights to '{checkpoint_path}'...")
         save_lora_weights(self.backbone, checkpoint_path)
-    
+
     def freeze_all(self):
-        """Freeze all parameters in the model."""
         for p in self.parameters():
             p.requires_grad = False
 
-    def unfreeze_backbone(self):
-        """
-        Unfreeze the entire backbone for training but keep modality-specific
-        MLPs frozen (they are for cross-modality alignment).
-        """
-        for n, p in self.backbone.named_parameters():
+    def enable_full_fine_tune(self):
+        """Enable training of the entire backbone; keep modality-specific MLPs frozen."""
+        for _, p in self.backbone.named_parameters():
             p.requires_grad = True
-
-        # Ensure modality-specific MLPs remain frozen
+        
         for mlp_attr in MODALITY_TO_MLP.values():
             if hasattr(self, mlp_attr):
                 for p in getattr(self, mlp_attr).parameters():
                     p.requires_grad = False
 
-    def enable_lora_training(self):
-        """
-        Enable training only for LoRA adapter parameters.
-        """
+    def enable_lora(self):
+        """Enable training only for LoRA adapter parameters."""
         for n, p in self.named_parameters():
             p.requires_grad = ("lora_down" in n or "lora_up" in n)
 
+    def enable_modality_head_mlp(self):
+        """Enable training ONLY for the current modality's head MLP."""
+        for p in self.parameters():
+            p.requires_grad = False
+        mlp_attr = MODALITY_TO_MLP.get(self.modality, None)
+
+        if mlp_attr is None or not hasattr(self, mlp_attr):
+            raise ValueError(f"No MLP head found for modality {self.modality}")
+        
+        for p in getattr(self, mlp_attr).parameters():
+            p.requires_grad = True
+
     def unfreeze_all(self):
-        """Unfreeze all parameters, including modality-specific MLPs."""
         for p in self.parameters():
             p.requires_grad = True
 
     def save_backbone(self, path: str):
-        """Save only the backbone weights (for full fine-tuning)."""
         torch.save(self.backbone.state_dict(), path)
 
     def load_backbone(self, path: str, strict: bool = True):
-        """Load only the backbone weights (for full fine-tuning)."""
         sd = torch.load(path, map_location="cpu", weights_only=True)
         self.backbone.load_state_dict(sd, strict=strict)
 
@@ -355,9 +358,6 @@ def init_linear_as_identity(linear_layer):
     return linear_layer
 
 # ============================ UniBindClassifier ============================
-# (as defined in your full version, unchanged)
-# Please assume your full UniBindClassifier code is already here.
-
 class UniBindClassifier(Model):
     def __init__(
         self,
@@ -365,8 +365,8 @@ class UniBindClassifier(Model):
         pretrain_weights,
         modality,
         centre_embeddings=None,
-        centre_labels = None,
-        label_to_index = None,
+        centre_labels=None,
+        label_to_index=None,
         logger=None,
         use_flash_attention=False,
         use_lora=False,
@@ -409,12 +409,10 @@ class UniBindClassifier(Model):
                 dtype=torch.int64,
                 device=device
             )
-
-            # Precompute and store the (C, N) binary mask
             self.num_classes = len(self.label_to_index_map)
             mask = F.one_hot(self.centre_label_indices, num_classes=self.num_classes).T.bool()
             self.register_buffer("centre_class_mask", mask)
-    
+
     def forward(self, x, mode: ForwardMode, only_cls=True):
         if mode == ForwardMode.EMBEDDINGS:
             return self._encode(x, only_cls=only_cls)
@@ -425,13 +423,13 @@ class UniBindClassifier(Model):
 
     def extract_tensor(self, x):
         return x
-    
+
     def wrap_tensor(self, x):
         return x
-    
+
     def data_to_device(self, x, device):
         return x.to(device)
-    
+
     def encode_text(self, x):
         input_dict = {ModalityType.TEXT: x}
         return self.unibind.encode_text(input_dict)
@@ -447,7 +445,7 @@ class UniBindClassifier(Model):
         inp_dict = {modality: x}
         emb = self.unibind.encode_vision_with_mlp(inp_dict, only_cls=only_cls)
         return emb / emb.norm(dim=-1, keepdim=True)
-    
+
     def save_lora_weights(self, path: str):
         self.logger.info(f"[save_lora_weights] Saving LoRA weights to '{path}'...")
         self.unibind.save_lora_weights(path)
@@ -463,23 +461,23 @@ class UniBindClassifier(Model):
     def load_modality_head_mlp_weights(self, path: str):
         self.logger.info(f"[load_modality_head_mlp_weights] Loading fine tuned weights from '{path}'...")
         self.unibind.load_modality_head_mlp_weights(path)
-    
+
     def _compute_class_logits(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
         if self.use_masked_logsumexp:
             return self._masked_logsumexp(similarity, temperature)
         else:
             return self._scatter_logsumexp(similarity, temperature)
-    
+
     def _masked_logsumexp(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
         B, N = similarity.shape
         C = self.num_classes
-        mask = self.centre_class_mask  # (C, N) precomputed
+        mask = self.centre_class_mask  # (C, N)
 
         similarity_exp = similarity.unsqueeze(1)             # (B, 1, N)
         mask_exp = mask.unsqueeze(0).expand(B, C, N)         # (B, C, N)
         masked = similarity_exp.masked_fill(~mask_exp, -1e9) # (B, C, N)
         return torch.logsumexp(masked * temperature, dim=2) / temperature  # (B, C)
-    
+
     def _scatter_logsumexp(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
         class_raw_scores = torch_scatter.scatter_logsumexp(similarity * temperature, self.centre_label_indices, dim=1)
         return class_raw_scores / temperature
@@ -493,11 +491,9 @@ class LanguageBindClassifier(Model):
         self.class_strings = class_strings
         self.logger = logger or logging.getLogger(__name__)
 
-        # Prepare prompts using modality-specific templates
         template = MODALITY_TEMPLATES.get(modality, "a {}")
         prompts = [template.format(cls) for cls in class_strings]
 
-        # Load single-modality LanguageBind model and tokenizer
         model_name = LANGUAGEBIND_MODEL_NAME_MAP[modality]
         self.languagebind = LanguageBind(clip_type={modality.value: model_name}, cache_dir='.cache')
         self.languagebind = self.languagebind.to(device)
@@ -509,11 +505,9 @@ class LanguageBindClassifier(Model):
             cache_dir="./cache/tokenizer"
         )
 
-        # Tokenize class prompts → encode → normalize
         tokens = tokenizer(prompts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")
         tokens = to_device(tokens, device)
         text_embs = self.encode_text(tokens)
-
         self.class_embeddings = text_embs
 
     def forward(self, x, mode: ForwardMode):
@@ -541,7 +535,7 @@ class LanguageBindClassifier(Model):
             return x["point"]
         else:
             raise ValueError(f"Unknown modality: {self.modality}")
-    
+
     def wrap_tensor(self, x_tensor):
         if self.modality == Modality.IMAGE:
             return {"pixel_values": x_tensor}
@@ -559,15 +553,13 @@ class LanguageBindClassifier(Model):
             return {"point": x_tensor}
         else:
             raise ValueError(f"Unknown modality: {self.modality}")
-    
+
     def data_to_device(self, x, device):
         return to_device(x, device)
 
     def encode_text(self, x):
-        # x is already transformed and on device
         with torch.no_grad():
             emb = self.languagebind({'language': x})['language']
-
         return emb / emb.norm(dim=-1, keepdim=True)
 
     def modality_config(self):
@@ -613,7 +605,7 @@ class ImageBindClassifier(Model):
 
     def extract_tensor(self, x):
         return x
-    
+
     def wrap_tensor(self, x_tensor):
         return x_tensor
 

@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
 
-from model import UniBindClassifier
+from model import UniBindClassifier, ForwardMode
 from training import train_epoch
 from eval import evaluate_robust_one_stage
 from attack import PGDAttack, APGDAttack, AttackModel
@@ -30,10 +30,129 @@ class RelativePathFormatter(logging.Formatter):
         record.relativepath = os.path.relpath(os.path.abspath(record.pathname), run_dir)
         return super().format(record)
 
+@torch.no_grad()
+def evaluate_one_stage(logger, device, model_val, val_loader):
+    """Clean evaluation without adversarial perturbations."""
+    model_val.eval()
+    total_correct = 0
+    total = 0
+    for inp, lbl in val_loader:
+        inp = inp.to(device, non_blocking=True)
+        lbl = lbl.to(device, non_blocking=True)
+        logits, _ = model_val(inp, mode=ForwardMode.LOGITS)
+        preds = logits.argmax(dim=1)
+        total_correct += (preds == lbl).sum().item()
+        total += lbl.size(0)
+    acc = 100.0 * total_correct / max(1, total)
+    logger.info(f"[EVAL] Accuracy = {acc:.4f}")
+    return acc
 
-def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader):
+def run_alignment_training(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader):
+    """
+    Non-adversarial alignment training.
+    Trains only the modality head MLP against center embeddings via CE.
+    """
+    _train_mean, _train_std = get_normalization_tensors(args.train_modality, device)
+    _val_mean, _val_std = get_normalization_tensors(args.val_modality, device)
+
+    logger.info(f"[ALIGN] Models: train={args.train_modality.upper()} | val={args.val_modality.upper()}")
+
+    # Trainable model (train modality)
+    model_train = UniBindClassifier(
+        device=device,
+        pretrain_weights=args.pretrain_weights,
+        modality=args.train_modality,
+        centre_embeddings=raw_emb,
+        centre_labels=raw_lbls,
+        label_to_index=lbl_to_idx,
+        logger=logger,
+        use_flash_attention=args.use_flash_attention,
+        use_lora=False,
+        use_modality_head_mlp=True,
+        modality_head_mlp_weights=args.modality_head_mlp_weights
+    ).to(device)
+    model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
+
+    logger.info("[ALIGN] Enabling MLP-only parameter training")
+    model_train.module.unibind.enable_modality_head_mlp()
+
+    # Validation model (val modality)
+    model_val = UniBindClassifier(
+        device=device,
+        pretrain_weights=args.pretrain_weights,
+        modality=args.val_modality,
+        centre_embeddings=raw_emb,
+        centre_labels=raw_lbls,
+        label_to_index=lbl_to_idx,
+        logger=logger,
+        use_flash_attention=args.use_flash_attention,
+        use_lora=False,
+        use_modality_head_mlp=True,
+        modality_head_mlp_weights=args.modality_head_mlp_weights
+    ).to(device)
+    model_val.eval()
+
+    params = [p for p in model_train.parameters() if p.requires_grad]
+    optimizer = AdamW(params, lr=3e-3, weight_decay=1e-4)
+    logger.info("Steps per epoch: %d", len(train_loader))
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=3e-3,
+        steps_per_epoch=len(train_loader),
+        epochs=2,
+        pct_start=0.1,
+        div_factor=25.0,
+        final_div_factor=1e4
+    )
+
+    best_acc = -1.0
+    for epoch in range(2):
+        logger.info(f"[ALIGN] Epoch {epoch + 1}/2")
+        train_loader.sampler.set_epoch(epoch)
+
+        model_train.train()
+        running_loss = 0.0
+        for step, (inp, lbl) in enumerate(train_loader):
+            inp = inp.to(device, non_blocking=True)
+            lbl = lbl.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            logits, _ = model_train(inp, mode=ForwardMode.LOGITS)
+            loss = torch.nn.functional.cross_entropy(logits, lbl)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+            running_loss += loss.item()
+            if dist.get_rank() == 0:
+                writer.add_scalar("alignment/loss", loss.item(), epoch * len(train_loader) + step)
+
+            if step % 20 == 0:
+                logger.info(f"[ALIGN] Epoch {epoch+1} Step {step}/{len(train_loader)} "
+                            f"Loss={loss.item():.6f} AvgLoss={(running_loss/(step+1)):.6f}")
+
+        if dist.get_rank() == 0:
+            ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_mlp_{args.model_type}.pt")
+            model_train.module.save_modality_head_mlp_weights(ckpt_path)
+
+        torch.cuda.empty_cache()
+        dist.barrier()
+
+        model_val.load_modality_head_mlp_weights(ckpt_path)
+        acc = evaluate_one_stage(logger, device, model_val, val_loader)
+        logger.info(f"[ALIGN][Epoch {epoch + 1}] acc on {args.val_modality.upper()} = {acc:.4f}")
+
+        if dist.get_rank() == 0 and acc > best_acc:
+            best_acc = acc
+            best_ckpt_path = os.path.join(args.output_dir, f"best_mlp_weights_{args.model_type}.pt")
+            shutil.copyfile(ckpt_path, best_ckpt_path)
+
+    writer.close()
+    logger.info(f"[ALIGN] Best accuracy: {best_acc:.4f}")
+
+def run_robust_training(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader):
     train_mean, train_std = get_normalization_tensors(args.train_modality, device)
-    val_mean, val_std = get_normalization_tensors(args.val_modality, device)
+    val_mean, val_std     = get_normalization_tensors(args.val_modality, device)
 
     logger.info(f"Loading model for training: {args.train_modality.upper()}")
     model_original = UniBindClassifier(
@@ -64,13 +183,14 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
     ).to(device)
 
     model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
+
     # === Control training mode ===
     if args.use_full_finetune:
         logger.info("[Mode] Full fine-tuning: unfreezing backbone, keeping MLP frozen")
-        model_train.module.unibind.unfreeze_backbone()
+        model_train.module.unibind.enable_full_fine_tune()
     elif args.use_lora:
         logger.info("[Mode] LoRA training: enabling LoRA params only")
-        model_train.module.unibind.enable_lora_training()
+        model_train.module.unibind.enable_lora()
     else:
         logger.info("[Mode] Frozen model — no parameters will be trained")
 
@@ -172,8 +292,6 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
         torch.cuda.empty_cache()
         dist.barrier()
 
-        # === Reinitialize model for validation modality and load weights
-        logger.info(f"[EPOCH {epoch + 1}] Loading LoRA weights for validation: {args.model_type}")
         if args.use_full_finetune:
             logger.info(f"[EPOCH {epoch + 1}] Loading backbone weights for validation: {args.model_type}")
             model_val.load_backbone(ckpt_path)
@@ -190,12 +308,10 @@ def train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_i
                 best_ckpt_path = os.path.join(args.output_dir, f"best_backbone_weights_{args.model_type}.pt")
             elif args.use_lora:
                 best_ckpt_path = os.path.join(args.output_dir, f"best_lora_weights_{args.model_type}.pt")
-
             shutil.copyfile(ckpt_path, best_ckpt_path)
 
     writer.close()
     logger.info(f"Best robust accuracy: {best_acc:.4f}")
-
 
 def main():
     parser = argparse.ArgumentParser("UniBind Training")
@@ -222,8 +338,16 @@ def main():
     parser.add_argument("--lora_alpha", type=float, default=8)
     parser.add_argument("--epsilon", type=int, default=4)
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
-    parser.add_argument('--use_full_finetune', action='store_true', default=True, help='Enable full fine-tuning (backbone + MLPs)')
-    parser.add_argument("--use_lora", action="store_true", default=False, help="Enable LoRA adapter training instead of full fine-tuning")
+    parser.add_argument("--training_mode", choices=["alignment", "robust"], default="robust",
+                        help="alignment: modality-head MLP training (non-adversarial); robust: training with attacks")
+    parser.add_argument('--use_full_finetune', action='store_true', default=True,
+                        help='Enable full fine-tuning (backbone)')
+    parser.add_argument("--use_lora", action="store_true", default=False,
+                        help="Enable LoRA adapter training instead of full fine-tuning")
+    parser.add_argument("--use_modality_head_mlp", action="store_true", default=False,
+                        help="Apply/train the modality-specific head MLP (alignment mode)")
+    parser.add_argument("--modality_head_mlp_weights", default=None,
+                        help="Optional path to load pre-trained modality head MLP weights")
     parser.add_argument("--tensorboard_data_dir", default="tensorboard")
     parser.add_argument("--output_dir", default="output")
     args = parser.parse_args()
@@ -234,17 +358,31 @@ def main():
     dist.init_process_group("nccl")
     rank = dist.get_rank()
 
+    # interpret epsilon
+    args.epsilon = args.epsilon / 255.0
+
+    # outputs directory token (no inline ternaries)
+    if args.training_mode == "alignment":
+        mode_token = "align"
+    else:
+        mode_token = f"eps{int(round(args.epsilon * 255))}"
+
+    if args.use_lora:
+        train_mode_token = f"lora_r{args.lora_rank}_a{args.lora_alpha}"
+    elif args.use_full_finetune:
+        train_mode_token = "ft"
+    else:
+        train_mode_token = "frozen"
+
     args.output_dir = os.path.join(
         args.output_dir,
         "train",
         args.model_type,
         f"{args.train_dataset_name}__{args.val_dataset_name}",
-        f"eps{args.epsilon}",
-        f"lora_r{args.lora_rank}_a{args.lora_alpha}"
+        mode_token,
+        train_mode_token
     )
     os.makedirs(args.output_dir, exist_ok=True)
-
-    args.epsilon = args.epsilon / 255.0
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
@@ -259,19 +397,26 @@ def main():
     logger.setLevel(logging.INFO)
     logger.handlers = [ch, fh]
 
-    logger.info(f"[Train: {args.train_modality.upper()} | {args.train_dataset_name}] => [Val: {args.val_modality.upper()} | {args.val_dataset_name}]")
-    logger.info(f"LoRA config → rank: {args.lora_rank}, alpha: {args.lora_alpha}")
+    logger.info(f"[Train: {args.train_modality.upper()} | {args.train_dataset_name}] "
+                f"=> [Val: {args.val_modality.upper()} | {args.val_dataset_name}]")
+    logger.info(f"Mode: {args.training_mode.upper()} | LoRA rank/alpha: {args.lora_rank}/{args.lora_alpha} | epsilon={args.epsilon:.5f}")
+
+    if args.training_mode == "alignment" and not args.use_modality_head_mlp:
+        logger.warning("[ALIGN] --use_modality_head_mlp is False; enabling it for alignment mode.")
+        args.use_modality_head_mlp = True
 
     raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
-    train_lbl_to_idx = None
-    if args.train_loss == "ce":
-        train_lbl_to_idx = lbl_to_idx
+
+    # For alignment, use CE over centers
+    if args.training_mode == "alignment":
+        args.train_loss = "ce"
+        logger.info("[ALIGN] Forcing train_loss='ce'")
 
     train_loader = train_data_loader(
         modality=args.train_modality,
         dataset_root=args.train_dataset_root,
         train_json=args.train_json,
-        label_to_index=train_lbl_to_idx,
+        label_to_index=(lbl_to_idx if args.train_loss == "ce" else None),
         batch_size=args.train_batch_size,
         num_workers=args.num_workers,
         max_samples=args.train_max_samples
@@ -291,15 +436,17 @@ def main():
         args.output_dir,
         args.tensorboard_data_dir,
         f"rank{rank}",
-        f"lora_r{args.lora_rank}_a{args.lora_alpha}",
+        train_mode_token,
         timestamp
     )
     writer = SummaryWriter(log_dir=tb_path)
 
-    train_and_evaluate(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader)
+    if args.training_mode == "alignment":
+        run_alignment_training(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader)
+    else:
+        run_robust_training(args, logger, writer, device, raw_emb, raw_lbls, lbl_to_idx, train_loader, val_loader)
 
     dist.destroy_process_group()
-
 
 if __name__ == "__main__":
     main()
