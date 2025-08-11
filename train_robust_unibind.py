@@ -1,427 +1,476 @@
 #!/usr/bin/env python3
-from math import e
+"""Orchestrates alignment and robust training runs (Python replacement for previous shell script)."""
+from __future__ import annotations
 import argparse
+import subprocess
+import shlex
 import logging
 import os
-import shutil
-from datetime import datetime
-from pathlib import Path
+import sys
+from enum import Enum
+from typing import List, Tuple, Optional
 
-import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.tensorboard import SummaryWriter
+MODEL_TYPE_TO_MODALITIES = {
+    "vision": [
+        "image", 
+        "video", 
+        "event"
+    ],
+    "audio": ["audio"],
+    "thermal": ["thermal"],
+    "point": ["point"],
+}
 
-from shared_types import Modality
-from model import UniBind, UniBindClassifier, ForwardMode
-from training import train_alignment_epoch, train_robust_epoch
-from eval import evaluate_alignment_acc, evaluate_robust_one_stage
-from attack import PGDAttack, APGDAttack, AttackModel
-from meter import AverageMeter
-from data_util import (
-    load_label_mapping,
-    train_data_loader,
-    val_data_loader,
-    get_normalization_tensors
-)
+class RobustMode(str, Enum):
+    LORA = "lora"
+    FULL_FINE_TUNE = "full_fine_tune"
 
-class RelativePathFormatter(logging.Formatter):
-    def __init__(self, rank, fmt=None, datefmt=None, style='%', validate=True):
-        super().__init__(fmt, datefmt, style, validate)
-        self.rank = rank
+ROBUST_EPSILONS = [
+    2,
+]
 
-    def format(self, record):
-        run_dir = os.getcwd()
-        record.rank = self.rank
-        record.relativepath = os.path.relpath(os.path.abspath(record.pathname), run_dir)
-        return super().format(record)
+ROBUST_LORA_RANKS = [
+    2,
+    4,
+    8,
+]
+
+ROBUST_LORA_ALPHAS = [
+    4,
+    8,
+    16,
+]
+
+ROBUST_EPOCHS = 2
+
+ROBUST_TRAIN_MODALITY_TO_DATASET = {
+    # "image": "ImageNet-1K",
+    # "image": "Places365",
+    "video": "Kinetics-400",
+    # "video": "UCF-101",
+    # "video": "MSR-VTT",
+    # "event": "N-Caltech-101",
+    # "event": "N-ImageNet-1K",
+    "audio": "FSD-50K",
+    # "audio": "ESC-50",
+    # "audio": "UrbanSound8K",
+    "thermal": "LLVIP",
+    # "thermal": "RGB-T",
+    "point": "ModelNet40",
+    # "point": "ShapeNet",
+}
+
+ROBUST_VAL_MODALITY_TO_DATASET = {
+    # "image": "ImageNet-1K",
+    # "image": "Places365",
+    # "video": "UCF-101",
+    "video": "MSR-VTT",
+    # "event": "N-Caltech-101",
+    # "event": "N-ImageNet-1K",
+    "audio": "ESC-50",
+    # "audio": "UrbanSound8K",
+    "thermal": "LLVIP",
+    # "thermal": "RGB-T",
+    "point": "ModelNet40",
+    # "point": "ShapeNet",
+}
+
+ROBUST_DATASET_TO_BATCH_SIZE = {
+    "ImageNet-1K": 1,
+    "Places365": 70,
+    "Kinetics-400": 25,
+    "UCF-101": 6,
+    "MSR-VTT": 6,
+    "N-Caltech-101": 70,
+    "N-ImageNet-1K": 70,
+    "FSD-50K": 90,
+    "ESC-50": 90,
+    "UrbanSound8K": 2,
+    "LLVIP": 280,
+    "RGB-T": 16,
+    "ModelNet40": 64,
+    "ShapeNet": 64,
+}
+
+ROBUST_TRAIN_MAX_SAMPLES_MAP = {
+    "ImageNet-1K": 18,
+    "Places365": 0,
+    "Kinetics-400": 241258,
+    "UCF-101": 9537,
+    "MSR-VTT": 2990,
+    "N-Caltech-101": 3060,
+    "N-ImageNet-1K": 1281167,
+    "FSD-50K": 36796,
+    "ESC-50": 1600,
+    "UrbanSound8K": 7079,
+    "LLVIP": 67900,
+    "RGB-T": 800,
+    "ModelNet40": 9843,
+    "ShapeNet": 20480,
+}
+
+ROBUST_VAL_MAX_SAMPLES_MAP = {
+    "ImageNet-1K": 6,
+    "Places365": 3000,
+    "MSR-VTT": 2990,
+    "N-Caltech-101": 3000,
+    "N-ImageNet-1K": 3000,
+    "ESC-50": 400,
+    "UrbanSound8K": 1653,
+    "LLVIP": 16974,
+    "RGB-T": 500,
+    "ModelNet40": 2468,
+    "ShapeNet": 2048,
+}
+
+ALIGN_EPOCHS = 1
+ALIGN_TRAIN_MODALITY_TO_DATASET = {
+    "image": "ImageNet-1K",
+    "video": "MSR-VTT",
+    "audio": "ESC-50",
+    "thermal": "LLVIP",
+    "event": "N-Caltech-101",
+}
+ALIGN_VAL_MODALITY_TO_DATASET = ALIGN_TRAIN_MODALITY_TO_DATASET.copy()
+
+ALIGN_DATASET_TO_BATCH_SIZE = {
+    "ImageNet-1K": 2000,
+    "MSR-VTT": 200,
+    "ESC-50": 500,
+    "LLVIP": 2000,
+    "N-Caltech-101": 500,
+}
+ALIGN_TRAIN_MAX_SAMPLES_MAP = {
+    "ImageNet-1K": 4,
+    "MSR-VTT": 4,
+    "ESC-50": 4,
+    "LLVIP": 4,
+    "N-Caltech-101": 4,
+}
+ALIGN_VAL_MAX_SAMPLES_MAP = ALIGN_TRAIN_MAX_SAMPLES_MAP.copy()
+
+ROBUST_TRAIN_JSON_MAP = {k: f"./datasets/{k}/train_data.json" for k in ROBUST_TRAIN_MAX_SAMPLES_MAP}
+ROBUST_VAL_JSON_MAP = {
+    "ImageNet-1K": "./datasets/ImageNet-1K/val_data_3000.json",
+    **{k: f"./datasets/{k}/val_data.json" for k in ROBUST_VAL_MAX_SAMPLES_MAP if k != "ImageNet-1K"}
+}
+ALIGN_TRAIN_JSON_MAP = {
+    "ImageNet-1K": "./datasets/ImageNet-1K/train_data_align.json",
+    "MSR-VTT": "./datasets/MSR-VTT/train_data_align.json",
+    "ESC-50": "./datasets/ESC-50/train_data_align.json",
+    "LLVIP": "./datasets/LLVIP/train_data_align.json",
+    "N-Caltech-101": "./datasets/N-Caltech-101/train_data_align.json",
+}
+ALIGN_VAL_JSON_MAP = {
+    "ImageNet-1K": "./datasets/ImageNet-1K/val_data.json",
+    "MSR-VTT": "./datasets/MSR-VTT/val_data.json",
+    "ESC-50": "./datasets/ESC-50/val_data.json",
+    "LLVIP": "./datasets/LLVIP/val_data.json",
+    "N-Caltech-101": "./datasets/N-Caltech-101/val_data.json",
+}
+
+EMB_SUFFIX_MAP = {
+    "ImageNet-1K": "in",
+    "Places365": "p365",
+    "UCF-101": "ucf",
+    "MSR-VTT": "msrvtt",
+    "N-Caltech-101": "caltech",
+    "N-ImageNet-1K": "nin",
+    "ESC-50": "esc",
+    "UrbanSound8K": "us",
+    "LLVIP": "llvip",
+    "RGB-T": "rgbt",
+    "ModelNet40": "modelnet40",
+    "ShapeNet": "shapenet",
+}
+
+def gpu_count() -> int:
+    try:
+        import torch
+        return torch.cuda.device_count() or 1
+    except Exception:
+        return int(os.environ.get("WORLD_SIZE", "1"))
 
 
-def run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs, output_base):
-    unibind_train = UniBind(
-        args=argparse.Namespace(pretrain_weights=args.pretrain_weights, modality=args.train_modality),
-        use_flash_attention=args.use_flash_attention,
-        use_lora=False,
-        use_modality_head_mlp=True,
-        modality_head_mlp_weights=args.align_modality_head_mlp_weights,
-        logger=logger
-    ).to(device)
+def build_centre_emb_path(modality: str, dataset: str) -> str:
+    suffix = EMB_SUFFIX_MAP.get(dataset) or dataset.lower().replace("-", "").replace("_", "")[:8]
+    return f"./centre_embs/{modality}_{suffix}_center_embeddings.pkl"
 
-    unibind_train.enable_modality_head_mlp()
-    unibind_train = DDP(unibind_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=False)
 
-    model_val = UniBindClassifier(
-        device=device,
-        pretrain_weights=args.pretrain_weights,
-        modality=args.val_modality,
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        logger=logger,
-        use_flash_attention=args.use_flash_attention,
-        use_lora=False,
-        use_modality_head_mlp=True,
-        modality_head_mlp_weights=args.align_modality_head_mlp_weights
-    ).to(device)
-    model_val.eval()
+def run_command(cmd: List[str], logger: logging.Logger, dry_run: bool) -> int:
+    logger.info(f"[JOB] {' '.join(shlex.quote(c) for c in cmd)}")
+    if dry_run:
+        return 0
+    
+    proc = subprocess.run(cmd)
+    if proc.returncode != 0:
+        logger.error(f"[FAIL] Return code {proc.returncode}")
+    return proc.returncode
 
-    trainable_params = [p for p in unibind_train.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=3e-3, weight_decay=1e-4)
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=3e-3,
-        steps_per_epoch=len(train_loader),
-        epochs=epochs,
-        pct_start=0.1,
-        div_factor=25.0,
-        final_div_factor=1e4
-    )
 
-    best_acc = -1.0
-    modality = Modality(args.train_modality)
+def torchrun_prefix(nproc: int) -> List[str]:
+    return ["torchrun", f"--nproc_per_node={nproc}", "train_robust_unibind.py"]
 
-    for epoch in range(epochs):
-        logger.info(f"[Align][Epoch {epoch + 1}/{epochs}] Starting training")
-        train_loader.sampler.set_epoch(epoch)
 
-        train_alignment_epoch(
-            logger=logger,
-            device=device,
-            model=unibind_train,
-            data_loader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            epoch=epoch,
-            total_epochs=epochs,
-            writer=writer,
-            modality=modality
+def build_alignment_cmd(nproc: int, args, model_type: str, modality: str, train_dataset: str, val_dataset: str,
+                        train_json: str, val_json: str, emb_path: str, train_bs: int, val_bs: int,
+                        train_max: int, val_max: int, epochs: int) -> List[str]:
+    cmd = torchrun_prefix(nproc) + [
+        "--training_mode", "alignment",
+        "--model_type", model_type,
+        "--train_modality", modality,
+        "--val_modality", modality,
+        "--train_dataset_name", train_dataset,
+        "--val_dataset_name", val_dataset,
+        "--train_dataset_root", f"{args.dataset_root}/{train_dataset}",
+        "--val_dataset_root", f"{args.dataset_root}/{val_dataset}",
+        "--train_json", train_json,
+        "--val_json", val_json,
+        "--pretrain_weights", args.pretrain_weights,
+        "--center_emb", emb_path,
+        "--train_batch_size", str(train_bs),
+        "--val_batch_size", str(val_bs),
+        "--num_workers", str(args.num_workers),
+        "--train_max_samples", str(train_max),
+        "--val_max_samples", str(val_max),
+        "--epochs", str(epochs),
+        "--tensorboard_data_dir", args.tensorboard_dir,
+        "--output_dir", args.output_dir,
+    ]
+    if args.use_flash_attention:
+        cmd.append("--use_flash_attention")
+
+    return cmd
+
+
+def build_robust_base_cmd(nproc: int, args, model_type: str, modality: str, train_dataset: str, val_dataset: str,
+                          train_json: str, val_json: str, emb_path: str, train_bs: int, val_bs: int,
+                          train_max: int, val_max: int, epochs: int, eps: int, mode: RobustMode) -> List[str]:
+    cmd = torchrun_prefix(nproc) + [
+        "--training_mode", "robust",
+        "--model_type", model_type,
+        "--train_modality", modality,
+        "--val_modality", modality,
+        "--train_dataset_name", train_dataset,
+        "--val_dataset_name", val_dataset,
+        "--train_dataset_root", f"{args.dataset_root}/{train_dataset}",
+        "--val_dataset_root", f"{args.dataset_root}/{val_dataset}",
+        "--train_json", train_json,
+        "--val_json", val_json,
+        "--pretrain_weights", args.pretrain_weights,
+        "--center_emb", emb_path,
+        "--train_batch_size", str(train_bs),
+        "--val_batch_size", str(val_bs),
+        "--num_workers", str(args.num_workers),
+        "--train_max_samples", str(train_max),
+        "--val_max_samples", str(val_max),
+        "--epochs", str(epochs),
+        "--robust_epsilon", str(eps),
+        "--robust_training_mode", mode.value,
+        "--tensorboard_data_dir", args.tensorboard_dir,
+        "--output_dir", args.output_dir,
+    ]
+    if args.use_flash_attention:
+        cmd.append("--use_flash_attention")
+
+    return cmd
+
+
+def build_full_fine_tune_jobs_for_modality(nproc: int, args, model_type: str, modality: str,
+                                           train_dataset: str, val_dataset: str, train_json: str, val_json: str,
+                                           emb_path: str, train_bs: int, val_bs: int, train_max: int, val_max: int) -> List[List[str]]:
+    jobs: List[List[str]] = []
+    for eps in args.robust_epsilons:
+        jobs.append(
+            build_robust_base_cmd(
+                nproc, args, model_type, modality, train_dataset, val_dataset,
+                train_json, val_json, emb_path, train_bs, val_bs, train_max, val_max,
+                args.robust_epochs, eps, RobustMode.FULL_FINE_TUNE
+            )
         )
+    return jobs
 
-        ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_mlp_{args.model_type}.pt")
-        if dist.get_rank() == 0:
-            unibind_train.module.save_modality_head_mlp_weights(ckpt_path)
 
-        torch.cuda.empty_cache()
-        dist.barrier()
+def build_lora_jobs_for_modality(nproc: int, args, model_type: str, modality: str,
+                                 train_dataset: str, val_dataset: str, train_json: str, val_json: str,
+                                 emb_path: str, train_bs: int, val_bs: int, train_max: int, val_max: int) -> List[List[str]]:
+    jobs: List[List[str]] = []
+    for eps in args.robust_epsilons:
+        for lora_rank in args.robust_lora_ranks:
+            for lora_alpha in args.robust_lora_alphas:
+                cmd = build_robust_base_cmd(
+                    nproc, args, model_type, modality, train_dataset, val_dataset,
+                    train_json, val_json, emb_path, train_bs, val_bs, train_max, val_max,
+                    args.robust_epochs, eps, RobustMode.LORA
+                )
+                cmd.extend([
+                    "--robust_lora_rank", str(lora_rank),
+                    "--robust_lora_alpha", str(lora_alpha),
+                    "--robust_use_modality_head_mlp",
+                ])
+                jobs.append(cmd)
+    return jobs
 
-        model_val.load_modality_head_mlp_weights(ckpt_path)
-        acc = evaluate_alignment_acc(logger, device, model_val, val_loader)
-        logger.info(f"[Align][Epoch {epoch + 1}] Acc on {args.val_modality} = {acc:.4f}")
 
-        if dist.get_rank() == 0 and acc > best_acc:
-            best_acc = acc
-            best_ckpt_path = os.path.join(output_base, f"best_mlp_weights_{args.model_type}.pt")
-            shutil.copyfile(ckpt_path, best_ckpt_path)
-            logger.info(f"[Align] Best checkpoint saved: {best_ckpt_path}")
+def fetch_alignment_dataset_config(modality: str) -> Optional[Tuple[str, str]]:
+    train_dataset = ALIGN_TRAIN_MODALITY_TO_DATASET.get(modality)
+    val_dataset = ALIGN_VAL_MODALITY_TO_DATASET.get(modality)
+    if not train_dataset or not val_dataset:
+        return None
+    
+    return train_dataset, val_dataset
 
-    writer.close()
 
-    if dist.get_rank() == 0:
-        logger.info(f"[Align] Best alignment accuracy: {best_acc:.4f}")
+def fetch_robust_dataset_config(modality: str) -> Optional[Tuple[str, str]]:
+    train_dataset = ROBUST_TRAIN_MODALITY_TO_DATASET.get(modality)
+    val_dataset = ROBUST_VAL_MODALITY_TO_DATASET.get(modality)
+    if not train_dataset or not val_dataset:
+        return None
+    
+    return train_dataset, val_dataset
 
-def run_robust_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs, output_base):
-    train_mean, train_std = get_normalization_tensors(args.train_modality, device)
-    val_mean, val_std = get_normalization_tensors(args.val_modality, device)
 
-    model_original = UniBindClassifier(
-        device=device,
-        pretrain_weights=args.pretrain_weights,
-        modality=args.train_modality,
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        logger=logger,
-        use_flash_attention=args.use_flash_attention,
-        use_lora=False,
-        use_modality_head_mlp=args.robust_use_modality_head_mlp,
-        modality_head_mlp_weights=args.robust_modality_head_mlp_weights
-    ).to(device)
-    model_original.eval()
+def build_alignment_jobs(args, logger) -> List[List[str]]:
+    jobs: List[List[str]] = []
+    nproc = gpu_count()
+    for model_type, modalities in MODEL_TYPE_TO_MODALITIES.items():
+        for modality in modalities:
+            ds_pair = fetch_alignment_dataset_config(modality)
+            if ds_pair is None:
+                continue
 
-    model_train = UniBindClassifier(
-        device=device,
-        pretrain_weights=args.pretrain_weights,
-        modality=args.train_modality,
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        logger=logger,
-        use_flash_attention=args.use_flash_attention,
-        use_lora=args.robust_use_lora,
-        lora_rank=args.robust_lora_rank,
-        lora_alpha=args.robust_lora_alpha,
-        use_modality_head_mlp=args.robust_use_modality_head_mlp,
-        modality_head_mlp_weights=args.robust_modality_head_mlp_weights
-    ).to(device)
-    model_train = DDP(model_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=False)
+            train_dataset, val_dataset = ds_pair
+            train_bs = ALIGN_DATASET_TO_BATCH_SIZE.get(train_dataset)
+            val_bs = ALIGN_DATASET_TO_BATCH_SIZE.get(val_dataset)
+            train_max = ALIGN_TRAIN_MAX_SAMPLES_MAP.get(train_dataset)
+            val_max = ALIGN_VAL_MAX_SAMPLES_MAP.get(val_dataset)
+            train_json = ALIGN_TRAIN_JSON_MAP.get(train_dataset)
+            val_json = ALIGN_VAL_JSON_MAP.get(val_dataset)
+            if None in (train_bs, val_bs, train_max, val_max, train_json, val_json):
+                logger.warning(f"[SKIP][ALIGN] modality={modality} dataset={train_dataset}")
+                continue
 
-    if args.robust_training_mode == "full_fine_tune":
-        logger.info("[Robust][Mode] Full fine-tuning: unfreezing backbone (MLPs remain frozen)")
-        model_train.module.enable_full_fine_tune()
-    elif args.robust_training_mode == "lora":
-        logger.info("[Robust][Mode] LoRA training: enabling LoRA parameters only")
-        model_train.module.enable_lora()
+            emb_path = build_centre_emb_path(modality, val_dataset)
+            jobs.append(
+                build_alignment_cmd(
+                    nproc, args, model_type, modality, train_dataset, val_dataset,
+                    train_json, val_json, emb_path, train_bs, val_bs, train_max, val_max, args.align_epochs
+                )
+            )
+    return jobs
 
-    model_val = UniBindClassifier(
-        device=device,
-        pretrain_weights=args.pretrain_weights,
-        modality=args.val_modality,
-        centre_embeddings=raw_emb,
-        centre_labels=raw_lbls,
-        label_to_index=lbl_to_idx,
-        logger=logger,
-        use_flash_attention=args.use_flash_attention,
-        use_lora=args.robust_use_lora,
-        lora_rank=args.robust_lora_rank,
-        lora_alpha=args.robust_lora_alpha,
-        use_modality_head_mlp=args.robust_use_modality_head_mlp,
-        modality_head_mlp_weights=args.robust_modality_head_mlp_weights
-    ).to(device)
-    model_val.eval()
 
-    train_attack = PGDAttack(
-        logger,
-        AttackModel(model_train, train_mean, train_std),
-        epsilon=args.robust_epsilon,
-        alpha=1 / 255,
-        steps=10,
-        norm='linf',
-        random_start=True,
-        clamp_min=0.0,
-        clamp_max=1.0,
-        loss_type=args.robust_train_attack_loss
+def build_robust_jobs(args, logger) -> List[List[str]]:
+    jobs: List[List[str]] = []
+    nproc = gpu_count()
+    for model_type, modalities in MODEL_TYPE_TO_MODALITIES.items():
+        for modality in modalities:
+            ds_pair = fetch_robust_dataset_config(modality)
+            if ds_pair is None:
+                continue
+
+            train_dataset, val_dataset = ds_pair
+            train_bs = ROBUST_DATASET_TO_BATCH_SIZE.get(train_dataset)
+            val_bs = ROBUST_DATASET_TO_BATCH_SIZE.get(val_dataset)
+            train_max = ROBUST_TRAIN_MAX_SAMPLES_MAP.get(train_dataset)
+            val_max = ROBUST_VAL_MAX_SAMPLES_MAP.get(val_dataset)
+            train_json = ROBUST_TRAIN_JSON_MAP.get(train_dataset)
+            val_json = ROBUST_VAL_JSON_MAP.get(val_dataset)
+            if None in (train_bs, val_bs, train_max, val_max, train_json, val_json):
+                logger.warning(f"[SKIP][ROBUST] modality={modality} dataset={train_dataset}")
+                continue
+
+            emb_path = build_centre_emb_path(modality, val_dataset)
+            for mode in args.robust_modes:
+                if mode is RobustMode.FULL_FINE_TUNE and not args.allow_full_fine_tune:
+                    continue
+
+                if mode is RobustMode.FULL_FINE_TUNE:
+                    jobs.extend(
+                        build_full_fine_tune_jobs_for_modality(
+                            nproc, args, model_type, modality, train_dataset, val_dataset,
+                            train_json, val_json, emb_path, train_bs, val_bs, train_max, val_max
+                        )
+                    )
+                else:
+                    jobs.extend(
+                        build_lora_jobs_for_modality(
+                            nproc, args, model_type, modality, train_dataset, val_dataset,
+                            train_json, val_json, emb_path, train_bs, val_bs, train_max, val_max
+                        )
+                    )
+    return jobs
+
+
+def parse_args():
+    p = argparse.ArgumentParser("Trainer")
+    p.add_argument("--dataset_root", default="/home/user/datasets")
+    p.add_argument("--output_dir", default="output")
+    p.add_argument("--tensorboard_dir", default="tensorboard")
+    p.add_argument("--pretrain_weights", default="./ckpts/pretrained_weights_flash_atten.pt")
+    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--use_flash_attention", action="store_true", default=True)
+    p.add_argument("--do_alignment", action="store_true", default=False)
+    p.add_argument("--align_epochs", type=int, default=ALIGN_EPOCHS)
+    p.add_argument("--do_robust", action="store_true", default=False)
+    p.add_argument("--robust_epochs", type=int, default=ROBUST_EPOCHS)
+    p.add_argument("--robust_epsilons", type=int, nargs="*", default=ROBUST_EPSILONS)
+    p.add_argument("--robust_lora_ranks", type=int, nargs="*", default=ROBUST_LORA_RANKS)
+    p.add_argument("--robust_lora_alphas", type=int, nargs="*", default=ROBUST_LORA_ALPHAS)
+    p.add_argument(
+        "--robust_modes",
+        nargs="*",
+        type=RobustMode,
+        choices=list(RobustMode),
+        default=list(RobustMode),
+        help="Robust training modes to run",
     )
-    eval_attack = APGDAttack(
-        AttackModel(model_val, val_mean, val_std),
-        norm='linf',
-        n_restarts=1,
-        n_iter=50,
-        eps=args.robust_epsilon,
-        loss_type=args.robust_val_attack_loss,
-        device=device,
-        logger=logger
-    )
+    p.add_argument("--allow_full_fine_tune", action="store_true", default=True)
+    p.add_argument("--dry_run", action="store_true", default=False)
+    p.add_argument("--stop_on_error", action="store_true", default=False)
+    p.add_argument("--max_jobs", type=int, default=None)
+    return p.parse_args()
 
-    params = [p for p in model_train.parameters() if p.requires_grad]
-    optimizer = AdamW(params, lr=3e-3, weight_decay=1e-4)
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=3e-3,
-        steps_per_epoch=len(train_loader),
-        epochs=epochs,
-        pct_start=0.1,
-        div_factor=25.0,
-        final_div_factor=1e4
-    )
 
-    best_acc = -1.0
-    meters = {k: AverageMeter() for k in ["loss", "cos_sim", "rcos_sim", "acc", "racc"]}
-
-    if dist.get_rank() == 0:
-        writer.add_text("config/lora_rank", str(args.robust_lora_rank))
-        writer.add_text("config/lora_alpha", str(args.robust_lora_alpha))
-        writer.add_scalar("config/lora_rank", args.robust_lora_rank, 0)
-        writer.add_scalar("config/lora_alpha", args.robust_lora_alpha, 0)
-
-    for epoch in range(epochs):
-        logger.info(f"[Robust][Epoch {epoch + 1}/{epochs}] Starting training")
-        train_loader.sampler.set_epoch(epoch)
-
-        train_robust_epoch(
-            logger=logger,
-            device=device,
-            model_train=model_train,
-            model_original=model_original,
-            mean=train_mean,
-            std=val_std if val_std is not None and False else train_std,  # keep original if you intended train_std
-            data_loader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            attack=train_attack,
-            train_loss_type=args.robust_train_loss,
-            epoch=epoch,
-            total_epochs=epochs,
-            loss_meter=meters["loss"],
-            cos_sim_meter=meters["cos_sim"],
-            rcos_sim_meter=meters["rcos_sim"],
-            acc_meter=meters["acc"],
-            racc_meter=meters["racc"],
-            writer=writer
-        )
-
-        if args.robust_training_mode == "full_fine_tune":
-            ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_backbone_{args.model_type}.pt")
-            if dist.get_rank() == 0:
-                model_train.module.save_backbone(ckpt_path)
-        else:
-            ckpt_path = None
-            if args.robust_use_lora:
-                ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_lora_{args.model_type}.pt")
-                if dist.get_rank() == 0:
-                    model_train.module.save_lora_weights(ckpt_path)
-
-        torch.cuda.empty_cache()
-        dist.barrier()
-
-        if args.robust_training_mode == "full_fine_tune":
-            logger.info(f"[Robust][Epoch {epoch + 1}] Loading backbone weights for validation: {args.model_type}")
-            model_val.load_backbone(ckpt_path)
-        else:
-            if args.robust_use_lora:
-                logger.info(f"[Robust][Epoch {epoch + 1}] Loading LoRA weights for validation: {args.model_type}")
-                model_val.load_lora_weights(ckpt_path)
-
-        acc = evaluate_robust_one_stage(logger, device, model_val, val_loader, eval_attack, val_mean, val_std)
-        logger.info(f"[Robust][Epoch {epoch + 1}] Robust Acc on {args.val_modality.upper()} = {acc:.4f}")
-
-        if dist.get_rank() == 0 and acc > best_acc:
-            best_acc = acc
-            if args.robust_training_mode == "full_fine_tune":
-                best_ckpt_path = os.path.join(output_base, f"best_backbone_weights_{args.model_type}.pt")
-                shutil.copyfile(ckpt_path, best_ckpt_path)
-            else:
-                if args.robust_use_lora:
-                    best_ckpt_path = os.path.join(output_base, f"best_lora_weights_{args.model_type}.pt")
-                    shutil.copyfile(ckpt_path, best_ckpt_path)
-
-    writer.close()
-    logger.info(f"[Robust] Best robust accuracy: {best_acc:.4f}")
+def setup_logger() -> logging.Logger:
+    logger = logging.getLogger("orchestrator")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(ch)
+    return logger
 
 
 def main():
-    parser = argparse.ArgumentParser("UniBind Training")
-    parser.add_argument("--model_type", required=True)
-    parser.add_argument("--training_mode", choices=["alignment", "robust"], default="robust")
+    args = parse_args()
+    logger = setup_logger()
+    if not args.do_alignment and not args.do_robust:
+        logger.error("No work: enable --do_alignment and/or --do_robust")
+        sys.exit(1)
 
-    parser.add_argument("--train_modality", required=True)
-    parser.add_argument("--val_modality", required=True)
-    parser.add_argument("--train_dataset_name", required=True)
-    parser.add_argument("--val_dataset_name", required=True)
-    parser.add_argument("--train_dataset_root", required=True)
-    parser.add_argument("--val_dataset_root", required=True)
-    parser.add_argument("--train_json", required=True)
-    parser.add_argument("--val_json", required=True)
+    jobs: List[List[str]] = []
+    if args.do_alignment:
+        logger.info("Collecting alignment jobs")
+        jobs.extend(build_alignment_jobs(args, logger))
 
-    parser.add_argument("--pretrain_weights", required=True)
-    parser.add_argument("--center_emb", required=True)
+    if args.do_robust:
+        logger.info("Collecting robust jobs")
+        jobs.extend(build_robust_jobs(args, logger))
 
-    parser.add_argument("--train_batch_size", type=int, default=64)
-    parser.add_argument("--val_batch_size", type=int, default=64)
-    parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--train_max_samples", type=int, default=10)
-    parser.add_argument("--val_max_samples", type=int, default=10)
+    if args.max_jobs is not None:
+        jobs = jobs[: args.max_jobs]
 
-    parser.add_argument("--use_flash_attention", action="store_true", default=False)
+    logger.info(f"Planned jobs: {len(jobs)} (dry_run={args.dry_run})")
+    for idx, cmd in enumerate(jobs, 1):
+        logger.info(f"[RUN {idx}/{len(jobs)}]")
+        rc = run_command(cmd, logger, args.dry_run)
+        if rc != 0 and args.stop_on_error:
+            logger.error("Stopping due to failure")
+            break
 
-    parser.add_argument("--align_modality_head_mlp_weights", default=None)
-
-    parser.add_argument("--robust_train_attack_loss", default="l2")
-    parser.add_argument("--robust_val_attack_loss", default="ce")
-    parser.add_argument("--robust_train_loss", default="l2")
-
-    parser.add_argument("--robust_lora_rank", type=int, default=4)
-    parser.add_argument("--robust_lora_alpha", type=float, default=8)
-    parser.add_argument("--robust_epsilon", type=int, default=4)
-
-    parser.add_argument("--robust_training_mode", choices=["lora", "full_fine_tune"], default="lora", help="Mode for robust training")
-
-    parser.add_argument("--robust_use_modality_head_mlp", action="store_true", default=False)
-    parser.add_argument("--robust_modality_head_mlp_weights", default=None)
-
-    parser.add_argument("--tensorboard_data_dir", default="tensorboard")
-    parser.add_argument("--output_dir", default="output")
-    parser.add_argument("--epochs", type=int, default=2, help="Total number of training epochs")
-    args = parser.parse_args()
-
-    args.train_modality = Modality(args.train_modality)
-    args.val_modality = Modality(args.val_modality)
-
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-
-    if args.training_mode == "robust":
-        args.robust_epsilon = args.robust_epsilon / 255.0
-
-    if args.training_mode == "alignment":
-        mode_token = "align"
-        train_mode_token = "mlp_align"
-    else:
-        eps_int = int(round(args.robust_epsilon * 255))
-        mode_token = f"eps{eps_int}"
-        train_mode_token = "lora_r{args.robust_lora_rank}_a{args.robust_lora_alpha}" if args.robust_training_mode == "lora" else "full_fine_tune"
-
-    # Set up output directory with run_timestamp subdir
-    if dist.get_rank() == 0:
-        run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    else:
-        run_timestamp = None
-        
-    obj_list = [run_timestamp]
-    dist.broadcast_object_list(obj_list, src=0)
-    run_timestamp = obj_list[0]
-    output_base = Path(args.output_dir) / "train" / run_timestamp
-    output_base.mkdir(parents=True, exist_ok=True)
-
-    log_path = os.path.join(output_base, f"rank{rank}.log")
-    formatter = RelativePathFormatter(rank, '[RANK %(rank)d] %(asctime)s - %(relativepath)s:%(lineno)d - [%(levelname)s] - %(message)s')
-    fh = logging.FileHandler(log_path)
-    fh.setFormatter(formatter)
-    ch = logging.StreamHandler()
-    ch.setFormatter(formatter)
-    logger = logging.getLogger("train")
-    logger.setLevel(logging.INFO)
-    logger.handlers = [ch, fh]
-
-    prefix = "[Align]" if args.training_mode == "alignment" else "[Robust]"
-    logger.info(f"{prefix} [Train: {args.train_modality} | {args.train_dataset_name}] => [Val: {args.val_modality} | {args.val_dataset_name}]")
-    if args.training_mode == "robust":
-        logger.info(f"{prefix} Mode selected")
-        logger.info(f"{prefix} use_lora={args.robust_use_lora} | use_full_fine_tune={args.robust_use_full_fine_tune} | epsilon={args.robust_epsilon:.5f}")
-    else:
-        logger.info(f"{prefix} Mode selected")
-
-    tb_path = os.path.join(
-        args.output_dir,
-        args.tensorboard_data_dir,
-        f"rank{rank}",
-        train_mode_token,
-        run_timestamp
-    )
-    writer = SummaryWriter(log_dir=tb_path)
-
-    # Load centre embeddings and label mapping BEFORE creating data loaders so labels are indexed correctly
-    raw_emb, raw_lbls, lbl_to_idx, _ = load_label_mapping(args.center_emb, device)
-
-    train_loader = train_data_loader(
-        modality=args.train_modality,
-        dataset_root=args.train_dataset_root,
-        train_json=args.train_json,
-        label_to_index=lbl_to_idx,
-        batch_size=args.train_batch_size,
-        num_workers=args.num_workers,
-        max_samples=args.train_max_samples
-    )
-    val_loader = val_data_loader(
-        modality=args.val_modality,
-        dataset_root=args.val_dataset_root,
-        val_json=args.val_json,
-        label_to_index=lbl_to_idx,
-        batch_size=args.val_batch_size,
-        num_workers=args.num_workers,
-        max_samples=args.val_max_samples
-    )
-
-    if args.training_mode == "alignment":
-        run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, args.epochs, output_base)
-    else:
-        run_robust_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, args.epochs, output_base)
-
-    dist.destroy_process_group()
+    logger.info("Done")
 
 
 if __name__ == "__main__":
