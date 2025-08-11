@@ -1,11 +1,12 @@
 import time
+from shared_types import Modality
 import torch
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from attack import Attack
 from perf.profiling import GpuMemoryTracker, ProfileModelMemory
 from perf.debug import log_grad
-from model import Model, ForwardMode
+from model import MODALITY_MAP, Model, ForwardMode
 from meter import AverageMeter
 from transform import unnormalize_inplace, normalize_inplace
 from loss import l2_loss, ce_loss
@@ -17,25 +18,15 @@ from imagebind.imagebind_model import ModalityType
 def train_alignment_epoch(
     logger,
     device,
-    model,                      # UniBind: forward(dict) -> (text_emb, modality_emb)
+    model,
     data_loader,
     optimizer,
     scheduler,
     epoch: int,
     total_epochs: int,
     writer: SummaryWriter,
-    modality_key,               # <-- NEW: pass the correct ModalityType for this run
+    modality: Modality,
 ):
-    """
-    ALIGNMENT epoch (non-adversarial), matching original train.py math:
-      - logits = modality_emb @ text_emb^T
-      - labels = [0..B-1] (InfoNCE-style CE over rows).
-
-    Batch format:
-      batch['inputs']: Tensor            (modality tensor, e.g. images)
-      batch['descriptions']: Tensor|list (tokenized text or raw strings)
-      batch['labels']: LongTensor        (not used for loss here)
-    """
     epoch_start_time = time.time()
     step_base = epoch * len(data_loader)
     total_samples = 0
@@ -47,17 +38,15 @@ def train_alignment_epoch(
 
         inputs_tensor = batch['inputs']
         descriptions = batch['descriptions']
-        _ = batch['labels']  # unused here
+        _ = batch['labels']
 
         # to device
         inputs_tensor = inputs_tensor.to(device, non_blocking=True)
-        if torch.is_tensor(descriptions):
-            descriptions = descriptions.to(device, non_blocking=True)
+        descriptions = descriptions.to(device, non_blocking=True)
 
-        # Use the provided modality_key (no hard-coding)
         merged_inputs = {
-            modality_key: inputs_tensor,
-            ModalityType.TEXT: descriptions
+            MODALITY_MAP[modality]: inputs_tensor,
+            MODALITY_MAP[Modality.TEXT]: descriptions
         }
 
         with GpuMemoryTracker(logger):
@@ -132,7 +121,7 @@ def train_robust_epoch(
         logger.info(f"[ROBUST] Epoch {epoch+1}/{total_epochs}, batch {batch_idx+1}/{len(data_loader)}, batch size={batch_size}")
 
         inputs_tensor = inputs_tensor.to(device, non_blocking=True)
-        lbl = lbl.to(device)
+        lbl = lbl.to(device, non_blocking=True)
 
         model_train.eval()
 

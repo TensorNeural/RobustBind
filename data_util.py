@@ -1,6 +1,7 @@
 import os
 import json
 import math
+from tkinter import NO
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,6 +20,7 @@ from shared_types import BindModelType, Modality
 from binds.languagebind import transform_dict as lb_transform_dict
 
 from utils.utils import load_centre_embeddings
+import torch.multiprocessing as mp  # ensure alias mp is defined for spawn context
 
 BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 
@@ -63,13 +65,12 @@ PATCHABLE_IMAGE_TRANSFORM = transforms.Compose([
 # Dataset
 # ===================
 class JsonDataset(Dataset):
-    def __init__(self, dataset_root, data_json_path, transform, label_to_index=None, max_samples=None, debug=False):
+    def __init__(self, dataset_root, data_json_path, label_to_index=None, max_samples=None, debug=False):
         self.root_dir = dataset_root
-        self.transform = transform
         self.label_to_index_fn = label_to_index
 
         with open(data_json_path, "r") as f:
-            self.samples = [(item["data"], item["label"]) for item in json.load(f)]
+            self.samples = [(item["data"], item.get("description"), item["label"]) for item in json.load(f)]
 
         if max_samples is not None and max_samples < len(self.samples):
             indices = torch.arange(max_samples) if debug else torch.randperm(len(self.samples))[:max_samples]
@@ -79,11 +80,10 @@ class JsonDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        rel_path, label_str = self.samples[idx]
+        rel_path, description, label_str = self.samples[idx]
         full_path = os.path.join(self.root_dir, rel_path)
-        tensor = self.transform([full_path], device="cpu")[0]
         label = self.label_to_index_fn[label_str] if self.label_to_index_fn else 0
-        return tensor, label
+        return {"path": full_path, "description": description, "label": label}
 
 def image_transform_fn(resize=224):
     return transforms.Compose([
@@ -360,7 +360,7 @@ def load_and_transform_video_data(
         video_outputs = []
 
         if model_type == BindModelType.LANGUAGEBIND:
-            # LanguageBind settings
+            # LanguageBind settings: one full clip
             frame_sampler = UniformTemporalSubsample(num_samples=target_t)
             spatial_crop = None  # no multi-crop
             video_transform = transforms.Compose([
@@ -369,9 +369,9 @@ def load_and_transform_video_data(
                 Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
             ])
         else:
-            # ImageBind settings
+            # ImageBind settings: short clips with spatial crops
             frame_sampler = UniformTemporalSubsample(num_samples=2)
-            spatial_crop = SpatialCrop(224, num_crops=3)
+            spatial_crop = SpatialCrop(224, num_crops=1 if minSample else 3)
             video_transform = transforms.Compose([
                 ShortSideScale(224),
                 Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
@@ -384,12 +384,11 @@ def load_and_transform_video_data(
                 decode_audio=False,
                 **{"sample_rate": sample_rate},
             )
-
             if model_type == BindModelType.LANGUAGEBIND:
-                # One full clip
+                # One full clip for LanguageBind
                 all_clips_timepoints = [(0, video.duration)]
             else:
-                # One short clip of 2 frames
+                # Short clips for ImageBind
                 clip_duration = 2
                 clips_per_video = 1
                 all_clips_timepoints = get_clip_timepoints(
@@ -402,6 +401,7 @@ def load_and_transform_video_data(
                 clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
                 if clip is None:
                     continue
+
                 video_clip = frame_sampler(clip["video"]) / 255.0  # [C, T, H, W]
                 all_video.append(video_clip)
 
@@ -418,7 +418,7 @@ def load_and_transform_video_data(
             else:
                 all_video = [video_transform(clip) for clip in all_video]
                 all_video = spatial_crop(all_video)  # list of [C, T=2, H, W]
-                video_tensor = torch.stack(all_video, dim=0)  # [V=3, C, T=2, H, W]
+                video_tensor = torch.stack(all_video, dim=0)  # [V=1 or 3, C, T=2, H, W]
 
             video_outputs.append(video_tensor)
 
@@ -597,25 +597,74 @@ def load_label_mapping(center_emb_path, device):
     idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
     return raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl
 
+class CollateFn:
+    """Picklable collate function that performs per-sample CPU transforms.
+    Now initializes the transform in __init__ to avoid recreating every batch.
+    """
+    def __init__(self, modality, min_sample: bool, model_type):
+        self.modality = modality
+        self.min_sample = min_sample
+        self.model_type = model_type
+        # Initialize and store transform once (user requested initialization in __init__).
+        self.transform = get_transform_fn(self.modality, minSample=self.min_sample, model_type=self.model_type)
+
+    def __call__(self, batch):
+        transform = self.transform
+        paths = [item['path'] for item in batch]
+        desc_items = [item['description'] for item in batch if item['description'] is not None]
+        # Per-path transform (CPU)
+        inputs = [transform([p], device='cpu')[0] for p in paths]
+        inputs = torch.stack(inputs)
+        labels = torch.tensor([item['label'] for item in batch])
+        if desc_items:
+            desc_tokens = [load_and_transform_text([d], device='cpu').squeeze(0) for d in desc_items]
+            desc_tokens = torch.stack(desc_tokens)
+        else:
+            desc_tokens = None
+        batch_out = {'inputs': inputs, 'labels': labels}
+        if desc_tokens is not None:
+            batch_out['descriptions'] = desc_tokens
+        return batch_out
+
 def train_data_loader(
     modality, dataset_root, train_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False,
     model_type=BindModelType.IMAGEBIND
 ):
-    transform = get_transform_fn(modality, minSample=True, model_type=model_type)
-    dataset = JsonDataset(dataset_root, train_json, transform, label_to_index, max_samples, debug)
+    dataset = JsonDataset(dataset_root, train_json, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=True)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
+    mp_ctx = mp.get_context("spawn")
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=False,
+        persistent_workers=True if num_workers > 0 else False,
+        collate_fn=CollateFn(modality, True, model_type),
+        multiprocessing_context=mp_ctx
+    )
+
 
 def val_data_loader(
     modality, dataset_root, val_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False,
-    model_type=BindModelType.IMAGEBIND
+    model_type=BindModelType.IMAGEBIND,
+    multiprocessing_context=None
 ):
-    transform = get_transform_fn(modality, minSample=True, model_type=model_type)
-    dataset = JsonDataset(dataset_root, val_json, transform, label_to_index, max_samples, debug)
+    dataset = JsonDataset(dataset_root, val_json, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=False)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
+    mp_ctx = multiprocessing_context or mp.get_context("spawn")
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=False,
+        persistent_workers=True if num_workers > 0 else False,
+        collate_fn=CollateFn(modality, True, model_type),
+        multiprocessing_context=mp_ctx
+    )
 
 def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBIND):
     mean = torch.tensor(MEAN_MAP[modality], device=device)

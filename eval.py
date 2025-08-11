@@ -49,6 +49,57 @@ def evaluate_robust_one_stage(logger, device, model: UniBindClassifier, data_loa
     logger.info(f"Total one-stage eval time: {time.time() - eval_start_time:.2f} seconds")
     return robust_acc
 
+@torch.no_grad()
+def evaluate_alignment_acc(logger, device, model_val, val_loader):
+    """Evaluate alignment accuracy with DDP support and detailed logging.
+
+    Returns accuracy in percent (same convention as previous implementation).
+    """
+    logger.info(f"[Align] Evaluating alignment accuracy...")
+    eval_start_time = time.time()
+    model_val.eval()
+    total_correct_local = 0
+    total_samples_local = 0
+
+    for batch_idx, batch in enumerate(val_loader):
+        logger.info(f"[Align][Eval] Evaluating batch {batch_idx+1}/{len(val_loader)}")
+        batch_start = time.time()
+        inputs_tensor = batch['inputs'].to(device, non_blocking=True)
+        labels = batch['labels'].to(device, non_blocking=True)
+
+        logger.info(f"[Align][Eval] Batch {batch_idx+1}/{len(val_loader)} size={labels.size(0)}")
+
+        logits, _ = model_val(inputs_tensor, mode=ForwardMode.LOGITS)
+        preds = logits.argmax(dim=1)
+        correct = (preds == labels).sum().item()
+        total_correct_local += correct
+        total_samples_local += labels.size(0)
+
+        # Cleanup per batch
+        del inputs_tensor, labels, logits, preds
+        torch.cuda.empty_cache()
+
+        logger.info(f"[Align][Eval] Batch {batch_idx+1} time: {time.time() - batch_start:.2f}s | running samples={total_samples_local}")
+
+    # Distributed aggregation
+    correct_tensor = torch.tensor(total_correct_local, dtype=torch.float64, device=device)
+    samples_tensor = torch.tensor(total_samples_local, dtype=torch.float64, device=device)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(samples_tensor, op=dist.ReduceOp.SUM)
+
+    total_correct = correct_tensor.item()
+    total_samples = samples_tensor.item()
+
+    if total_samples == 0:
+        logger.warning("[Align][Eval] No samples processed.")
+        return 0.0
+
+    acc_percent = 100.0 * total_correct / total_samples
+    logger.info(f"[Align][Eval] Total samples: {int(total_samples)} | Total correct: {int(total_correct)}")
+    logger.info(f"[Align][Eval] Accuracy = {acc_percent:.4f}% | Total eval time: {time.time() - eval_start_time:.2f}s")
+    return acc_percent
+
 def evaluate_two_stage(logger, device, model: UniBindClassifier, data_loader, attack_loss_type, iteration_count, epsilon, mean, std):
     logger.info(f"Running two-stage robust evaluation: iteration_count={iteration_count}, eps={(epsilon * 255):.0f}/255")
 

@@ -497,12 +497,19 @@ class ImageBindClassifier(nn.Module):
                 trunk_inputs = modality_value["trunk"]
                 head_inputs = modality_value["head"]
                 modality_value = self.modality_trunks[modality_key](**trunk_inputs)
-                modality_value = self.modality_heads[modality_key][0](modality_value)
 
-                if only_cls:
-                    modality_value = modality_value[:, 0]
+                if modality_key == ModalityType.VISION:
+                    modality_value = self.modality_heads[modality_key][0](modality_value)
 
-                modality_value = self.modality_heads[modality_key][1](modality_value)
+                    if only_cls:
+                        modality_value = modality_value[:, 0]
+
+                    modality_value = self.modality_heads[modality_key][1](modality_value)
+                else:
+                    modality_value = self.modality_heads[modality_key](
+                        modality_value, **head_inputs
+                    )
+                
                 modality_value = self.modality_postprocessors[modality_key](
                     modality_value
                 )

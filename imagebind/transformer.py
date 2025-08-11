@@ -139,7 +139,7 @@ class FlashAttention2(nn.Module):
     def forward(
         self,
         x: torch.Tensor,                # [T, B, D] => query for self-attn
-        attn_mask: torch.Tensor = None, # Not supported
+        attn_mask: torch.Tensor = None, # Optional attention mask
         key: torch.Tensor = None,       # [T, B, D] => optional cross-attn K
         value: torch.Tensor = None,     # [T, B, D] => optional cross-attn V
         is_causal: bool = False
@@ -149,9 +149,6 @@ class FlashAttention2(nn.Module):
         For cross-attention: pass separate key, value in [T, B, D].
         Returns [T, B, D], matching nn.MultiheadAttention(batch_first=False).
         """
-        if attn_mask is not None:
-            raise NotImplementedError("FlashAttention2 does not support attn_mask. Must be None.")
-
         # x, key, value => [T, B, D]
         T, B, _ = x.shape
 
@@ -182,9 +179,9 @@ class FlashAttention2(nn.Module):
         k = k.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, -1, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # 3) FlashAttention 2
+        # 3) FlashAttention 2 with attn_mask
         out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=is_causal
+            q, k, v, attn_mask=attn_mask, dropout_p=self.dropout, is_causal=is_causal
         )
         # => [B, num_heads, T, head_dim]
 
