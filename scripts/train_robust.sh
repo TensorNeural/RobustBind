@@ -199,14 +199,14 @@ declare -A ROBUST_EMB_SUFFIX_MAP=(
 # done
 
 # Alignment config
-DO_ALIGNMENT=${DO_ALIGNMENT:-1}
-ALIGN_EPOCHS=${ALIGN_EPOCHS:-2}
+DO_ALIGNMENT=1
+ALIGN_EPOCHS=1
 
 declare -A ALIGN_TRAIN_MODALITY_TO_DATASET=(
-  # [image]="ImageNet-1K"
-  # [video]="MSR-VTT"
-  # [audio]="ESC-50"
-  # [thermal]="LLVIP"
+  [image]="ImageNet-1K"
+  [video]="MSR-VTT"
+  [audio]="ESC-50"
+  [thermal]="LLVIP"
   [event]="N-Caltech-101"
 )
 
@@ -227,20 +227,29 @@ declare -A ALIGN_DATASET_TO_BATCH_SIZE=(
 )
 
 declare -A ALIGN_TRAIN_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=1281167
-  [MSR-VTT]=7010
-  [ESC-50]=1600
-  [LLVIP]=67900
+  # [ImageNet-1K]=1281167
+  # [MSR-VTT]=7010
+  # [ESC-50]=1600
+  # [LLVIP]=67900
   # [N-Caltech-101]=6139
-  [N-Caltech-101]=1000
+  [ImageNet-1K]=4
+  [MSR-VTT]=4
+  [ESC-50]=4
+  [LLVIP]=4
+  [N-Caltech-101]=4
 )
 
 declare -A ALIGN_VAL_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=50000
-  [MSR-VTT]=2990
-  [ESC-50]=400
-  [LLVIP]=16974
-  [N-Caltech-101]=2570
+  # [ImageNet-1K]=50000
+  # [MSR-VTT]=2990
+  # [ESC-50]=400
+  # [LLVIP]=16974
+  # [N-Caltech-101]=2570
+  [ImageNet-1K]=4
+  [MSR-VTT]=4
+  [ESC-50]=4
+  [LLVIP]=4
+  [N-Caltech-101]=4
 )
 
 declare -A ALIGN_TRAIN_JSON_MAP=(

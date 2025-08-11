@@ -101,9 +101,9 @@ def get_transform_fn(modality, minSample=False, model_type=None):
         Modality.TEXT: load_and_transform_text,
         Modality.IMAGE: load_and_transform_vision_data,
         Modality.EVENT: load_and_transform_event_data,
-        Modality.THERMAL: load_and_transform_thermal_data(model_type=model_type),
-        Modality.VIDEO: load_and_transform_video_data(minSample=minSample, model_type=model_type),
-        Modality.AUDIO: load_and_transform_audio_data(model_type),
+        Modality.THERMAL: ThermalTransform(model_type=model_type),
+        Modality.VIDEO: VideoTransform(minSample=minSample, model_type=model_type),
+        Modality.AUDIO: AudioTransform(model_type),
         Modality.POINT: load_and_transform_point_data
     }[modality]
 
@@ -122,108 +122,139 @@ def load_and_transform_patchable_image_data(images):
         transformed_list.append(transformed)
     return torch.stack(transformed_list)
 
-def load_and_transform_thermal_data(model_type=BindModelType.IMAGEBIND):
-    def transform(thermal_paths, device):
-        # Determine expected channels and color mode
+class ThermalTransform:
+    def __init__(self, model_type=BindModelType.IMAGEBIND):
+        self.model_type = model_type
         if model_type == BindModelType.LANGUAGEBIND:
-            expected_channels = 3
-            color_mode = "RGB"
-        else:  # UniBind/ImageBind expects 1 channel
-            expected_channels = 1
-            color_mode = "L"
-
-        # Load mean and std, then expand if needed
+            self.expected_channels = 3
+            self.color_mode = "RGB"
+        else:
+            self.expected_channels = 1
+            self.color_mode = "L"
         mean = MEAN_MAP[Modality.THERMAL]
         std = STD_MAP[Modality.THERMAL]
-        if len(mean) == 1 and expected_channels == 3:
+        if len(mean) == 1 and self.expected_channels == 3:
             mean = mean * 3
             std = std * 3
-
-        preprocess = transforms.Compose([
+        self.preprocess = transforms.Compose([
             transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
-
+    def __call__(self, thermal_paths, device):
         images = []
         for p in thermal_paths:
             with open(p, "rb") as f:
-                img = Image.open(f).convert(color_mode)
-            images.append(preprocess(img).to(device))
-
+                img = Image.open(f).convert(self.color_mode)
+            images.append(self.preprocess(img).to(device))
         return torch.stack(images)
 
-    return transform
-
-def load_and_transform_point_data(point_paths, device):
-    return torch.stack([torch.load(p) for p in point_paths]).to(device)
-
-def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
-    waveform -= waveform.mean()
-    fbank = torchaudio.compliance.kaldi.fbank(
-        waveform, htk_compat=True, sample_frequency=sample_rate,
-        use_energy=False, window_type="hanning", num_mel_bins=num_mel_bins,
-        dither=0.0, frame_length=25, frame_shift=10
-    ).transpose(0, 1)
-    p = target_length - fbank.size(1)
-    if abs(p) / fbank.size(1) > 0.2:
-        logging.warning(f"Audio frame mismatch: {fbank.size(1)} vs {target_length}")
-    fbank = torch.nn.functional.pad(fbank, (0, max(0, p)))[:, :target_length]
-    return fbank.unsqueeze(0)
-
-def load_and_transform_audio_data(model_type):
-    def transform(
-        audio_paths,
-        device,
-        num_mel_bins=128,
-        target_length=204,
-        sample_rate=16000,
-        clip_duration=2,
-        clips_per_video=3,
-        mean=-4.268,
-        std=9.138
-    ):
+class VideoTransform:
+    def __init__(self, minSample=False, model_type=BindModelType.IMAGEBIND):
+        self.model_type = model_type
+        self.minSample = minSample
         if model_type == BindModelType.LANGUAGEBIND:
-            num_mel_bins = 112
-            target_length = 1036
-            clip_duration = 10.4
+            self.frame_sampler = UniformTemporalSubsample(num_samples=8)
+            self.spatial_crop = None
+            self.video_transform = transforms.Compose([
+                ShortSideScale(224),
+                transforms.CenterCrop(224),
+                Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
+            ])
+        else:
+            self.frame_sampler = UniformTemporalSubsample(num_samples=2)
+            self.spatial_crop = SpatialCrop(224, num_crops=1 if minSample else 3)
+            self.video_transform = transforms.Compose([
+                ShortSideScale(224),
+                Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
+            ])
+    def __call__(self, video_paths, device, sample_rate=16000, target_t=8):
+        if video_paths is None:
+            return None
+        video_outputs = []
+        for video_path in video_paths:
+            video = EncodedVideo.from_path(
+                video_path,
+                decoder="decord",
+                decode_audio=False,
+                **{"sample_rate": sample_rate},
+            )
+            if self.model_type == BindModelType.LANGUAGEBIND:
+                all_clips_timepoints = [(0, video.duration)]
+            else:
+                clip_duration = 2
+                clips_per_video = 1
+                all_clips_timepoints = get_clip_timepoints(
+                    ConstantClipsPerVideoSampler(clip_duration, clips_per_video),
+                    video.duration
+                )
+            all_video = []
+            for clip_timepoints in all_clips_timepoints:
+                clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
+                if clip is None:
+                    continue
+                video_clip = self.frame_sampler(clip["video"]) / 255.0
+                all_video.append(video_clip)
+            if not all_video:
+                raise ValueError(f"No valid clips in video {video_path}")
+            if self.model_type == BindModelType.LANGUAGEBIND:
+                video_tensor = self.video_transform(all_video[0])
+                T_actual = video_tensor.shape[1]
+                if T_actual < 8:
+                    raise ValueError(f"Video {video_path} has only {T_actual} frames, require ≥8")
+                T_trim = (T_actual // 8) * 8
+                video_tensor = video_tensor[:, :T_trim]
+            else:
+                all_video = [self.video_transform(clip) for clip in all_video]
+                all_video = self.spatial_crop(all_video)
+                video_tensor = torch.stack(all_video, dim=0)
+            video_outputs.append(video_tensor)
+        if self.model_type == BindModelType.LANGUAGEBIND:
+            return torch.stack(video_outputs, dim=0).to(device)
+        else:
+            return torch.stack(video_outputs, dim=0).to(device)
 
-        normalize = transforms.Normalize(mean=[mean], std=[std])
+class AudioTransform:
+    def __init__(self, model_type):
+        self.model_type = model_type
+        if model_type == BindModelType.LANGUAGEBIND:
+            self.num_mel_bins = 112
+            self.target_length = 1036
+            self.clip_duration = 10.4
+        else:
+            self.num_mel_bins = 128
+            self.target_length = 204
+            self.clip_duration = 2
+        self.clips_per_video = 3
+        self.sample_rate = 16000
+        self.mean = -4.268
+        self.std = 9.138
+        self.normalize = transforms.Normalize(mean=[self.mean], std=[self.std])
+    def __call__(self, audio_paths, device):
         outputs = []
         sampler = ConstantClipsPerVideoSampler(
-            clip_duration=clip_duration, clips_per_video=clips_per_video
+            clip_duration=self.clip_duration, clips_per_video=self.clips_per_video
         )
-
         for path in audio_paths:
             waveform, sr = torchaudio.load(path)
-            if sr != sample_rate:
-                waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
-
-            # Ensure minimum total duration
-            total_duration = waveform.size(1) / sample_rate
-            expected_samples = int(clip_duration * sample_rate)
-            if total_duration < clip_duration:
+            if sr != self.sample_rate:
+                waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
+            total_duration = waveform.size(1) / self.sample_rate
+            expected_samples = int(self.clip_duration * self.sample_rate)
+            if total_duration < self.clip_duration:
                 pad_len = expected_samples - waveform.size(1)
                 waveform = torch.nn.functional.pad(waveform, (0, pad_len))
-
             segments = []
-            clip_timepoints = get_clip_timepoints(sampler, waveform.size(1) / sample_rate)
-
+            clip_timepoints = get_clip_timepoints(sampler, waveform.size(1) / self.sample_rate)
             for start, end in clip_timepoints:
-                clip = waveform[:, int(start * sample_rate):int(end * sample_rate)]
-
-                # Pad clip if still too short (e.g., end too close to waveform end)
+                clip = waveform[:, int(start * self.sample_rate):int(end * self.sample_rate)]
                 if clip.size(1) < expected_samples:
                     clip = torch.nn.functional.pad(clip, (0, expected_samples - clip.size(1)))
-
-                spec = waveform2melspec(clip, sample_rate, num_mel_bins, target_length)
-                segments.append(normalize(spec))
-
+                spec = waveform2melspec(clip, self.sample_rate, self.num_mel_bins, self.target_length)
+                segments.append(self.normalize(spec))
             outputs.append(torch.stack(segments))
-
         return torch.stack(outputs).to(device)
-    return transform
 
 def crop_boxes(boxes, x_offset, y_offset):
     """
@@ -425,7 +456,7 @@ def load_and_transform_video_data(
         if model_type == BindModelType.LANGUAGEBIND:
             return torch.stack(video_outputs, dim=0).to(device)  # [B, C, T, H, W]
         else:
-            return torch.stack(video_outputs, dim=0).to(device)  # [B, V, C, T=2, H, W]
+            return torch.stack(video_outputs, dim=0).to(device)  # [B, V, C, T, H, W]
 
     return transform
 
@@ -687,3 +718,19 @@ def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBI
             return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
     else:
         return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)
+
+def load_and_transform_point_data(point_paths, device):
+    return torch.stack([torch.load(p) for p in point_paths]).to(device)
+
+def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
+    waveform -= waveform.mean()
+    fbank = torchaudio.compliance.kaldi.fbank(
+        waveform, htk_compat=True, sample_frequency=sample_rate,
+        use_energy=False, window_type="hanning", num_mel_bins=num_mel_bins,
+        dither=0.0, frame_length=25, frame_shift=10
+    ).transpose(0, 1)
+    p = target_length - fbank.size(1)
+    if abs(p) / fbank.size(1) > 0.2:
+        logging.warning(f"Audio frame mismatch: {fbank.size(1)} vs {target_length}")
+    fbank = torch.nn.functional.pad(fbank, (0, max(0, p)))[:, :target_length]
+    return fbank.unsqueeze(0)

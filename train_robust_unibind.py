@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 from datetime import datetime
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -38,7 +39,7 @@ class RelativePathFormatter(logging.Formatter):
         return super().format(record)
 
 
-def run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs):
+def run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs, output_base):
     unibind_train = UniBind(
         args=argparse.Namespace(pretrain_weights=args.pretrain_weights, modality=args.train_modality),
         use_flash_attention=args.use_flash_attention,
@@ -98,7 +99,7 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
             modality=modality
         )
 
-        ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_mlp_{args.model_type}.pt")
+        ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_mlp_{args.model_type}.pt")
         if dist.get_rank() == 0:
             unibind_train.module.save_modality_head_mlp_weights(ckpt_path)
 
@@ -111,7 +112,7 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
-            best_ckpt_path = os.path.join(args.output_dir, f"best_mlp_weights_{args.model_type}.pt")
+            best_ckpt_path = os.path.join(output_base, f"best_mlp_weights_{args.model_type}.pt")
             shutil.copyfile(ckpt_path, best_ckpt_path)
             logger.info(f"[Align] Best checkpoint saved: {best_ckpt_path}")
 
@@ -120,7 +121,7 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
     if dist.get_rank() == 0:
         logger.info(f"[Align] Best alignment accuracy: {best_acc:.4f}")
 
-def run_robust_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs):
+def run_robust_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs, output_base):
     train_mean, train_std = get_normalization_tensors(args.train_modality, device)
     val_mean, val_std = get_normalization_tensors(args.val_modality, device)
 
@@ -251,13 +252,13 @@ def run_robust_training(args, device, logger, writer, train_loader, val_loader, 
         )
 
         if args.robust_training_mode == "full_fine_tune":
-            ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_backbone_{args.model_type}.pt")
+            ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_backbone_{args.model_type}.pt")
             if dist.get_rank() == 0:
                 model_train.module.save_backbone(ckpt_path)
         else:
             ckpt_path = None
             if args.robust_use_lora:
-                ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch + 1}_lora_{args.model_type}.pt")
+                ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_lora_{args.model_type}.pt")
                 if dist.get_rank() == 0:
                     model_train.module.save_lora_weights(ckpt_path)
 
@@ -278,11 +279,11 @@ def run_robust_training(args, device, logger, writer, train_loader, val_loader, 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
             if args.robust_training_mode == "full_fine_tune":
-                best_ckpt_path = os.path.join(args.output_dir, f"best_backbone_weights_{args.model_type}.pt")
+                best_ckpt_path = os.path.join(output_base, f"best_backbone_weights_{args.model_type}.pt")
                 shutil.copyfile(ckpt_path, best_ckpt_path)
             else:
                 if args.robust_use_lora:
-                    best_ckpt_path = os.path.join(args.output_dir, f"best_lora_weights_{args.model_type}.pt")
+                    best_ckpt_path = os.path.join(output_base, f"best_lora_weights_{args.model_type}.pt")
                     shutil.copyfile(ckpt_path, best_ckpt_path)
 
     writer.close()
@@ -354,18 +355,19 @@ def main():
         mode_token = f"eps{eps_int}"
         train_mode_token = "lora_r{args.robust_lora_rank}_a{args.robust_lora_alpha}" if args.robust_training_mode == "lora" else "full_fine_tune"
 
-    args.output_dir = os.path.join(
-        args.output_dir,
-        "train",
-        args.model_type,
-        f"{args.train_dataset_name}__{args.val_dataset_name}",
-        mode_token,
-        train_mode_token
-    )
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Set up output directory with run_timestamp subdir
+    if dist.get_rank() == 0:
+        run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    else:
+        run_timestamp = None
+        
+    obj_list = [run_timestamp]
+    dist.broadcast_object_list(obj_list, src=0)
+    run_timestamp = obj_list[0]
+    output_base = Path(args.output_dir) / "train" / run_timestamp
+    output_base.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")
+    log_path = os.path.join(output_base, f"rank{rank}.log")
     formatter = RelativePathFormatter(rank, '[RANK %(rank)d] %(asctime)s - %(relativepath)s:%(lineno)d - [%(levelname)s] - %(message)s')
     fh = logging.FileHandler(log_path)
     fh.setFormatter(formatter)
@@ -388,7 +390,7 @@ def main():
         args.tensorboard_data_dir,
         f"rank{rank}",
         train_mode_token,
-        timestamp
+        run_timestamp
     )
     writer = SummaryWriter(log_dir=tb_path)
 
@@ -415,9 +417,9 @@ def main():
     )
 
     if args.training_mode == "alignment":
-        run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, args.epochs)
+        run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, args.epochs, output_base)
     else:
-        run_robust_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, args.epochs)
+        run_robust_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, args.epochs, output_base)
 
     dist.destroy_process_group()
 
