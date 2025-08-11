@@ -13,12 +13,26 @@ from typing import Optional, Tuple, List, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import matplotlib
+
+from model import MODALITY_TEMPLATES
+from shared_types import Modality
 matplotlib.use("Agg")
 from PIL import Image
 import numpy as np
+import shutil
 
 from google import genai
 from google.genai import types
+
+
+# Shared mapping for modality detection
+MODALITY_MAPPING = {
+    "ImageNet-1K": "image",
+    "ESC-50": "audio",
+    "LLVIP": "thermal",
+    "MSR-VTT": "video",
+    "N-Caltech-101": "event",
+}
 
 
 # ==========================================================
@@ -48,6 +62,7 @@ def save_output_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+        
     print(f"[✓] Saved {len(data)} entries to {path}")
 
 def read_file_bytes(file_path: Path):
@@ -74,27 +89,49 @@ def guess_mime_type(modality: str, file_path: Path) -> str:
         "audio": "audio/mp3",
     }.get(modality, "application/octet-stream")
 
+def prepare_files_for_model(entry: dict, dataset_root: Path, modality: str, logger: logging.Logger, event_frames: int):
+    rel_path = entry["data"]
+    abs_path = dataset_root / rel_path
+
+    if modality == "event":
+        if not abs_path.exists():
+            logger.error(f"Missing event file | {abs_path}")
+            return None
+
+        frame_paths = render_event_to_frames(abs_path, target_size=224, T=event_frames, group_by="time")
+        if not frame_paths:
+            logger.error(f"Failed to render event frames | {abs_path}")
+            return None
+
+        return frame_paths  # include ALL frames
+
+    else:
+        if not abs_path.exists():
+            logger.error(f"Missing media file | {abs_path}")
+            return None
+
+        return abs_path
 
 # ==========================================================
 # Event rendering (EventBind-style frames: pos→cyan, neg→yellow)
 # ==========================================================
 
-def read_events_from_bin(path: Path):
-    with open(path, "rb") as f:
-        buf = f.read()
+def read_events_from_bin(file_path: Path):
+    with open(file_path, "rb") as file:
+        buffer = file.read()
 
-    n = len(buf) // 5
-    if n == 0:
+    num_events = len(buffer) // 5
+    if num_events == 0:
         return np.array([]), np.array([]), np.array([]), np.array([])
 
-    raw = np.frombuffer(buf, dtype=np.uint8, count=n * 5).reshape(-1, 5)
-    x = raw[:, 0].astype(np.uint32)
-    y = raw[:, 1].astype(np.uint32)
-    p = ((raw[:, 2] >> 7) & 1).astype(np.uint8)
-    t = (((raw[:, 2] & 0x7F).astype(np.uint32) << 16) |
-         (raw[:, 3].astype(np.uint32) << 8) |
-          raw[:, 4].astype(np.uint32))
-    return x, y, p, t
+    raw_data = np.frombuffer(buffer, dtype=np.uint8, count=num_events * 5).reshape(-1, 5)
+    x_coords = raw_data[:, 0].astype(np.uint32)
+    y_coords = raw_data[:, 1].astype(np.uint32)
+    polarities = ((raw_data[:, 2] >> 7) & 1).astype(np.uint8)
+    timestamps = (((raw_data[:, 2] & 0x7F).astype(np.uint32) << 16) |
+                  (raw_data[:, 3].astype(np.uint32) << 8) |
+                   raw_data[:, 4].astype(np.uint32))
+    return x_coords, y_coords, polarities, timestamps
 
 def read_events_from_npz(path: Path):
     data = np.load(str(path))
@@ -126,15 +163,15 @@ def _eventbind_colorize(pos: np.ndarray, neg: np.ndarray, gain: float = 1.5, gam
     B = p * 255.0
     return np.stack([R, G, B], axis=-1).clip(0, 255).astype(np.uint8)
 
-def _accumulate_histogram(x, y, p, H, W):
-    pos = np.zeros((H, W), dtype=np.float32)
-    neg = np.zeros((H, W), dtype=np.float32)
-    mpos = (p == 1)
-    if np.any(mpos):
-        np.add.at(pos, (y[mpos], x[mpos]), 1.0)
-    if np.any(~mpos):
-        np.add.at(neg, (y[~mpos], x[~mpos]), 1.0)
-    return pos, neg
+def _accumulate_histogram(x_coords, y_coords, polarities, height, width):
+    positive_events = np.zeros((height, width), dtype=np.float32)
+    negative_events = np.zeros((height, width), dtype=np.float32)
+    positive_mask = (polarities == 1)
+    if np.any(positive_mask):
+        np.add.at(positive_events, (y_coords[positive_mask], x_coords[positive_mask]), 1.0)
+    if np.any(~positive_mask):
+        np.add.at(negative_events, (y_coords[~positive_mask], x_coords[~positive_mask]), 1.0)
+    return positive_events, negative_events
 
 def _normalize_coords(x, y, size):
     x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1)).astype(np.int32)
@@ -282,8 +319,16 @@ def gemini_describe(client: genai.Client,
         )
     )
     predict_latency = time.perf_counter() - t0_predict
-
     description = (getattr(resp, "text", None) or "").strip()
+
+    if resp.prompt_feedback is not None and resp.prompt_feedback.block_reason is not None:
+        logger.info(f"❗️ Gemini blocked the request: {resp.prompt_feedback.block_reason}")
+        template = MODALITY_TEMPLATES.get(Modality(modality), "a {}")
+        description = template.format(label)
+    elif not description:
+        logger.info("❗️ Gemini returned an empty description, using fallback template.")
+        template = MODALITY_TEMPLATES.get(Modality(modality), "a {}")
+        description = template.format(label)
 
     # Logging
     if is_multi:
@@ -310,48 +355,68 @@ def partition_indices(n_items: int, num_shards: int, shard_index: int):
     return [i for i in range(n_items) if (i % num_shards) == shard_index]
 
 def describe_one(client: genai.Client, entry: Tuple[int, dict], dataset_root: Path,
-                 modality: str, model: str, logger: logging.Logger):
+                 modality: str, model: str, logger: logging.Logger, event_frames: int):
     idx, payload = entry
-    rel_path = payload["data"]
     label = payload.get("label", "")
-    abs_path = dataset_root / rel_path
 
-    # Prepare media
-    if modality == "event":
-        if not abs_path.exists():
-            logger.error(f"Missing event file | {abs_path}")
-            return None
-        
-        frame_paths = render_event_to_frames(abs_path, target_size=224, T=8, group_by="time")
-        if not frame_paths:
-            logger.error(f"Failed to render event frames | {abs_path}")
-            return None
+    # Use shared helper to prepare files_for_model
+    files_for_model = prepare_files_for_model(payload, dataset_root, modality, logger, event_frames)
+    if files_for_model is None:
+        return None
 
-        files_for_model = frame_paths  # include ALL frames
-
-    else:
-        # other modalities: just pass through original file
-        files_for_model = abs_path
-        if not abs_path.exists():
-            logger.error(f"Missing media file | {abs_path}")
-            return None
-
-    # Inference with retries
-    max_tries = 5
-    for attempt in range(max_tries):
+    # Infinite exponential backoff for retries
+    attempt = 0
+    while True:
         try:
             desc_txt, usage = gemini_describe(client, files_for_model, modality, model, logger, label)
-            return idx, rel_path, label, desc_txt, usage
-        
+            logger.info(f"[✓] Processed {payload['data']} | label='{label}' | description='{desc_txt}'")
+            return idx, payload["data"], label, desc_txt, usage
         except Exception as e:
-            logger.warning(f"Retry {attempt+1}/{max_tries} after error: {e}")
-            time.sleep((2 ** attempt) + random.uniform(0, 0.5))
+            attempt += 1
+            backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))  # Slower increase
+            logger.info(f"Error processing {payload['data']}: {e}. Retrying in {backoff_time:.2f}s...")
+            time.sleep(backoff_time)
 
-    logger.error(f"Max retries exceeded | {abs_path}")
-    return None
+def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event_frames, model, deduplicated_align_data, output_base, shard_index):
+    log_path = output_base / f"{dataset_dir_name}_shard_{shard_index}.log"
+    logger = setup_logger(log_path)
+
+    client = genai.Client()
+    with tqdm(total=len(shard_entries), desc=f"Processing shard {shard_index} for {dataset_dir_name}", unit="entry", dynamic_ncols=True) as pbar:
+        logger.info(f"[INFO] Processing {len(shard_entries)} entries in shard {shard_index} for {dataset_dir_name}...")
+        for entry in shard_entries:
+            files_for_model = prepare_files_for_model(entry, dataset_root / dataset_dir_name, modality, logger, event_frames)
+            if files_for_model is None:
+                logger.warning(f"Skipping entry {entry['data']} due to missing file")
+                pbar.update(1)
+                continue
+
+            label = entry.get("label", "")
+            logger.info(f"Processing {entry['data']} | label='{label}'")
+
+            # Infinite exponential backoff for retries
+            attempt = 0
+            while True:
+                try:
+                    desc_txt, _ = gemini_describe(client, files_for_model, modality, model, logger, label)
+                    entry["description"] = desc_txt
+                    deduplicated_align_data[entry["data"]] = entry  # Replace the original entry
+                    logger.info(f"Processed {entry['data']} | label='{label}' | description='{desc_txt}' | ")
+                    break
+                except Exception as e:
+                    attempt += 1
+                    backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))
+                    logger.info(f"Error processing {entry['data']}: {e}. Retrying in {backoff_time:.2f}s...")
+                    time.sleep(backoff_time)
+            pbar.update(1)
+
+# ==========================================================
+# Dataset processing
+# ==========================================================
 
 def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, modality: str, model: str,
-                    limit: Optional[int], num_threads: int, num_shards: int, shard_index: int, shard_dir: Path):
+                    limit: Optional[int], num_threads: int, num_shards: int, shard_index: int, shard_dir: Path,
+                    event_frames: int):
     entries = load_input_json(json_path)
     if limit is not None:
         entries = entries[:limit]
@@ -365,10 +430,11 @@ def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, m
 
     output_rows, meta_rows = [], []
     desc = f"{json_path.parent.name} ({modality}) [shard {shard_index+1}/{num_shards}]"
+    logger.info(f"[INFO] processing shard {shard_index+1}/{num_shards} with {num_threads} threads...")
 
     with ThreadPoolExecutor(max_workers=num_threads) as ex, \
          tqdm(total=len(shard_entries), desc=desc, unit="file", position=shard_index, leave=True, dynamic_ncols=True) as pbar:
-        futures = [ex.submit(describe_one, client, e, dataset_root, modality, model, logger) for e in shard_entries]
+        futures = [ex.submit(describe_one, client, e, dataset_root, modality, model, logger, event_frames) for e in shard_entries]
         for fut in as_completed(futures):
             res = fut.result()
             if res is not None:
@@ -380,51 +446,61 @@ def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, m
     output_rows.sort(key=lambda x: x[0])
     meta_rows.sort(key=lambda x: x[0])
 
-    save_output_json(shard_dir / f"{json_path.parent.name}_{modality}_align_shard{shard_index}-{num_shards}.json",
-                     [row for _, row in output_rows])
-    save_output_json(shard_dir / f"{json_path.parent.name}_{modality}_align_meta_shard{shard_index}-{num_shards}.json",
-                     [row for _, row in meta_rows])
+    align_json_path = shard_dir / "aligned.json"
+    meta_json_path = shard_dir / "align_meta.json"
+
+    save_output_json(align_json_path, [row for _, row in output_rows])
+    save_output_json(meta_json_path, [row for _, row in meta_rows])
 
 
 # ==========================================================
 # Merge shards
 # ==========================================================
 
-def merge_shards(json_path: Path, modality: str, num_shards: int, output_base: Path):
+def merge_shards(json_path: Path, modality: str, num_shards: int, use_json_root: bool, json_root: Path, output_base: Path, logger: logging.Logger):
     stem = f"{json_path.parent.name}_{modality}"
-    print(f"[INFO] Merging {num_shards} shards for {stem}...")
+    logger.info(f"[INFO] Merging {num_shards} shards for {stem}...")
 
     parts, parts_meta = [], []
 
     for i in range(num_shards):
         shard_dir = output_base / f"{stem}_shard{i}-{num_shards}"
-        json_file = shard_dir / f"{stem}_align_shard{i}-{num_shards}.json"
-        meta_file = shard_dir / f"{stem}_align_meta_shard{i}-{num_shards}.json"
+        json_file = shard_dir / "align.json"
+        meta_file = shard_dir / "align_meta.json"
         if json_file.exists() and meta_file.exists():
+            logger.info(f"[INFO] Loading shard {i} outputs from {json_file} and {meta_file}")
             parts.append(load_input_json(json_file))
             parts_meta.append(load_input_json(meta_file))
         else:
-            print(f"[WARN] Missing output for shard {i}, skipping merge.")
+            logger.info(f"[WARN] Missing output for shard {i}, skipping merge.")
 
     if not parts:
-        print(f"[ERR] No shard outputs found for {stem}")
+        logger.info(f"[ERR] No shard outputs found for {stem}")
         return
 
     merged = [item for part in parts for item in part]
     merged_meta = [item for part in parts_meta for item in part]
 
-    save_output_json(json_path.parent / f"train_data_align.json", merged)
-    save_output_json(json_path.parent / f"train_data_align_meta.json", merged_meta)
+    if use_json_root:
+        output_dir = json_root / json_path.parent.name
+        align_json_path = output_dir / "train_data_align.json"
+        meta_json_path = output_dir / "train_data_align_meta.json"
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        align_json_path = output_base / f"{stem}_data_align.json"
+        meta_json_path = output_base / f"{stem}_data_align_meta.json"
 
+    save_output_json(align_json_path, merged)
+    save_output_json(meta_json_path, merged_meta)
 
 # ==========================================================
 # Shard runner (per-process DI: create client once here)
 # ==========================================================
 
-def run_one_shard(json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir):
+def run_one_shard(json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir, event_frames):
     # DI: one client per process
     client = genai.Client()
-    process_dataset(client, json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir)
+    process_dataset(client, json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir, event_frames)
 
 
 # ==========================================================
@@ -442,34 +518,44 @@ def main():
     parser.add_argument("--skip_modalities", nargs="*", default=[
         "image",
         "audio",
-        "thermal",
+        # "thermal",
         "video",
-        "event"
+        # "event"
         ])
     parser.add_argument("--per_process_threads", type=int, default=1)
     parser.add_argument("--max_cores", type=int, default=None)
-
     parser.add_argument("--event_frames", type=int, default=8, help="Number of temporal bins for event rendering.")
+    parser.add_argument("--scan_and_fix", action="store_true", default=True, help="Scan for missing entries and descriptions in train_data.json and train_data_align.json, and fix them.")
+    parser.add_argument("--use_json_root", action="store_true", default=False, help="Flag to toggle output location between json_root and output_base.")
+    parser.add_argument("--copy_to_json_root", action="store_true", default=False, help="Copy JSON files from output directories into --json_root with the correct names.")
     args = parser.parse_args()
 
     run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    output_base = Path("output/knowledge_base") / run_timestamp
+    output_base = Path("output/knowledge_base")
     output_base.mkdir(parents=True, exist_ok=True)
+
+    if args.copy_to_json_root:
+        copy_json_to_root(output_base, Path(args.json_root))
+        return
+    
+    output_base = output_base / run_timestamp
+    output_base.mkdir(parents=True, exist_ok=True)
+
+    if args.scan_and_fix:
+        log_path = output_base / "scan_and_fix.log"
+        logger = setup_logger(log_path)
+        scan_and_fix_entries(Path(args.json_root), Path(args.dataset_root), logger, args.model, args.event_frames, args.limit, output_base)
+        return
 
     dataset_root_base = Path(args.dataset_root)
     json_root_base = Path(args.json_root)
 
-    mapping = [
-        ("image",  "ImageNet-1K"),
-        ("audio",  "ESC-50"),
-        ("thermal", "LLVIP"),
-        ("video",  "MSR-VTT"),
-        ("event",  "N-Caltech-101"),
-    ]
+    # Generate mapping list dynamically from MODALITY_MAPPING
+    mapping = [(modality, dataset) for dataset, modality in MODALITY_MAPPING.items()]
     mapping = [m for m in mapping if m[0] not in args.skip_modalities]
 
     if not os.getenv("GEMINI_API_KEY"):
-        print("[ERR] GEMINI_API_KEY is not set.")
+        logger.info("[ERR] GEMINI_API_KEY is not set.")
         return
 
     total_cores = os.cpu_count() or 1
@@ -480,13 +566,13 @@ def main():
         json_path = json_root_base / dataset_name / "train_data.json"
         dataset_path = dataset_root_base / dataset_name
         if not json_path.exists():
-            print(f"[WARN] Missing JSON: {json_path} — skipping")
+            logger.info(f"[WARN] Missing JSON: {json_path} — skipping")
             continue
         if not dataset_path.exists():
-            print(f"[WARN] Missing dataset root: {dataset_path} — skipping")
+            logger.info(f"[WARN] Missing dataset root: {dataset_path} — skipping")
             continue
 
-        print(f"[INFO] Processing {dataset_name} ({modality}) with {total_cores} shards, {args.per_process_threads} threads/process")
+        logger.info(f"[INFO] Processing {dataset_name} ({modality}) with {total_cores} shards, {args.per_process_threads} threads/process")
 
         procs = []
         try:
@@ -494,7 +580,7 @@ def main():
                 shard_dir = output_base / f"{dataset_name}_{modality}_shard{i}-{total_cores}"
                 p = mp.Process(target=run_one_shard,
                                args=(json_path, dataset_path, modality, args.model, args.limit,
-                                     args.per_process_threads, total_cores, i, shard_dir))
+                                     args.per_process_threads, total_cores, i, shard_dir, args.event_frames))
                 p.start()
                 procs.append(p)
 
@@ -502,7 +588,7 @@ def main():
                 p.join()
 
         except KeyboardInterrupt:
-            print("\n[!] Ctrl-C received — terminating shard processes…")
+            logger.info("\n[!] Ctrl-C received — terminating shard processes…")
             for p in procs:
                 if p.is_alive():
                     p.terminate()
@@ -510,10 +596,98 @@ def main():
                 p.join()
             break
 
-        merge_shards(json_path, modality, total_cores, output_base)
+        merge_shards(json_path, modality, total_cores, args.use_json_root, json_root_base, output_base, logger)
 
-    print(f"[✓] All datasets processed. Output saved in {output_base}")
+    logger.info(f"[✓] All datasets processed. Output saved in {output_base}")
 
+def copy_json_to_root(output_base: Path, json_root: Path):
+    json_root.mkdir(parents=True, exist_ok=True)
+    for json_file in output_base.glob("*/**/*_align*.json"):  # Limit to first child level
+        # Extract dataset name from the file name
+        dataset_name = json_file.stem.split("_")[0]  # Assuming the dataset name is the first part of the file name
+        target_path = json_root / dataset_name / json_file.name
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(json_file, target_path)  # Copy instead of renaming
+        print(f"[✓] Copied {json_file} to {target_path}")
+
+def scan_and_fix_entries(json_root: Path, dataset_root: Path, logger: logging.Logger, model: str, event_frames: int, limit: Optional[int] = None, output_base: Optional[Path] = None):
+    total_cores = os.cpu_count() or 1
+
+    for dataset_dir in tqdm(json_root.iterdir(), desc="Scanning datasets", unit="dataset", dynamic_ncols=True):
+        if not dataset_dir.is_dir():
+            continue
+
+        train_data_path = dataset_dir / "train_data.json"
+        align_data_path = dataset_dir / "train_data_align.json"
+
+        if not train_data_path.exists() or not align_data_path.exists():
+            logger.warning(f"Missing train_data.json or train_data_align.json in {dataset_dir}")
+            continue
+
+        train_data = load_input_json(train_data_path)
+        align_data = load_input_json(align_data_path)
+
+        align_data_map = {entry["data"]: entry for entry in align_data}
+
+        missing_entries = []
+        missing_record_entries = []
+        missing_descriptions_entries = []
+
+        logger.info(f"Processing {dataset_dir.name} with {len(train_data)} train entries and {len(align_data)} align entries")
+        for entry in tqdm(train_data, desc=f"Processing {dataset_dir.name}", unit="entry", leave=False, dynamic_ncols=True):
+            data_key = entry["data"]
+            if data_key not in align_data_map:
+                missing_entries.append(entry)
+                missing_record_entries.append(entry)
+            elif not align_data_map[data_key].get("description"):
+                missing_entries.append(entry)
+                missing_descriptions_entries.append(entry)
+
+        logger.info(f"Found {len(missing_record_entries)} missing record entries in align_data")
+        logger.info(f"Found {len(missing_descriptions_entries)} missing description entries in align_data")
+
+        # Deduplicate entries in align_data, preferring those with descriptions
+        deduplicated_align_data = {}
+        for entry in align_data:
+            data_key = entry["data"]
+            if data_key not in deduplicated_align_data or not deduplicated_align_data[data_key].get("description"):
+                deduplicated_align_data[data_key] = entry
+
+        align_data = list(deduplicated_align_data.values())
+
+        # Generate descriptions for missing entries using sharding
+        if missing_entries:
+            logger.info(f"Found {len(missing_entries)} missing entries in {dataset_dir}")
+            modality = MODALITY_MAPPING.get(dataset_dir.name, "unknown")
+
+            # Split missing entries into shards and process in parallel
+            shard_size = max(1, len(missing_entries) // total_cores)
+            missing_entries = missing_entries[:limit] if limit else missing_entries
+
+            shards = [missing_entries[i:i + shard_size] for i in range(0, len(missing_entries), shard_size)]
+            logger.info(f"[INFO] Processing {len(shards)} shards for {dataset_dir.name} with {total_cores} cores...")
+
+            with mp.Manager() as manager:
+                shared_deduplicated_align_data = manager.dict(deduplicated_align_data)
+
+                with mp.Pool(total_cores) as pool:
+                    try:
+                        pool.starmap(
+                            process_shard,
+                            [(shard, dataset_root, dataset_dir.name, modality, event_frames, model, shared_deduplicated_align_data, output_base, i)
+                             for i, shard in enumerate(shards)]
+                        )
+                    finally:
+                        pool.close()
+                        pool.join()
+
+                # Update the original deduplicated_align_data with the shared dictionary
+                deduplicated_align_data.update(shared_deduplicated_align_data)
+
+        # Save the updated align_data
+        align_data = list(deduplicated_align_data.values())
+        save_output_json(align_data_path, align_data)
+        logger.info(f"Updated {align_data_path} with deduplicated and fixed entries.")
 
 if __name__ == "__main__":
     main()
