@@ -461,6 +461,44 @@ class UniBindClassifier(Model):
     def load_modality_head_mlp_weights(self, path: str):
         self.logger.info(f"[load_modality_head_mlp_weights] Loading fine tuned weights from '{path}'...")
         self.unibind.load_modality_head_mlp_weights(path)
+    
+    def encode_vision(self, x, only_cls: bool = True):
+        """Return normalized vision embeddings without applying modality head MLP (unless inherent)."""
+        modality = MODALITY_MAP[self.modality]
+        return self.unibind.encode_vision({modality: x}, only_cls=only_cls)
+
+    def encode_vision_with_mlp(self, x, only_cls: bool = True):
+        """Return normalized vision embeddings passing through modality head MLP if enabled."""
+        modality = MODALITY_MAP[self.modality]
+        return self.unibind.encode_vision_with_mlp({modality: x}, only_cls=only_cls)
+
+    def freeze_all(self):
+        """Freeze all parameters in underlying UniBind."""
+        self.unibind.freeze_all()
+
+    def unfreeze_all(self):
+        """Unfreeze all parameters in underlying UniBind."""
+        self.unibind.unfreeze_all()
+
+    def enable_full_fine_tune(self):
+        """Enable full backbone fine-tuning (MLP heads remain frozen)."""
+        self.unibind.enable_full_fine_tune()
+
+    def enable_lora(self):
+        """Enable training only LoRA adapter parameters."""
+        self.unibind.enable_lora()
+
+    def enable_modality_head_mlp(self):
+        """Enable training for the current modality's head MLP only."""
+        self.unibind.enable_modality_head_mlp()
+
+    def save_backbone(self, path: str):
+        """Save underlying backbone state dict."""
+        self.unibind.save_backbone(path)
+
+    def load_backbone(self, path: str, strict: bool = True):
+        """Load backbone weights into underlying UniBind."""
+        self.unibind.load_backbone(path, strict=strict)
 
     def _compute_class_logits(self, similarity: torch.Tensor, temperature: float) -> torch.Tensor:
         if self.use_masked_logsumexp:

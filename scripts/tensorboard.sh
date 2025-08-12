@@ -1,1 +1,1 @@
-tensorboard --logdir=output/llava --port=8888 --host=0.0.0.0
+tensorboard --logdir=output/tensorboard --port=8888 --host=0.0.0.0

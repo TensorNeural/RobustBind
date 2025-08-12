@@ -5,34 +5,46 @@ from attack import AttackModel, APGDAttack, two_stage_attack
 from model import UniBindClassifier, ForwardMode
 from transform import unnormalize_inplace, normalize_inplace
 
+
 def evaluate_robust_one_stage(logger, device, model: UniBindClassifier, data_loader, one_attack: APGDAttack, mean, std):
     eval_start_time = time.time()
     model.eval()
     total_correct = 0
     total_samples = 0
 
-    for batch_idx, (inp, lbl) in enumerate(data_loader):
+    eps = getattr(one_attack, 'eps', None)
+    logger.info(f"[EVAL ONE-STAGE] Start | batches={len(data_loader)} | eps={'' if eps is None else f'{eps*255:.0f}/255'}")
+
+    for batch_idx, batch in enumerate(data_loader):
         batch_start_time = time.time()
-        logger.info(f"[EVAL ONE-STAGE] Evaluating batch {batch_idx+1}/{len(data_loader)}, batch size={inp.size(0)}")
+        inputs = batch['inputs'].to(device, non_blocking=True)
+        labels = batch['labels'].to(device, non_blocking=True)
 
-        inp, lbl = inp.to(device), lbl.to(device)
-        inp_unorm = inp.clone().detach()
-        unnormalize_inplace(inp_unorm, mean, std)
+        # Unnormalize inputs, run attack, then re-normalize for model
+        inputs_unorm = inputs.detach().clone()
+        unnormalize_inplace(inputs_unorm, mean, std)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            adv_inp = one_attack.perturb(inp_unorm, lbl)
-        normalize_inplace(adv_inp, mean, std)
+            adv_inputs_unorm = one_attack.perturb(inputs_unorm, labels)
+        normalize_inplace(adv_inputs_unorm, mean, std)
 
-        logits_adv, _ = model(adv_inp, mode=ForwardMode.LOGITS)
+        # Inference on adversarial normalized inputs
+        wrapped = model.wrap_tensor(adv_inputs_unorm)
+        logits_adv, _ = model(wrapped, mode=ForwardMode.LOGITS)
         preds = logits_adv.argmax(dim=1)
 
-        total_correct += (preds == lbl).sum().item()
-        total_samples += inp.size(0)
+        correct_batch = (preds == labels).sum().item()
+        total_correct += correct_batch
+        total_samples += labels.size(0)
 
-        del inp, lbl, inp_unorm, adv_inp, logits_adv, preds
+        batch_acc = correct_batch / labels.size(0)
+        running_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
+
+        logger.info(f"[EVAL ONE-STAGE][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples}")
+
+        # Cleanup
+        del inputs, labels, inputs_unorm, adv_inputs_unorm, wrapped, logits_adv, preds
         torch.cuda.empty_cache()
-        
-        logger.info(f"Batch {batch_idx+1} time: {time.time() - batch_start_time:.2f} seconds")
-        logger.info(f"Samples processed: {total_samples}")
+
 
     correct_tensor = torch.tensor(total_correct, dtype=torch.float64, device=device)
     sample_tensor = torch.tensor(total_samples, dtype=torch.float64, device=device)
@@ -40,14 +52,15 @@ def evaluate_robust_one_stage(logger, device, model: UniBindClassifier, data_loa
     dist.all_reduce(sample_tensor, op=dist.ReduceOp.SUM)
 
     if sample_tensor.item() == 0:
-        logger.warning("No samples processed during evaluation.")
+        logger.warning("[EVAL ONE-STAGE] No samples processed.")
         return 0.0
 
-    robust_acc = (correct_tensor / sample_tensor).item()
-    logger.info(f"Total robust samples: {sample_tensor.item()}")
-    logger.info(f"Total robust correct: {correct_tensor.item()}")
-    logger.info(f"Total one-stage eval time: {time.time() - eval_start_time:.2f} seconds")
-    return robust_acc
+    acc = (correct_tensor / sample_tensor).item()
+    logger.info(f"[EVAL ONE-STAGE] Total samples: {int(sample_tensor.item())}")
+    logger.info(f"[EVAL ONE-STAGE] Total correct: {int(correct_tensor.item())}")
+    logger.info(f"[EVAL ONE-STAGE] Total time: {time.time() - eval_start_time:.2f}s | acc={acc:.4f}")
+    return acc
+
 
 @torch.no_grad()
 def evaluate_alignment_acc(logger, device, model_val, val_loader):
@@ -55,31 +68,32 @@ def evaluate_alignment_acc(logger, device, model_val, val_loader):
 
     Returns accuracy in percent (same convention as previous implementation).
     """
-    logger.info(f"[Align] Evaluating alignment accuracy...")
+    logger.info(f"[EVAL ALIGN] Start | batches={len(val_loader)}")
     eval_start_time = time.time()
     model_val.eval()
     total_correct_local = 0
     total_samples_local = 0
 
     for batch_idx, batch in enumerate(val_loader):
-        logger.info(f"[Align][Eval] Evaluating batch {batch_idx+1}/{len(val_loader)}")
         batch_start = time.time()
-        inputs_tensor = batch['inputs'].to(device, non_blocking=True)
+        inputs = batch['inputs'].to(device, non_blocking=True)
         labels = batch['labels'].to(device, non_blocking=True)
 
-        logger.info(f"[Align][Eval] Batch {batch_idx+1}/{len(val_loader)} size={labels.size(0)}")
-
-        logits, _ = model_val(inputs_tensor, mode=ForwardMode.LOGITS)
+        wrapped = inputs  # UniBindClassifier expects tensors directly
+        logits, _ = model_val(wrapped, mode=ForwardMode.LOGITS)
         preds = logits.argmax(dim=1)
-        correct = (preds == labels).sum().item()
-        total_correct_local += correct
+        correct_batch = (preds == labels).sum().item()
+        total_correct_local += correct_batch
         total_samples_local += labels.size(0)
 
-        # Cleanup per batch
-        del inputs_tensor, labels, logits, preds
-        torch.cuda.empty_cache()
+        batch_acc = correct_batch / labels.size(0)
+        running_acc = (total_correct_local / total_samples_local) if total_samples_local > 0 else 0.0
 
-        logger.info(f"[Align][Eval] Batch {batch_idx+1} time: {time.time() - batch_start:.2f}s | running samples={total_samples_local}")
+        logger.info(f"[EVAL ALIGN][{batch_idx+1}/{len(val_loader)}] size={int(batch_acc * 0 + 1) * 0 + int(batch_acc * 0 + 0) + labels.size(0)} | time={time.time() - batch_start:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples_local}")
+
+        # Cleanup per batch
+        del inputs, labels, logits, preds
+        torch.cuda.empty_cache()
 
     # Distributed aggregation
     correct_tensor = torch.tensor(total_correct_local, dtype=torch.float64, device=device)
@@ -92,16 +106,19 @@ def evaluate_alignment_acc(logger, device, model_val, val_loader):
     total_samples = samples_tensor.item()
 
     if total_samples == 0:
-        logger.warning("[Align][Eval] No samples processed.")
+        logger.warning("[EVAL ALIGN] No samples processed.")
         return 0.0
 
-    acc_percent = 100.0 * total_correct / total_samples
-    logger.info(f"[Align][Eval] Total samples: {int(total_samples)} | Total correct: {int(total_correct)}")
-    logger.info(f"[Align][Eval] Accuracy = {acc_percent:.4f}% | Total eval time: {time.time() - eval_start_time:.2f}s")
+    acc_fraction = total_correct / total_samples
+    acc_percent = 100.0 * acc_fraction
+    logger.info(f"[EVAL ALIGN] Total samples: {int(total_samples)}")
+    logger.info(f"[EVAL ALIGN] Total correct: {int(total_correct)}")
+    logger.info(f"[EVAL ALIGN] Total time: {time.time() - eval_start_time:.2f}s | acc={acc_fraction:.4f}")
     return acc_percent
 
+
 def evaluate_two_stage(logger, device, model: UniBindClassifier, data_loader, attack_loss_type, iteration_count, epsilon, mean, std):
-    logger.info(f"Running two-stage robust evaluation: iteration_count={iteration_count}, eps={(epsilon * 255):.0f}/255")
+    logger.info(f"[EVAL TWO-STAGE] Start | batches={len(data_loader)} | iters={iteration_count} | eps={epsilon*255:.0f}/255")
 
     eval_start_time = time.time()
 
@@ -131,27 +148,28 @@ def evaluate_two_stage(logger, device, model: UniBindClassifier, data_loader, at
     total_correct = 0
     total_samples = 0
 
-    for batch_idx, (inp, lbl) in enumerate(data_loader):
+    for batch_idx, batch in enumerate(data_loader):
         batch_start_time = time.time()
+        inputs = batch['inputs'].to(device, non_blocking=True)
+        labels = batch['labels'].to(device, non_blocking=True)
         
-        logger.info(f"[EVAL TWO-STAGE] Evaluating batch {batch_idx+1}/{len(data_loader)}, batch size={inp.size(0)}")
-
-        inp, lbl = inp.to(device), lbl.to(device)
-        adv_fin = two_stage_attack(logger, model, inp, lbl, stage1_attack, stage2_attack, mean, std)
+        adv_fin = two_stage_attack(logger, model, inputs, labels, stage1_attack, stage2_attack, mean, std)
 
         wrapped_adv_fin = model.wrap_tensor(adv_fin)
-        with torch.no_grad():
-            logits_fin, _ = model(wrapped_adv_fin, mode=ForwardMode.LOGITS)
-            preds = logits_fin.argmax(dim=1)
-            total_correct += (preds == lbl).sum().item()
+        logits_fin, _ = model(wrapped_adv_fin, mode=ForwardMode.LOGITS)
+        preds = logits_fin.argmax(dim=1)
+        correct_batch = (preds == labels).sum().item()
+        total_correct += correct_batch
+        total_samples += labels.size(0)
 
-        total_samples += inp.size(0)
+        batch_acc = correct_batch / labels.size(0)
+        running_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
 
-        del inp, lbl, adv_fin, wrapped_adv_fin, logits_fin, preds
+        logger.info(f"[EVAL TWO-STAGE][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples}")
+
+        del inputs, labels, adv_fin, wrapped_adv_fin, logits_fin, preds
         torch.cuda.empty_cache()
         
-        logger.info(f"Batch {batch_idx+1} time: {time.time() - batch_start_time:.2f} seconds")
-        logger.info(f"Samples processed: {total_samples}")
     
     correct_tensor = torch.tensor(total_correct, dtype=torch.float64, device=device)
     sample_tensor = torch.tensor(total_samples, dtype=torch.float64, device=device)
@@ -159,41 +177,46 @@ def evaluate_two_stage(logger, device, model: UniBindClassifier, data_loader, at
     dist.all_reduce(sample_tensor, op=dist.ReduceOp.SUM)
 
     if sample_tensor.item() == 0:
-        logger.warning("No samples processed during evaluation.")
+        logger.warning("[EVAL TWO-STAGE] No samples processed.")
         return 0.0
     
-    robust_acc = correct_tensor.item() / sample_tensor.item()
-    logger.info(f"Total robust samples: {sample_tensor.item()}")
-    logger.info(f"Total robust correct: {correct_tensor.item()}")
-    logger.info(f"Total two-stage eval time: {time.time() - eval_start_time:.2f} seconds")
-    return robust_acc
+    acc = correct_tensor.item() / sample_tensor.item()
+    logger.info(f"[EVAL TWO-STAGE] Total samples: {int(sample_tensor.item())}")
+    logger.info(f"[EVAL TWO-STAGE] Total correct: {int(correct_tensor.item())}")
+    logger.info(f"[EVAL TWO-STAGE] Total time: {time.time() - eval_start_time:.2f}s | acc={acc:.4f}")
+    return acc
+
 
 @torch.no_grad()
 def evaluate_clean(logger, device, model: UniBindClassifier, data_loader):
-    logger.info("Running CLEAN evaluation (no attack).")
+    logger.info(f"[EVAL CLEAN] Start | batches={len(data_loader)}")
 
     eval_start_time = time.time()
     model.eval()
     total_correct = 0
     total_samples = 0
 
-    for batch_idx, (inp, lbl) in enumerate(data_loader):
+    for batch_idx, batch in enumerate(data_loader):
         batch_start_time = time.time()
-        logger.info(f"[EVAL CLEAN] Evaluating batch {batch_idx+1}/{len(data_loader)}, batch size={inp.size(0)}")
+        inputs = batch['inputs'].to(device, non_blocking=True)
+        labels = batch['labels'].to(device, non_blocking=True)
 
-        inp, lbl = inp.to(device), lbl.to(device)
-        wrapped_inp = model.wrap_tensor(inp)
+        wrapped_inp = model.wrap_tensor(inputs)
         logits_clean, _ = model(wrapped_inp, mode=ForwardMode.LOGITS)
         preds_clean = logits_clean.argmax(dim=1)
         
-        total_correct += (preds_clean == lbl).sum().item()
-        total_samples += inp.size(0)
+        correct_batch = (preds_clean == labels).sum().item()
+        total_correct += correct_batch
+        total_samples += labels.size(0)
 
-        del inp, wrapped_inp, lbl, logits_clean, preds_clean
+        batch_acc = correct_batch / labels.size(0)
+        running_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
+
+        logger.info(f"[EVAL CLEAN][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples}")
+
+        del inputs, wrapped_inp, labels, logits_clean, preds_clean
         torch.cuda.empty_cache()
 
-        logger.info(f"Batch {batch_idx+1} time: {time.time() - batch_start_time:.2f} seconds")
-        logger.info(f"Samples processed: {total_samples}")
     
     correct_tensor = torch.tensor(total_correct, dtype=torch.float64, device=device)
     sample_tensor = torch.tensor(total_samples, dtype=torch.float64, device=device)
@@ -203,11 +226,11 @@ def evaluate_clean(logger, device, model: UniBindClassifier, data_loader):
     total_samples = sample_tensor.item()
 
     if total_samples == 0:
-        logger.warning("No samples processed during evaluation.")
+        logger.warning("[EVAL CLEAN] No samples processed.")
         return 0.0
     
     acc = total_correct / total_samples
-    logger.info(f"Total clean samples: {sample_tensor}")
-    logger.info(f"Total clean correct: {total_correct}")
-    logger.info(f"Total clean eval time: {time.time() - eval_start_time:.2f} seconds")
+    logger.info(f"[EVAL CLEAN] Total samples: {int(sample_tensor.item())}")
+    logger.info(f"[EVAL CLEAN] Total correct: {int(total_correct)}")
+    logger.info(f"[EVAL CLEAN] Total time: {time.time() - eval_start_time:.2f}s | acc={acc:.4f}")
     return acc
