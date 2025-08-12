@@ -144,6 +144,9 @@ def run_robust_training(
     output_base
 ):
     logger.info(f"[Robust] Running robust training with train modality: {args.train_modality}")
+    if args.robust_use_modality_head_mlp:
+        logger.info(f"[Robust] Modality head MLP requested. Weights path: {args.robust_modality_head_mlp_weights if args.robust_modality_head_mlp_weights else 'None (will train from scratch)'}")
+        
     train_mean, train_std = get_normalization_tensors(args.train_modality, device)
     val_mean, val_std = get_normalization_tensors(args.val_modality, device)
 
@@ -317,6 +320,32 @@ def run_robust_training(
     logger.info(f"[Robust] Best robust accuracy: {best_acc:.4f}")
 
 
+def auto_discover_alignment_mlp(args, session_output_dir: Path, logger: logging.Logger) -> bool:
+    """Auto-load alignment MLP weights for a robust run if available.
+
+    Returns True if weights were found (or already provided), False otherwise.
+    Looks for: align/<modality>/best_mlp_weights_<model_type>.pt inside the same session.
+    If found and user didn't explicitly supply --robust_modality_head_mlp_weights, sets it and
+    enables --robust_use_modality_head_mlp if not already enabled.
+    """
+    if args.training_mode != "robust":
+        return False
+    if args.robust_modality_head_mlp_weights:
+        logger.info(f"[AutoLoad][Robust] Using user-provided modality head MLP weights: {args.robust_modality_head_mlp_weights}")
+        return True
+    candidate = session_output_dir / "align" / args.train_modality.value / f"best_mlp_weights_{args.model_type}.pt"
+    if candidate.exists():
+        args.robust_modality_head_mlp_weights = str(candidate)
+        if not args.robust_use_modality_head_mlp:
+            args.robust_use_modality_head_mlp = True
+            logger.info(f"[AutoLoad][Robust] Loaded and enabled modality head MLP weights: {candidate}")
+        else:
+            logger.info(f"[AutoLoad][Robust] Loaded modality head MLP weights: {candidate}")
+        return True
+    logger.info("[AutoLoad][Robust] No alignment MLP weights loaded (none present).")
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser("UniBind Training")
     parser.add_argument("--model_type", required=True)
@@ -388,9 +417,9 @@ def main():
         subdir = f"align/{args.train_modality.value}"
     else:
         if args.robust_training_mode == "lora":
-            subdir = f"robust/{args.train_modality.value}_lora_r{args.robust_lora_rank}_a{args.robust_lora_alpha}"
+            subdir = f"robust/{args.train_modality.value}/lora_r{args.robust_lora_rank}_a{args.robust_lora_alpha}"
         else:
-            subdir = f"robust/{args.train_modality.value}_full_fine_tune"
+            subdir = f"robust/{args.train_modality.value}/full_fine_tune"
 
     run_output_base = session_output_dir / subdir
     run_output_base.mkdir(parents=True, exist_ok=True)
@@ -405,6 +434,13 @@ def main():
     logger = logging.getLogger("train")
     logger.setLevel(logging.INFO)
     logger.handlers = [ch, fh]
+
+    if args.training_mode == "robust":
+        # Attempt autoload now that logger is configured
+        # Auto discover alignment MLP (if any) after logger setup
+        found_mlp = auto_discover_alignment_mlp(args, session_output_dir, logger)
+        if args.robust_use_modality_head_mlp and not found_mlp and not args.robust_modality_head_mlp_weights:
+            logger.warning("[Robust] Modality head MLP requested but no weights found. Proceeding with randomly initialized head.")
 
     # Load val centers (required)
     train_emb, train_lbls, train_lbl_to_idx = None, None, None

@@ -39,7 +39,7 @@ def evaluate_robust_one_stage(logger, device, model: UniBindClassifier, data_loa
         batch_acc = correct_batch / labels.size(0)
         running_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
 
-        logger.info(f"[EVAL ONE-STAGE][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples}")
+        logger.info(f"[EVAL ONE-STAGE][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | total_samples={total_samples}")
 
         # Cleanup
         del inputs, labels, inputs_unorm, adv_inputs_unorm, wrapped, logits_adv, preds
@@ -89,7 +89,7 @@ def evaluate_alignment_acc(logger, device, model_val, val_loader):
         batch_acc = correct_batch / labels.size(0)
         running_acc = (total_correct_local / total_samples_local) if total_samples_local > 0 else 0.0
 
-        logger.info(f"[EVAL ALIGN][{batch_idx+1}/{len(val_loader)}] size={int(batch_acc * 0 + 1) * 0 + int(batch_acc * 0 + 0) + labels.size(0)} | time={time.time() - batch_start:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples_local}")
+        logger.info(f"[EVAL ALIGN][{batch_idx+1}/{len(val_loader)}] size={int(batch_acc * 0 + 1) * 0 + int(batch_acc * 0 + 0) + labels.size(0)} | time={time.time() - batch_start:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | total_samples={total_samples_local}")
 
         # Cleanup per batch
         del inputs, labels, logits, preds
@@ -165,7 +165,7 @@ def evaluate_two_stage(logger, device, model: UniBindClassifier, data_loader, at
         batch_acc = correct_batch / labels.size(0)
         running_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
 
-        logger.info(f"[EVAL TWO-STAGE][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples}")
+        logger.info(f"[EVAL TWO-STAGE][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | total_samples={total_samples}")
 
         del inputs, labels, adv_fin, wrapped_adv_fin, logits_fin, preds
         torch.cuda.empty_cache()
@@ -212,7 +212,7 @@ def evaluate_clean(logger, device, model: UniBindClassifier, data_loader):
         batch_acc = correct_batch / labels.size(0)
         running_acc = (total_correct / total_samples) if total_samples > 0 else 0.0
 
-        logger.info(f"[EVAL CLEAN][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | seen={total_samples}")
+        logger.info(f"[EVAL CLEAN][{batch_idx+1}/{len(data_loader)}] size={labels.size(0)} | time={time.time() - batch_start_time:.2f}s | batch_acc={batch_acc:.4f} | running_acc={running_acc:.4f} | total_samples={total_samples}")
 
         del inputs, wrapped_inp, labels, logits_clean, preds_clean
         torch.cuda.empty_cache()
