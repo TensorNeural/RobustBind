@@ -149,7 +149,7 @@ if __name__ == "__main__":
         help="Path to validation JSON file"
     )
     parser.add_argument(
-        "--image_root", type=str, default="/home/user/datasets/VQA2",
+        "--image_root", type=str, default="/data/datasets/VQA2",
         help="Root directory containing images"
     )
     parser.add_argument(

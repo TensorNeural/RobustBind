@@ -217,7 +217,7 @@ def convert_npz_to_outputs(data_split_dir, vis_dir, val_dir,
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare N-ImageNet-1K static/vis (scatter) and static/val (EventBind)")
-    parser.add_argument("--dataset_root", default="/home/user/datasets/N-ImageNet-1K", type=str)
+    parser.add_argument("--dataset_root", default="/data/datasets/N-ImageNet-1K", type=str)
     parser.add_argument("--frame_size", type=int, default=224)
     parser.add_argument("--num_frames", type=int, default=2)
     parser.add_argument("--group_by", choices=["time", "count"], default="time")

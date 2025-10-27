@@ -77,8 +77,9 @@ def train_one_epoch(logger, writer, model, dataloader, optimizer, scheduler, sca
             f"[{stage.upper()}] Epoch {epoch+1}/{total_epochs}, Step {step+1}/{len(dataloader)}, "
             f"BatchSize={batch_size}, Loss={loss_val:.4f}, LR={current_lr:.6f}"
         )
-        writer.add_scalar(f"{stage}/loss_step", loss_val, step_global)
-        writer.add_scalar(f"{stage}/lr_step", current_lr, step_global)
+        if rank == 0:
+            writer.add_scalar(f"{stage}/loss_step", loss_val, step_global)
+            writer.add_scalar(f"{stage}/lr_step", current_lr, step_global)
 
         batch_end = time.time()
         logger.info(f"[{stage.upper()}] Batch {step+1} time: {batch_end - batch_start:.2f}s, Total samples: {total_samples}")
@@ -87,8 +88,10 @@ def train_one_epoch(logger, writer, model, dataloader, optimizer, scheduler, sca
 
     logger.info(f"[{stage.upper()}] Epoch {epoch+1} completed in {time.time() - start_time:.2f}s")
     logger.info(f"[{stage.upper()}] Avg Loss: {avg_loss:.4f}, Samples: {total_samples}")
-    writer.add_scalar(f"{stage}/loss_epoch", avg_loss, epoch)
-    writer.add_scalar(f"{stage}/lr_epoch", optimizer.param_groups[0]["lr"], epoch)
+
+    if rank == 0:
+        writer.add_scalar(f"{stage}/loss_epoch", avg_loss, epoch)
+        writer.add_scalar(f"{stage}/lr_epoch", optimizer.param_groups[0]["lr"], epoch)
 
     sample_tensor = torch.tensor(total_samples, dtype=torch.float64, device=device)
     dist.all_reduce(sample_tensor, op=dist.ReduceOp.SUM)
@@ -99,10 +102,9 @@ def train_one_epoch(logger, writer, model, dataloader, optimizer, scheduler, sca
 
 def train(args, logger, writer, device, rank):
     logger.info("Loading LLaVA model with UniBind encoder...")
-    local_model_dir = os.path.join(".cache", args.pretrained_model.replace("/", "--"))
     tokenizer, model, image_processor, _ = load_pretrained_model(
-        model_path=local_model_dir,
-        model_name=os.path.basename(args.pretrained_model),
+        model_path=args.pretrained_model,
+        model_name=args.pretrained_model,
         model_base=None,
         torch_dtype=torch.float16,
         device=device,
@@ -220,8 +222,8 @@ def main():
     parser.add_argument("--pretrained_model", required=True)
     parser.add_argument("--unibind_weights", required=True)
     parser.add_argument("--output_dir", default="output/llava")
-    parser.add_argument("--coco_epochs", type=int, default=1)
-    parser.add_argument("--vqa_epochs", type=int, default=2)
+    parser.add_argument("--coco_epochs", type=int, default=3)
+    parser.add_argument("--vqa_epochs", type=int, default=4)
     parser.add_argument("--coco_max_samples", type=int, default=None)
     parser.add_argument("--vqa_max_samples", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=4)

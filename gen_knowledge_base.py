@@ -511,7 +511,7 @@ def main():
     mp.set_start_method("spawn", force=True)
 
     parser = argparse.ArgumentParser(description="Generate dataset descriptions with Gemini + label hints.")
-    parser.add_argument("--dataset_root", default="/home/user/datasets")
+    parser.add_argument("--dataset_root", default="/data/datasets")
     parser.add_argument("--json_root", default="./datasets")
     parser.add_argument("--model", default="gemini-2.5-flash-lite")
     parser.add_argument("--limit", type=int, default=None)

@@ -6,7 +6,7 @@ SIZES="500 1000 3000 5000 8000"
 # Standard inference
 for size in $SIZES; do
   CUDA_VISIBLE_DEVICES=0 python infer.py \
-    --test_dataset_dir /home/user/datasets/Places365 \
+    --test_dataset_dir /data/datasets/Places365 \
     --test_data_path ./datasets/Places365/val_data_${size}.json \
     --centre_embeddings_path ./centre_embs/image_p365_center_embeddings.pkl \
     --pretrain_weights ./ckpts/pretrained_weights.pt \
@@ -20,7 +20,7 @@ done
 # # Uniform inference
 # for size in $SIZES; do
 #   CUDA_VISIBLE_DEVICES=0 python infer.py \
-#     --test_dataset_dir /home/user/datasets/Places365 \
+#     --test_dataset_dir /data/datasets/Places365 \
 #     --test_data_path ./datasets/Places365/val_data_${size}_uniform.json \
 #     --centre_embeddings_path ./centre_embs/image_p365_center_embeddings.pkl \
 #     --pretrain_weights ./ckpts/pretrained_weights.pt \

@@ -113,7 +113,7 @@ class RelativePathFormatter(logging.Formatter):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="output")
-    parser.add_argument("--dataset_root", type=str, default="/home/user/datasets/ImageNet-1K")
+    parser.add_argument("--dataset_root", type=str, default="/data/datasets/ImageNet-1K")
     parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
     parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)

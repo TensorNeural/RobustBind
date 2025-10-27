@@ -73,18 +73,21 @@ def init_lora(model, state_dict):
 
     return new_sd
 
-def lora_load_state_dict(model, state_dict, allow_missing_substrings=("lora_", "base_layer")):
+def lora_load_state_dict(model, state_dict, allow_missing_substrings=("lora_", "base_layer"), allow_unexpected_keys=()):
     """
     Loads state_dict with strict=False, then:
-    - Fails if any unexpected keys exist
+    - Fails if any unexpected keys exist (unless in allow_unexpected_keys)
     - Fails if any missing keys are not LoRA-related
     - Produces no logs
     """
     state_dict = init_lora(model, state_dict)
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
 
-    if unexpected_keys:
-         raise ValueError(f"Unexpected keys in state_dict: {unexpected_keys}")
+    # Filter out allowed unexpected keys
+    filtered_unexpected = [k for k in unexpected_keys if k not in allow_unexpected_keys]
+    
+    if filtered_unexpected:
+         raise ValueError(f"Unexpected keys in state_dict: {filtered_unexpected}")
 
     for k in missing_keys:
         if not any(substr in k for substr in allow_missing_substrings):

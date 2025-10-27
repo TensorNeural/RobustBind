@@ -72,11 +72,11 @@ def prepare_coco(coco_root):
         elif "val2017" in key:
             extract(path, coco_root, rename_dir="val")
         else:
-            extract(path, os.path.join(coco_root, "annotations"))
+            extract(path, os.path.join(coco_root, "annotations"), rename_dir="annotations")
 
 def main():
     parser = argparse.ArgumentParser(description="Download and extract COCO Captioning 2017")
-    parser.add_argument("--output_dir", type=str, default="/home/user/datasets/COCO/caption")
+    parser.add_argument("--output_dir", type=str, default="/data/datasets/COCO/caption")
     args = parser.parse_args()
 
     print(f"✅ Preparing COCO Caption in: {args.output_dir}")

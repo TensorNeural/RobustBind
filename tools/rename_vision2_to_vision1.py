@@ -24,7 +24,7 @@ def rename_vision_head(old_ckpt_path: str, new_ckpt_path: str):
 
 if __name__ == "__main__":
     # Update these paths as needed
-    old_checkpoint = "ckpts/pretrained_weights.pt"
-    new_checkpoint = "ckpts/pretrained_weights_image_patchs.pt"
+    old_checkpoint = "ckpts/pretrained_weights_flash_atten.pt"
+    new_checkpoint = "ckpts/pretrained_weights_flash_atten_image_patchs.pt"
 
     rename_vision_head(old_checkpoint, new_checkpoint)

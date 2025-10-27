@@ -16,8 +16,8 @@ def main():
     )
     parser.add_argument(
         "--dataset_root",
-        default="/home/user/datasets/Places365",
-        help="Root directory where the files and places365_val.txt are stored (default: /home/user/datasets/Places365)"
+        default="/data/datasets/Places365",
+        help="Root directory where the files and places365_val.txt are stored (default: /data/datasets/Places365)"
     )
     parser.add_argument(
         "--label_file",
@@ -26,8 +26,8 @@ def main():
     )
     parser.add_argument(
         "--output_root",
-        default="/home/user/datasets/Places365",
-        help="Directory to store the output folder (default: /home/user/datasets/Places365)"
+        default="/data/datasets/Places365",
+        help="Directory to store the output folder (default: /data/datasets/Places365)"
     )
     args = parser.parse_args()
 

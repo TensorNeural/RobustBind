@@ -1,1 +1,1 @@
-tensorboard --logdir=output/tensorboard --port=8888 --host=0.0.0.0
+tensorboard --logdir=output --port=8080 --host=0.0.0.0

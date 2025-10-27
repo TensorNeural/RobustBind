@@ -236,7 +236,7 @@ def render_all(split_dir, static_root, size=224, T=8, num_workers=12, skip_exist
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_root", default="/home/user/datasets/N-Caltech-101")
+    parser.add_argument("--dataset_root", default="/data/datasets/N-Caltech-101")
     parser.add_argument("--num_workers", type=int, default=12)
     parser.add_argument("--frame_size", type=int, default=224)  # used by eventbind only
     parser.add_argument("--num_frames", type=int, default=2)

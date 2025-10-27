@@ -184,7 +184,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
     --modality "$modality" \
     --dataset_name "$dataset" \
     --output_dir "$OUTPUT_DIR" \
-    --dataset_root "/home/user/datasets/$dataset" \
+    --dataset_root "/data/datasets/$dataset" \
     --clean_val_json "$clean_val_json" \
     --attack_val_json "$attack_val_json" \
     --clean_val_batch_size "$clean_val_batch_size" \

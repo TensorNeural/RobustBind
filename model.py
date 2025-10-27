@@ -127,7 +127,9 @@ class UniBind(nn.Module):
             state_dict.update(lora_state_dict)
             self.logger.info("[UniBind init] Loaded LoRA weights.")
 
-        lora_load_state_dict(self.backbone, state_dict)
+        # Allow deprecated vision head keys from older checkpoints
+        allow_unexpected = ('bind.modality_heads.vision.2.weight', 'bind.modality_heads.vision.2.bias')
+        lora_load_state_dict(self.backbone, state_dict, allow_unexpected_keys=allow_unexpected)
 
         # Create modality-specific MLP (frozen by default unless use_modality_head_mlp=True)
         if self.modality == Modality.IMAGE:

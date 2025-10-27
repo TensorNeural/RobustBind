@@ -241,7 +241,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_root", default="/home/user/datasets")
+    parser.add_argument("--dataset_root", default="/data/datasets")
     parser.add_argument("--val_json_image", default="./datasets/ImageNet-1K/val_data.json")
     parser.add_argument("--train_json_image", default="./datasets/ImageNet-1K/train_data.json")
     parser.add_argument("--val_json_audio", default="./datasets/ESC-50/val_data.json")

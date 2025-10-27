@@ -2,7 +2,7 @@
 set -e
 
 # === Directories ===
-ROOT_DIR="/home/user/datasets"
+ROOT_DIR="/data/datasets"
 CKPT_DIR="./ckpts"
 CENTER_EMB_DIR="./centre_embs"
 OUTPUT_DIR="./output"

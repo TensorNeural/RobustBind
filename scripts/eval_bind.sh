@@ -181,7 +181,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
   attack_val_max_samples="${ATTACK_VAL_MAX_SAMPLES_MAP[$dataset]}"
   lora_weights_list="${LORA_WEIGHTS_LIST_MAP[$modality]}"
   center_emb="./centre_embs/${modality}_${suffix}_center_embeddings.pkl"
-  dataset_root="/home/user/datasets/$dataset"
+  dataset_root="/data/datasets/$dataset"
   classes_json="${CLASSES_JSON_MAP[$dataset]}"
 
   for model_type in UniBind LanguageBind ImageBind; do

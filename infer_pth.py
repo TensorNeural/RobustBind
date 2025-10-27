@@ -70,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--adv_pth_path",
         type=str,
-        default="/home/user/datasets/ImageNet-1K/new_val_adv/eps0/eps0_0.pth",
+        default="/data/datasets/ImageNet-1K/new_val_adv/eps0/eps0_0.pth",
     )
     parser.add_argument(
         "--centre_embeddings_path",

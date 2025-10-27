@@ -2,12 +2,12 @@
 
 # Each item contains three space-separated parts:
 #   1. The .json file name (e.g. val_data.json)
-#   2. The directory of the dataset (e.g. /home/user/datasets/Places365)
+#   2. The directory of the dataset (e.g. /data/datasets/Places365)
 #   3. The output directory (e.g. ./outputs/Places365_val_data_zero_shot)
 for combo in \
-  "val_data.json /home/user/datasets/Places365 ./outputs/Places365_val_data_zero_shot" \
-  "val_adv_eps2.json /home/user/datasets/Places365/val_adv ./outputs/Places365_val_adv_eps2_data_zero_shot" \
-  "val_adv_eps4.json /home/user/datasets/Places365/val_adv ./outputs/Places365_val_adv_eps4_data_zero_shot"
+  "val_data.json /data/datasets/Places365 ./outputs/Places365_val_data_zero_shot" \
+  "val_adv_eps2.json /data/datasets/Places365/val_adv ./outputs/Places365_val_adv_eps2_data_zero_shot" \
+  "val_adv_eps4.json /data/datasets/Places365/val_adv ./outputs/Places365_val_adv_eps4_data_zero_shot"
 do
   # Split each line into individual variables
   set -- $combo

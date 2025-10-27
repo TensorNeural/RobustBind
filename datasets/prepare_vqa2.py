@@ -83,7 +83,7 @@ def prepare_vqa2(vqa_root):
 
 def main():
     parser = argparse.ArgumentParser(description="Download and extract VQA v2.0 (questions, annotations, images)")
-    parser.add_argument("--output_dir", type=str, default="/home/user/datasets/VQA2")
+    parser.add_argument("--output_dir", type=str, default="/data/datasets/VQA2")
     args = parser.parse_args()
 
     print(f"✅ Preparing VQA2 in: {args.output_dir}")

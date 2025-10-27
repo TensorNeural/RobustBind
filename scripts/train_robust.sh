@@ -166,8 +166,8 @@ for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
       --val_modality "$modality" \
       --train_dataset_name "$train_dataset" \
       --val_dataset_name "$val_dataset" \
-      --train_dataset_root "/home/user/datasets/$train_dataset" \
-      --val_dataset_root "/home/user/datasets/$val_dataset" \
+      --train_dataset_root "/data/datasets/$train_dataset" \
+      --val_dataset_root "/data/datasets/$val_dataset" \
       --train_json "$train_json" \
       --val_json "$val_json" \
       --pretrain_weights "$PRETRAIN_WEIGHTS" \
@@ -394,8 +394,8 @@ for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
                 --val_modality "$modality" \
                 --train_dataset_name "$train_dataset" \
                 --val_dataset_name "$val_dataset" \
-                --train_dataset_root "/home/user/datasets/$train_dataset" \
-                --val_dataset_root "/home/user/datasets/$val_dataset" \
+                --train_dataset_root "/data/datasets/$train_dataset" \
+                --val_dataset_root "/data/datasets/$val_dataset" \
                 --train_json "$train_json" \
                 --val_json "$val_json" \
                 --pretrain_weights "$PRETRAIN_WEIGHTS" \
@@ -430,8 +430,8 @@ for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
             --val_modality "$modality" \
             --train_dataset_name "$train_dataset" \
             --val_dataset_name "$val_dataset" \
-            --train_dataset_root "/home/user/datasets/$train_dataset" \
-            --val_dataset_root "/home/user/datasets/$val_dataset" \
+            --train_dataset_root "/data/datasets/$train_dataset" \
+            --val_dataset_root "/data/datasets/$val_dataset" \
             --train_json "$train_json" \
             --val_json "$val_json" \
             --pretrain_weights "$PRETRAIN_WEIGHTS" \

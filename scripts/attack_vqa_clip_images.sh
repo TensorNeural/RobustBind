@@ -4,7 +4,7 @@ set -e
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 
 VAL_JSON=./datasets/VQA2/val_data.json
-IMAGE_ROOT=/home/user/datasets/VQA2
+IMAGE_ROOT=/data/datasets/VQA2
 PRETRAIN_WEIGHTS=./ckpts/pretrained_weights_flash_atten.pt
 
 torchrun --nproc_per_node=$NUM_GPUS attack_vqa_clip_images.py \
