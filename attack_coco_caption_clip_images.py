@@ -41,7 +41,7 @@ def save_adv_image(tensor, out_path):
 def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=local_rank)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     return local_rank, rank, world_size, torch.device("cuda", local_rank)
@@ -116,7 +116,7 @@ def main(args):
 
             input = image_tensor.clone()
             unnormalize_inplace(input, mean, std)
-            adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std)
+            adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std, 0.4)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])

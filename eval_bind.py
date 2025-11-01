@@ -83,7 +83,7 @@ def evaluate_all_models(args):
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=local_rank)
     rank = dist.get_rank()
 
     args.output_dir = os.path.join(args.output_dir, "eval", args.modality.value, args.dataset_name)

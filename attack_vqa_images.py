@@ -57,10 +57,27 @@ def save_adv_image(tensor, out_path):
     image.save(out_path)
 
 
+def save_diff_image(adv, orig, out_path, bg=0.5):
+    """
+    Standard robust ML visualization:
+    Signed RGB diff centered on gray background (no ε needed).
+
+    adv, orig: (1,3,H,W) in [0,1]
+    bg: gray background level (default 0.5)
+    """
+    diff = (adv - orig).squeeze(0)              # (3,H,W)
+    diff = diff / diff.abs().max().clamp(min=1e-12)  # normalize by max |Δ|
+    diff = diff.clamp(-1, 1)
+    diff_vis = bg + diff * 0.5                  # map [-1,1] → [0,1] around gray
+
+    img = transforms.ToPILImage()(diff_vis.cpu())
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    img.save(out_path)
+
 def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=local_rank)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     return local_rank, rank, world_size, torch.device("cuda", local_rank)
@@ -113,20 +130,8 @@ def main(args):
     }
 
     configs = []
-    # for eps in [2, 4]:
-    #     for model_tag in ["unibind", "robustbind2", "robustbind4"]:
-    #         if model_tag == "unibind":
-    #             lora_path = None
-    #         elif model_tag == "robustbind2":
-    #             lora_path = LORA_WEIGHTS["robustbind2"]
-    #         elif model_tag == "robustbind4":
-    #             lora_path = LORA_WEIGHTS["robustbind4"]
-    #         else:
-    #             continue
-    #         configs.append((eps, model_tag, lora_path))
-    
-    for eps in [2, 4]:
-        for model_tag in ["unibind"]:
+    for eps in args.epsilons:
+        for model_tag in args.model_tags:
             if model_tag == "unibind":
                 lora_path = None
             elif model_tag == "robustbind2":
@@ -175,15 +180,21 @@ def main(args):
             with torch.no_grad():
                 emb_orig = model(image_tensor, mode=ForwardMode.EMBEDDINGS)
 
-            input = image_tensor.clone()
-            unnormalize_inplace(input, mean, std)
+            orig_pixels = image_tensor.detach().clone()
+            unnormalize_inplace(orig_pixels, mean, std)
 
-            adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std)
+            adv_input = two_stage_attack_l2(logger, attack_model, image_tensor, emb_orig, stage1, stage2, mean, std)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])
                 out_path = os.path.join(adv_dir, filename)
-                save_adv_image(adv_input[j:j + 1], out_path)
+                adv_pixels = adv_input[j:j + 1].detach().clone()
+                unnormalize_inplace(adv_pixels, mean, std)
+                save_adv_image(adv_pixels, out_path)
+
+                diff_filename = f"{os.path.splitext(filename)[0]}_diff.png"
+                diff_path = os.path.join(adv_dir, diff_filename)
+                save_diff_image(adv_pixels, orig_pixels[j:j + 1], diff_path)
                 updated_sample = sample.copy()
                 updated_sample["image"] = f"{os.path.basename(adv_dir)}/{filename}"
                 adv_data_rank.append(updated_sample)
@@ -209,7 +220,11 @@ if __name__ == "__main__":
     parser.add_argument("--image_root", type=str, required=True)
     parser.add_argument("--pretrain_weights", type=str, required=True)
     parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--max_samples", type=int, default=5000)
+    parser.add_argument("--max_samples", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=100)
+    # parser.add_argument("--epsilons", type=int, nargs="+", default=[2, 4])
+    # parser.add_argument("--model_tags", type=str, nargs="+", default=["unibind", "robustbind2", "robustbind4"])
+    parser.add_argument("--epsilons", type=int, nargs="+", default=[2, 4])
+    parser.add_argument("--model_tags", type=str, nargs="+", default=["unibind", "robustbind2", "robustbind4"])
     args = parser.parse_args()
     main(args)

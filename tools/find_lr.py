@@ -115,7 +115,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="output")
     parser.add_argument("--dataset_root", type=str, default="/data/datasets/ImageNet-1K")
     parser.add_argument("--train_json", type=str, default="./datasets/ImageNet-1K/train_data.json")
-    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten.pt")
+    parser.add_argument("--pretrain_weights", type=str, default="./ckpts/pretrained_weights_flash_atten_image_patchs.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--center_emb", type=str, default="./centre_embs/image_in_center_embeddings.pkl")
     parser.add_argument("--train_batch_size", type=int, default=80)

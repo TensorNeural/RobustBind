@@ -55,7 +55,7 @@ def save_adv_image(tensor, out_path):
 def setup_distributed():
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=local_rank)
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     return local_rank, rank, world_size, torch.device("cuda", local_rank)

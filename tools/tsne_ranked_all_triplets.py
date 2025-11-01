@@ -558,7 +558,7 @@ if __name__ == "__main__":
     parser.add_argument("--centre_emb_event", default="./centre_embs/event_nin_center_embeddings.pkl")
     parser.add_argument("--centre_emb_audio", default="./centre_embs/audio_esc_center_embeddings.pkl")
     parser.add_argument("--centre_emb_point", default="./centre_embs/point_modelnet40_center_embeddings.pkl")
-    parser.add_argument("--pretrain_weights", default="./ckpts/pretrained_weights_flash_atten.pt")
+    parser.add_argument("--pretrain_weights", default="./ckpts/pretrained_weights_flash_atten_image_patchs.pt")
     parser.add_argument("--use_flash_attention", action="store_true", default=True)
     parser.add_argument("--skip_embed", action="store_true", default=True, help="Skip embedding & sampling")
     parser.add_argument("--embedding_dir", type=str, default="output/alignment/2025-07-27_23-27-43", help="Path to precomputed .npy embeddings")

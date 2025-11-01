@@ -8,7 +8,7 @@ TENSORBOARD_ROOT="output/tensorboard"
 OUTPUT_DIR="$SESSION_OUTPUT_DIR"
 NUM_WORKERS=4
 TENSORBOARD_DATA_DIR=tensorboard
-PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten.pt"
+PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten_image_patchs.pt"
 
 mkdir -p "$SESSION_OUTPUT_DIR"
 mkdir -p "$TENSORBOARD_ROOT"

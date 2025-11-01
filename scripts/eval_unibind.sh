@@ -164,7 +164,7 @@ OUTPUT_DIR=output
 NUM_WORKERS=2
 EPSILONS="2,4"
 TWO_STAGE_ITERS=100
-PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten.pt"
+PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten_image_patchs.pt"
 
 # === Eval Loop ===
 for dataset in "${!MODALITY_MAP[@]}"; do

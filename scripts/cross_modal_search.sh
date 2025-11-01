@@ -31,6 +31,6 @@ torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) -m downstream.cross_modality_
   --center_emb_event "${CENTER_EVENT}" \
   --center_emb_point "${CENTER_POINT}" \
   --label_map "./datasets/esc50_label_map.json" \
-  --pretrain_weights "${CKPT_DIR}/pretrained_weights_flash_atten.pt" \
+  --pretrain_weights "${CKPT_DIR}/pretrained_weights_flash_atten_image_patchs.pt" \
   --output_dir "${OUTPUT_DIR}" \
   --use_flash_attention

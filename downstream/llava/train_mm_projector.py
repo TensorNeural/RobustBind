@@ -208,7 +208,7 @@ def train(args, logger, writer, device, rank):
         )
 
     if rank == 0:
-        torch.save(model.get_model().mm_projector.state_dict(), os.path.join(args.output_dir, "projector.pt"))
+        torch.save(model.get_model().mm_projector.state_dict(), os.path.join(args.output_dir, "vqa2_projector.pt"))
 
     writer.close()
     logger.info("Training completed.")
@@ -234,7 +234,7 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    dist.init_process_group("nccl")
+    dist.init_process_group("nccl", device_id=local_rank)
     rank = dist.get_rank()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")

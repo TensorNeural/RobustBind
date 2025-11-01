@@ -63,9 +63,9 @@ DATASET_NAMES = {
 }
 
 def setup_ddp():
-    dist.init_process_group("nccl")
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", device_id=rank)
     return torch.device(f"cuda:{rank}"), rank, dist.get_world_size()
 
 def setup_logger(log_dir, rank):

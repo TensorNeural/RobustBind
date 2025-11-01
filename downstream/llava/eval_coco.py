@@ -122,33 +122,33 @@ def ddp_scatter(data, rank, world_size):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_dir", required=True)
+    parser.add_argument("--model_path", required=True)
     parser.add_argument("--projector_weight", required=True)
     parser.add_argument("--val_json", required=True)
     parser.add_argument("--image_root", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--max_samples", type=int, default=5)
+    parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=5)
     parser.add_argument("--use_unibind", action='store_true', default=True, help="Use Unibind for encoder")
     args = parser.parse_args()
 
     batch_size = args.batch_size
 
-    torch.set_num_threads(os.cpu_count())
-
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
+    dist.init_process_group("nccl", device_id=rank)
+    device = torch.device("cuda", rank)
+    world_size = dist.get_world_size()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     output_path = os.path.join(args.output_dir, timestamp)
     os.makedirs(output_path, exist_ok=True)
     logger = setup_logger(output_path, rank)
 
+    logger.info(f"Args: {args}")
+
     logger.info("Starting COCO Caption Evaluation")
-    logger.info(f"Model Dir: {args.model_dir}")
+    logger.info(f"Model Path: {args.model_path}")
     logger.info(f"Val JSON: {args.val_json}")
     logger.info(f"Image Root: {args.image_root}")
     logger.info(f"Output Dir: {output_path}")
@@ -157,14 +157,14 @@ def main():
 
     disable_torch_init()
     tokenizer, model, image_processor, _ = load_pretrained_model(
-        model_path=args.model_dir,
-        model_name=os.path.basename(args.model_dir),
+        model_path=args.model_path,
+        model_name=args.model_path,
         model_base=None,
         torch_dtype=torch.float16,
         device=device,
         device_map=None,
         use_unibind=args.use_unibind,
-        unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten.pt",
+        unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten_image_patchs.pt",
         projector_weights_path=args.projector_weight,
         freeze_projector=True,
         freeze_unibind=True,

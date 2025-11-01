@@ -106,19 +106,20 @@ def generate_batch(logger, model, tokenizer, image_processor, image_paths, promp
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_dir", required=True)
+    parser.add_argument("--model_path", required=True)
     parser.add_argument("--projector_weight", required=True)
     parser.add_argument("--image_root", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--max_samples", type=int, default=5000)
     parser.add_argument("--batch_size", type=int, default=200)
+    parser.add_argument("--use_unibind", action='store_true', default=False, help="Use Unibind for encoder")
     args = parser.parse_args()
 
-    torch.distributed.init_process_group("nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    rank = int(os.environ.get("LOCAL_RANK", "0"))
     torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
+    torch.distributed.init_process_group("nccl", device_id=rank)
+    device = torch.device("cuda", rank)
+    world_size = dist.get_world_size()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     root_dir = os.path.join(args.output_dir, timestamp)
@@ -174,19 +175,20 @@ def main():
                 data = json.load(f)
             if args.max_samples:
                 data = data[:args.max_samples]
+                
             data = ddp_scatter(data, rank, world_size)
             logger.info(f"📊 Rank {rank} processing {len(data)} samples...")
 
             disable_torch_init()
             tokenizer, model, image_processor, _ = load_pretrained_model(
-                model_path=args.model_dir,
-                model_name=os.path.basename(args.model_dir),
+                model_path=args.model_path,
+                model_name=args.model_path,
                 model_base=None,
                 torch_dtype=torch.float16,
                 device=device,
                 device_map=None,
-                use_unibind=True,
-                unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten.pt",
+                use_unibind=args.use_unibind,
+                unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten_image_patchs.pt",
                 projector_weights_path=args.projector_weight,
                 unibind_use_lora=lora_weights_map[model_tag] is not None,
                 unibind_lora_weights=lora_weights_map[model_tag],

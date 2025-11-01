@@ -79,7 +79,7 @@ def load_model(model_dir: str, torch_dtype=torch.float16):
         device="cuda",
         device_map="auto",
         use_unibind=True,
-        unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten.pt",
+        unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten_image_patchs.pt",
         unibind_use_lora=False,
         unibind_lora_rank=4,
         unibind_lora_alpha=8.0,
@@ -132,7 +132,7 @@ def main():
     output_dir = os.path.join(os.getcwd(), "output")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "vqa2_llava_results.json")
-    max_samples = 2
+    max_samples = 5000
 
     # === Load model
     model_dir = download_weights(model_repo, local_cache)

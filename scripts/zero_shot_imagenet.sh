@@ -17,7 +17,7 @@ do
     --test_dataset_dir "$DATASET_DIR" \
     --test_data_path "./datasets/ImageNet-1K/$TEST_JSON" \
     --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
-    --pretrain_weights ./ckpts/pretrained_weights_flash_atten.pt \
+    --pretrain_weights ./ckpts/pretrained_weights_flash_atten_image_patchs.pt \
     --output_dir "$OUTPUT_DIR" \
     --modality image \
     --val_batch_size 2000 \
@@ -41,7 +41,7 @@ done
 #     --test_dataset_dir "$DATASET_DIR" \
 #     --test_data_path "./datasets/ImageNet-1K/$TEST_JSON" \
 #     --centre_embeddings_path ./centre_embs/image_in_center_embeddings.pkl \
-#     --pretrain_weights ./ckpts/pretrained_weights_flash_atten.pt \
+#     --pretrain_weights ./ckpts/pretrained_weights_flash_atten_image_patchs.pt \
 #     --output_dir "$OUTPUT_DIR" \
 #     --modality image \
 #     --val_batch_size 2000 \
