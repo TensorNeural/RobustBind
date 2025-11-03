@@ -180,10 +180,10 @@ def main(args):
             with torch.no_grad():
                 emb_orig = model(image_tensor, mode=ForwardMode.EMBEDDINGS)
 
-            orig_pixels = image_tensor.detach().clone()
-            unnormalize_inplace(orig_pixels, mean, std)
+            # orig_pixels = image_tensor.detach().clone()
+            # unnormalize_inplace(orig_pixels, mean, std)
 
-            adv_input = two_stage_attack_l2(logger, attack_model, image_tensor, emb_orig, stage1, stage2, mean, std)
+            adv_input = two_stage_attack_l2(logger, attack_model, image_tensor, emb_orig, stage1, stage2, mean, std, cosine_threshold=0)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])
@@ -192,9 +192,9 @@ def main(args):
                 unnormalize_inplace(adv_pixels, mean, std)
                 save_adv_image(adv_pixels, out_path)
 
-                diff_filename = f"{os.path.splitext(filename)[0]}_diff.png"
-                diff_path = os.path.join(adv_dir, diff_filename)
-                save_diff_image(adv_pixels, orig_pixels[j:j + 1], diff_path)
+                # diff_filename = f"{os.path.splitext(filename)[0]}_diff.png"
+                # diff_path = os.path.join(adv_dir, diff_filename)
+                # save_diff_image(adv_pixels, orig_pixels[j:j + 1], diff_path)
                 updated_sample = sample.copy()
                 updated_sample["image"] = f"{os.path.basename(adv_dir)}/{filename}"
                 adv_data_rank.append(updated_sample)
@@ -220,7 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_root", type=str, required=True)
     parser.add_argument("--pretrain_weights", type=str, required=True)
     parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--max_samples", type=int, default=10)
+    parser.add_argument("--max_samples", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=100)
     # parser.add_argument("--epsilons", type=int, nargs="+", default=[2, 4])
     # parser.add_argument("--model_tags", type=str, nargs="+", default=["unibind", "robustbind2", "robustbind4"])

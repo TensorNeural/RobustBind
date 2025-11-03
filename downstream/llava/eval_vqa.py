@@ -110,9 +110,15 @@ def main():
     parser.add_argument("--projector_weight", required=True)
     parser.add_argument("--image_root", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--max_samples", type=int, default=5000)
+    parser.add_argument("--max_samples", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=200)
-    parser.add_argument("--use_unibind", action='store_true', default=False, help="Use Unibind for encoder")
+    parser.add_argument("--use_unibind", action='store_true', default=True, help="Use Unibind for encoder")
+    parser.add_argument(
+        "--unibind_pretrain_weights",
+        type=str,
+        default="./ckpts/pretrained_weights_flash_atten_image_patchs.pt",
+        help="Path to UniBind pretrain weights (must match LoRA base used in attacks)"
+    )
     args = parser.parse_args()
 
     rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -124,29 +130,29 @@ def main():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     root_dir = os.path.join(args.output_dir, timestamp)
 
-    # model_tags = ["unibind", "robustbind2", "robustbind4"]
-    model_tags = ["unibind"]
+    model_tags = ["unibind", "robustbind2", "robustbind4"]
+    # model_tags = ["unibind"]
     settings = [
         {
             "name": "clean",
             "val_json_template": "datasets/VQA2/val_data.json",
             "use_random_image": False
         },
-        # {
-        #     "name": "random",
-        #     "val_json_template": "datasets/VQA2/val_data_filtered.json",
-        #     "use_random_image": True
-        # },
-        # {
-        #     "name": "eps2",
-        #     "val_json_template": "datasets/VQA2/val_data_adv_eps2_{model_tag}.json",
-        #     "use_random_image": False
-        # },
-        # {
-        #     "name": "eps4",
-        #     "val_json_template": "datasets/VQA2/val_data_adv_eps4_{model_tag}.json",
-        #     "use_random_image": False
-        # },
+        {
+            "name": "random",
+            "val_json_template": "datasets/VQA2/val_data.json",
+            "use_random_image": True
+        },
+        {
+            "name": "eps2",
+            "val_json_template": "datasets/VQA2/val_data_adv_eps2_{model_tag}.json",
+            "use_random_image": False
+        },
+        {
+            "name": "eps4",
+            "val_json_template": "datasets/VQA2/val_data_adv_eps4_{model_tag}.json",
+            "use_random_image": False
+        },
     ]
 
     lora_weights_map = {
@@ -154,6 +160,9 @@ def main():
         "robustbind2": "./ckpts/vision_eps2_lora_weights.pt",
         "robustbind4": "./ckpts/vision_eps4_lora_weights.pt",
     }
+
+    # Dictionary to store all results for CSV generation
+    all_accuracies = {}
 
     for setting in settings:
         setting_name = setting["name"]
@@ -180,6 +189,23 @@ def main():
             logger.info(f"📊 Rank {rank} processing {len(data)} samples...")
 
             disable_torch_init()
+            # Log model configuration for transparency
+            logger.info(
+                json.dumps(
+                    {
+                        "model_tag": model_tag,
+                        "setting": setting_name,
+                        "use_unibind": args.use_unibind,
+                        "unibind_pretrain_weights": args.unibind_pretrain_weights,
+                        "projector_weight": args.projector_weight,
+                        "use_lora": lora_weights_map[model_tag] is not None,
+                        "lora_weights": lora_weights_map[model_tag],
+                        "lora_rank": 4,
+                        "lora_alpha": 8,
+                    },
+                    indent=2,
+                )
+            )
             tokenizer, model, image_processor, _ = load_pretrained_model(
                 model_path=args.model_path,
                 model_name=args.model_path,
@@ -188,7 +214,7 @@ def main():
                 device=device,
                 device_map=None,
                 use_unibind=args.use_unibind,
-                unibind_pretrain_weights="./ckpts/pretrained_weights_flash_atten_image_patchs.pt",
+                unibind_pretrain_weights=args.unibind_pretrain_weights,
                 projector_weights_path=args.projector_weight,
                 unibind_use_lora=lora_weights_map[model_tag] is not None,
                 unibind_lora_weights=lora_weights_map[model_tag],
@@ -243,13 +269,32 @@ def main():
                 logger.info(f"✅ Saved {len(all_results)} VQA results to {output_json}")
                 logger.info(f"📊 Final VQA Soft Accuracy: {acc_mean:.3f}")
 
-                epsilon_map = {"clean": "None", "random": "None", "eps2": "2/255", "eps4": "4/255"}
-                print("\n=== CSV RESULT ===")
-                print("Model,Setting,Epsilon,Accuracy")
-                print(f"{model_tag},{setting_name},{epsilon_map[setting_name]},{acc_mean:.2f}")
+                # Store accuracy in memory for CSV generation
+                all_accuracies[(setting_name, model_tag)] = (acc_mean, val_json)
 
             torch.distributed.barrier()
 
+    if rank == 0:
+        # Write consolidated CSV results from in-memory data
+        epsilon_map = {"clean": "None", "random": "None", "eps2": "2/255", "eps4": "4/255"}
+        csv_path = os.path.join(root_dir, "vqa_results_summary.csv")
+        
+        with open(csv_path, "w") as csv_file:
+            csv_file.write("Model,Setting,Epsilon,Accuracy,DataFile\n")
+            
+            for setting in settings:
+                setting_name = setting["name"]
+                for model_tag in model_tags:
+                    if setting_name == "random" and model_tag != "unibind":
+                        continue
+                    
+                    key = (setting_name, model_tag)
+                    if key in all_accuracies:
+                        acc_mean, val_json = all_accuracies[key]
+                        csv_file.write(f"{model_tag},{setting_name},{epsilon_map[setting_name]},{acc_mean:.4f},{val_json}\n")
+        
+        print(f"\n✅ Consolidated CSV results saved to: {csv_path}")
+        
     dist.destroy_process_group()
 
 
