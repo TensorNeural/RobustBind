@@ -115,14 +115,16 @@ def main(args):
             with torch.no_grad():
                 emb_orig = model(image_tensor, mode=ForwardMode.EMBEDDINGS)
 
-            input = image_tensor.clone()
-            unnormalize_inplace(input, mean, std)
-            adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std)
+            # Pass normalized tensors into two_stage_attack_l2; it will handle pixel-space internally.
+            adv_input = two_stage_attack_l2(logger, model, image_tensor, emb_orig, stage1, stage2, mean, std)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])
                 out_path = os.path.join(adv_dir, filename)
-                save_adv_image(adv_input[j:j + 1], out_path)
+                # Convert back to pixel space before saving
+                adv_pixels = adv_input[j:j + 1].detach().clone()
+                unnormalize_inplace(adv_pixels, mean, std)
+                save_adv_image(adv_pixels, out_path)
                 updated_sample = sample.copy()
                 updated_sample["image"] = f"{os.path.basename(adv_dir)}/{filename}"
                 adv_data_rank.append(updated_sample)

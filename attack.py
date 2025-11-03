@@ -351,7 +351,7 @@ def two_stage_attack_l2(logger, model, inputs, emb_orig, attack_stage1, attack_s
     if len(keep_idx) > 0:
         logger.info(f"Refining {len(keep_idx)} samples in Stage 2 (cosine ≥ {cosine_threshold})")
         with torch.no_grad():
-            inputs_unorm2 = adv_stage1[keep_idx].detach().clone()
+            inputs_unorm2 = inputs[keep_idx].detach().clone()
             unnormalize_inplace(inputs_unorm2, mean, std)
 
         adv_stage2 = attack_stage2.perturb(inputs_unorm2, None, emb_orig[keep_idx])

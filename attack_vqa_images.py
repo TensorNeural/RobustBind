@@ -175,7 +175,7 @@ def main(args):
         batches = [all_data[i:i + args.batch_size] for i in range(0, len(all_data), args.batch_size)]
         for batch in tqdm(batches, desc=f"[Rank {rank}] eps={eps} {model_tag}", disable=(rank != 0)):
             image_paths = [os.path.join(args.image_root, s["image"]) for s in batch]
-            image_tensor = load_and_transform_vision_data(image_paths, device)
+            image_tensor = load_and_transform_vision_data(image_paths, device, resize=336)
 
             with torch.no_grad():
                 emb_orig = model(image_tensor, mode=ForwardMode.EMBEDDINGS)
@@ -183,7 +183,7 @@ def main(args):
             # orig_pixels = image_tensor.detach().clone()
             # unnormalize_inplace(orig_pixels, mean, std)
 
-            adv_input = two_stage_attack_l2(logger, attack_model, image_tensor, emb_orig, stage1, stage2, mean, std, cosine_threshold=0)
+            adv_input = two_stage_attack_l2(logger, model, image_tensor, emb_orig, stage1, stage2, mean, std, cosine_threshold=0)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])

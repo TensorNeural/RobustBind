@@ -1,10 +1,16 @@
 {
 	"folders": [
 		{
+			"name": "RobustBind",
 			"path": "."
 		},
 		{
-			"path": "../../data/datasets"
+			"name": "RobustVLM",
+			"path": "../RobustVLM"
+		},
+		{
+			"name": "data",
+			"path": "../../data"
 		}
 	]
 }

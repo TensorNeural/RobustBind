@@ -122,19 +122,22 @@ def main(args):
         batches = [all_data[i:i + args.batch_size] for i in range(0, len(all_data), args.batch_size)]
         for batch in tqdm(batches, desc=f"[Rank {rank}] eps={eps} {model_tag}", disable=(rank != 0)):
             image_paths = [os.path.join(args.image_root, s["image"]) for s in batch]
-            image_tensor = load_and_transform_vision_data(image_paths, device)
+            # Use 336 resolution to match LLaVA/UniBind image processor and ensure transferability of the attack
+            image_tensor = load_and_transform_vision_data(image_paths, device, resize=336)
 
             with torch.no_grad():
                 emb_orig = model(image_tensor, mode=ForwardMode.EMBEDDINGS)
 
-            input = image_tensor.clone()
-            unnormalize_inplace(input, mean, std)
-            adv_input = two_stage_attack_l2(logger, attack_model, input, emb_orig, stage1, stage2, mean, std)
+            # Pass normalized tensors into two_stage_attack_l2; it will handle pixel-space internally.
+            adv_input = two_stage_attack_l2(logger, model, image_tensor, emb_orig, stage1, stage2, mean, std)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])
                 out_path = os.path.join(adv_dir, filename)
-                save_adv_image(adv_input[j:j + 1], out_path)
+                # Convert back to pixel space before saving
+                adv_pixels = adv_input[j:j + 1].detach().clone()
+                unnormalize_inplace(adv_pixels, mean, std)
+                save_adv_image(adv_pixels, out_path)
                 updated = sample.copy()
                 updated["image"] = f"{os.path.basename(adv_dir)}/{filename}"
                 adv_data_rank.append(updated)
