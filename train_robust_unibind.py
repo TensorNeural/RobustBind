@@ -592,7 +592,7 @@ def main():
     parser.add_argument("--session_timestamp", default=None)
     parser.add_argument("--tensorboard_root", default=None)
     parser.add_argument("--epochs", type=int, default=2, help="Total number of training epochs")
-    parser.add_argument("--limit_samples", type=int, default=100, help="If set, overrides both train_max_samples and val_max_samples for quick testing")
+    parser.add_argument("--limit_samples", type=int, default=None, help="If set, overrides both train_max_samples and val_max_samples for quick testing")
     # Learning rate controls
     parser.add_argument("--align_max_lr", type=float, default=3e-3, help="Max LR for OneCycle during alignment training")
     parser.add_argument("--robust_max_lr_lora", type=float, default=3e-3, help="Max LR for OneCycle during robust LoRA training")

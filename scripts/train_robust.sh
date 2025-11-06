@@ -97,7 +97,7 @@ declare -A ALIGN_TRAIN_MAX_SAMPLES_MAP=(
 )
 
 declare -A ALIGN_VAL_MAX_SAMPLES_MAP=(
-  [ImageNet-1K]=50000
+  [ImageNet-1K]=3000
   [MSR-VTT]=2990
   [ESC-50]=400
   [LLVIP]=16974
@@ -139,7 +139,8 @@ declare -A ALIGN_EMB_SUFFIX_MAP=(
 # NOTE: Alignment stage is moved to after Robust stage
 
 # Robust config
-ROBUST_EPSILONS=(2 4)
+# ROBUST_EPSILONS=(2 4)
+ROBUST_EPSILONS=(2)
 ROBUST_LORA_RANKS=(
   4 
   # 4 
@@ -151,7 +152,8 @@ ROBUST_LORA_ALPHAS=(
   # 16
 )
 ROBUST_EPOCHS=2
-ROBUST_MODES=(lora full_fine_tune)
+# ROBUST_MODES=(lora full_fine_tune)
+ROBUST_MODES=(lora)
 
 declare -A ROBUST_TRAIN_MODALITY_TO_DATASET=(
   [image]="ImageNet-1K"
@@ -246,7 +248,7 @@ declare -A ROBUST_TRAIN_JSON_MAP=(
 )
 
 declare -A ROBUST_VAL_JSON_MAP=(
-  [ImageNet-1K]="./datasets/ImageNet-1K/val_data_3000.json"
+  [ImageNet-1K]="./datasets/ImageNet-1K/val_data.json"
   [Places365]="./datasets/Places365/val_data.json"
   [UCF-101]="./datasets/UCF-101/val_data.json"
   [MSR-VTT]="./datasets/MSR-VTT/val_data.json"
