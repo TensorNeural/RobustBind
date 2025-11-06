@@ -6,6 +6,9 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+import logging
+import traceback
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +21,64 @@ from shared_types import Modality
 from model import UniBindClassifier, ForwardMode, MODALITY_TEMPLATES
 from data_util import get_transform_fn, load_and_transform_text, load_label_mapping, get_normalization_tensors
 from attack import AttackModel, APGDAttack, two_stage_attack
-from openTSNE import TSNE
+# Logging setup
+LOGGER = logging.getLogger("tools.vis_embs")
+
+# Prefer RAPIDS cuML TSNE if available; fallback to openTSNE. No sklearn TSNE.
+# try:
+#     from cuml.manifold import TSNE as CuMLTSNE  # type: ignore
+#     _HAS_CUML_TSNE = True
+# except Exception:
+#     CuMLTSNE = None  # type: ignore
+_HAS_CUML_TSNE = False
+
+try:
+    from openTSNE import TSNE as OpenTSNE  # type: ignore
+    _HAS_OPENTSNE = True
+except Exception:
+    OpenTSNE = None  # type: ignore
+    _HAS_OPENTSNE = False
+
+def _to_numpy(x: Any) -> np.ndarray:
+    """Best-effort convert various GPU/array types to NumPy on host."""
+    try:
+        # cupy ndarray
+        import cupy as cp  # type: ignore
+        if isinstance(x, cp.ndarray):
+            return cp.asnumpy(x)
+    except Exception:
+        pass
+    try:
+        # cuDF objects
+        import cudf  # type: ignore
+        if isinstance(x, (cudf.Series, cudf.DataFrame)):
+            return x.to_numpy()
+    except Exception:
+        pass
+    # Generic adapters
+    if hasattr(x, "to_numpy"):
+        try:
+            return x.to_numpy()  # type: ignore
+        except Exception:
+            pass
+    if hasattr(x, "get"):
+        try:
+            return x.get()  # type: ignore
+        except Exception:
+            pass
+    return np.asarray(x)
+
+def _select_tsne_backend() -> str:
+    """Return 'cuml' if available, else 'opentsne'; raise if none present."""
+    if _HAS_CUML_TSNE:
+        print("[INFO] TSNE backend selected: cuML")
+        return "cuml"
+    if _HAS_OPENTSNE:
+        print("[INFO] TSNE backend selected: openTSNE")
+        return "opentsne"
+    raise ImportError(
+        "No TSNE backend available. Install RAPIDS cuML (preferred) or openTSNE."
+    )
 
 # Default LoRA checkpoints for robust variants (if user doesn't specify lora_weights)
 LORA_WEIGHTS_MAP: Dict[str, Dict[str, str]] = {
@@ -50,18 +110,49 @@ def run_tsne(
             np.linspace(0.25, 0.75, X.shape[0]).reshape(-1, 1),
             np.linspace(0.25, 0.75, X.shape[0]).reshape(-1, 1),
         ])
-    
-    tsne = TSNE(
-        n_components=2,
-        perplexity=perplexity,
-        learning_rate=learning_rate,
-        n_iter=n_iter,
-        early_exaggeration=early_exaggeration,
-        initialization=initialization,
-        random_state=random_state,
-        n_jobs=-1,
-    )
-    coords = tsne.fit(X)
+
+    backend = _select_tsne_backend()
+
+    # Optional PCA pre-reduction
+    X_fit = X
+    if pca_dims and 0 < pca_dims < X.shape[1]:
+        try:
+            from sklearn.decomposition import PCA as SkPCA  # type: ignore
+            pca = SkPCA(n_components=pca_dims, random_state=random_state)
+            X_fit = pca.fit_transform(X)
+        except Exception:
+            X_fit = X
+
+    t0 = time.perf_counter()
+    if backend == "cuml":
+        # cuML uses 'init' instead of 'initialization'
+        init = "pca" if initialization.lower() == "pca" else "random"
+        tsne = CuMLTSNE(
+            n_components=2,
+            perplexity=perplexity,
+            learning_rate=learning_rate,
+            n_iter=n_iter,
+            early_exaggeration=early_exaggeration,
+            init=init,
+            random_state=random_state,
+            verbose=0,
+        )
+        coords = _to_numpy(tsne.fit_transform(X_fit))
+    else:
+        # openTSNE
+        tsne = OpenTSNE(
+            n_components=2,
+            perplexity=perplexity,
+            learning_rate=learning_rate,
+            n_iter=n_iter,
+            early_exaggeration=early_exaggeration,
+            initialization=initialization,
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        coords = np.asarray(tsne.fit(X_fit))
+    dt = time.perf_counter() - t0
+    print(f"[INFO] TSNE ({backend}) finished: n={X.shape[0]}, d={X.shape[1]}, time={dt:.2f}s")
 
     # Normalize to [0,1] for consistent plotting margins
     coords = (coords - coords.min(0)) / (coords.max(0) - coords.min(0) + 1e-9)
@@ -112,43 +203,78 @@ def _fit_tsne_and_place_text(
     if X_text is not None and X_text.ndim == 1:
         X_text = X_text[None, :]
 
-    # OpenTSNE supports transform of new points
-    tsne = TSNE(
-        n_components=int(tsne_cfg.get("n_components", 2)),
-        perplexity=int(tsne_cfg.get("perplexity", fallback_perplexity)),
-        learning_rate=int(tsne_cfg.get("learning_rate", 50)),
-        n_iter=int(tsne_cfg.get("n_iter", 1000)),
-        early_exaggeration=float(tsne_cfg.get("early_exaggeration", 8.0)),
-        initialization="pca",
-        random_state=42,
-        n_jobs=-1,
-    )
-    # Optional PCA pre-reduction prior to OpenTSNE
+    backend = _select_tsne_backend()
+
+    # Optional PCA pre-reduction prior to TSNE
     X_fit = X_samples
     pca_dims = int(tsne_cfg.get("pca_dims", 50))
+    random_state = int(tsne_cfg.get("random_state", 42))
     if pca_dims and 0 < pca_dims < X_samples.shape[1]:
         try:
             from sklearn.decomposition import PCA as SkPCA  # type: ignore
-            pca = SkPCA(n_components=pca_dims, random_state=int(tsne_cfg.get("random_state", 42)))
+            pca = SkPCA(n_components=pca_dims, random_state=random_state)
             X_fit = pca.fit_transform(X_samples)
             X_text_p = pca.transform(X_text) if X_text is not None else None
         except Exception:
             X_text_p = X_text
     else:
         X_text_p = X_text
-    embedding = tsne.fit(X_fit)
-    coords_samples = np.asarray(embedding)
-    if X_text_p is not None:
-        coords_text = embedding.transform(X_text_p)
+
+    t0 = time.perf_counter()
+    if backend == "cuml":
+        # cuML has no out-of-sample transform; fit on combined when text provided
+        init = "pca"
+        tsne = CuMLTSNE(
+            n_components=int(tsne_cfg.get("n_components", 2)),
+            perplexity=int(tsne_cfg.get("perplexity", fallback_perplexity)),
+            learning_rate=int(tsne_cfg.get("learning_rate", 50)),
+            n_iter=int(tsne_cfg.get("n_iter", 1000)),
+            early_exaggeration=float(tsne_cfg.get("early_exaggeration", 8.0)),
+            init=init,
+            random_state=random_state,
+            verbose=0,
+        )
+        if X_text_p is not None:
+            X_stack = np.vstack([X_fit, X_text_p])
+        else:
+            X_stack = X_fit
+        coords_all = _to_numpy(tsne.fit_transform(X_stack))
+        dt = time.perf_counter() - t0
+        print(f"[INFO] TSNE (cuml) fit: samples={X_fit.shape[0]}, text={(0 if X_text_p is None else X_text_p.shape[0])}, time={dt:.2f}s")
+        # Normalize to [0,1]
+        coords_all = (coords_all - coords_all.min(0)) / (coords_all.max(0) - coords_all.min(0) + 1e-9)
+        if X_text_p is not None:
+            n = X_fit.shape[0]
+            return coords_all[:n], coords_all[n:]
+        else:
+            return coords_all, None
     else:
-        coords_text = None
-    # Normalize to [0,1]
-    allc = coords_samples if coords_text is None else np.vstack([coords_samples, coords_text])
-    allc = (allc - allc.min(0)) / (allc.max(0) - allc.min(0) + 1e-9)
-    if coords_text is not None:
-        return allc[: len(coords_samples)], allc[len(coords_samples) :]
-    else:
-        return allc, None
+        # openTSNE supports transform of new points
+        tsne = OpenTSNE(
+            n_components=int(tsne_cfg.get("n_components", 2)),
+            perplexity=int(tsne_cfg.get("perplexity", fallback_perplexity)),
+            learning_rate=int(tsne_cfg.get("learning_rate", 50)),
+            n_iter=int(tsne_cfg.get("n_iter", 1000)),
+            early_exaggeration=float(tsne_cfg.get("early_exaggeration", 8.0)),
+            initialization="pca",
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        embedding = tsne.fit(X_fit)
+        coords_samples = np.asarray(embedding)
+        if X_text_p is not None and hasattr(embedding, "transform"):
+            coords_text = embedding.transform(X_text_p)
+        else:
+            coords_text = None
+        dt = time.perf_counter() - t0
+        print(f"[INFO] TSNE (openTSNE) fit: samples={X_fit.shape[0]}, text={(0 if X_text_p is None else X_text_p.shape[0])}, time={dt:.2f}s")
+        # Normalize to [0,1]
+        allc = coords_samples if coords_text is None else np.vstack([coords_samples, coords_text])
+        allc = (allc - allc.min(0)) / (allc.max(0) - allc.min(0) + 1e-9)
+        if coords_text is not None:
+            return allc[: len(coords_samples)], allc[len(coords_samples) :]
+        else:
+            return allc, None
 
 
 def slugify(s: str) -> str:
@@ -276,6 +402,7 @@ def sample_file_paths(task: Task) -> Dict[str, List[str]]:
         k = min(task.samples_per_class, len(indices))
         pick = random.sample(indices, k=k)
         paths = [os.path.join(task.dataset_root, combined[i]["data"]) for i in pick]
+        print(f"[INFO] Sampled {len(paths)} paths for class='{cls}'")
         base_paths.append(paths)
     return {cls: paths for cls, paths in zip(task.classes, base_paths)}
 
@@ -458,8 +585,11 @@ def process_task(
                 lora_w = LORA_WEIGHTS_MAP.get(modality.value, {}).get(te.robust_level)
             # Validate LoRA path exists; if missing, fall back to original gracefully
             if use_lora and (not lora_w or not os.path.exists(lora_w)):
-                print(f"[WARN] LoRA weights not found for {modality.name} (requested level='{te.robust_level}'). "
-                      f"Path: {lora_w}. Falling back to original model.")
+                print(
+                    "[WARN] "
+                    f"LoRA weights not found for {modality.name} (requested level='{te.robust_level}'). "
+                    f"Path: {lora_w}. Falling back to original model."
+                )
                 use_lora = False
                 lora_w = None
 
@@ -509,6 +639,7 @@ def process_task(
                         "lora_weights": te.lora_weights,
                         "created": datetime.utcnow().isoformat() + "Z",
                     }, f, indent=2)
+                print(f"[INFO] Cached embeddings for class='{cls}' in {emb_dir}")
                 # Keep one text embedding per class label to overlay and legend
                 if cls_key not in seen_text_class:
                     text_points.append((text_emb, color, cls))
@@ -538,6 +669,7 @@ def process_task(
         plt.tight_layout()
         plt.savefig(out_path, dpi=300)
         plt.close()
+        print(f"[INFO] Saved combined t-SNE figure: {out_path}")
         return
 
     # Default: per-class individual plots
@@ -559,8 +691,11 @@ def process_task(
         lora_w = LORA_WEIGHTS_MAP.get(modality.value, {}).get(task.robust_level)
     # Validate LoRA path exists; if missing, fall back to original gracefully
     if use_lora and (not lora_w or not os.path.exists(lora_w)):
-        print(f"[WARN] LoRA weights not found for {modality.name} (requested level='{task.robust_level}'). "
-              f"Path: {lora_w}. Falling back to original model.")
+        print(
+            "[WARN] "
+            f"LoRA weights not found for {modality.name} (requested level='{task.robust_level}'). "
+            f"Path: {lora_w}. Falling back to original model."
+        )
         use_lora = False
         lora_w = None
 
@@ -585,6 +720,7 @@ def process_task(
             if not eps_float:
                 raise ValueError("attack_enabled=True requires attack_epsilon (e.g., 2/255 or 4/255)")
             x = maybe_run_attack(model, modality, x, device, eps_float)
+            print(f"[INFO] Ran adversarial attack (eps={task.attack_epsilon}) for class='{cls}'")
         # Encode
         sample_emb = model(x, ForwardMode.EMBEDDINGS).detach().cpu().numpy()
         sample_emb = _normalize_rows(sample_emb)  # ensure unit vectors
@@ -610,6 +746,7 @@ def process_task(
         }
         with open(os.path.join(emb_dir, f"{cls_slug}_meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
+        print(f"[INFO] Cached embeddings for class='{cls}' in {emb_dir}")
 
         # Plot TSNE per class: fit on samples, then place text
         tsne_cfg = task.tsne or {}
@@ -625,6 +762,17 @@ def process_task(
         plt.tight_layout()
         plt.savefig(out_path, dpi=300)
         plt.close()
+        print(f"[INFO] Saved t-SNE: {out_path}")
+
+
+def _setup_logging(level: str) -> None:
+    level_num = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level_num,
+        format="%(asctime)s | %(processName)s | %(levelname)s | %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    print(f"[INFO] Logging initialized at level: {level}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -641,6 +789,7 @@ def parse_args() -> argparse.Namespace:
     # TSNE & output
     p.add_argument("--perplexity", type=int, default=5)
     p.add_argument("--output-dir", type=str, default="./output")
+    p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])  # noqa
     return p.parse_args()
 
 
@@ -693,6 +842,7 @@ def run_task_on_gpu(
             torch.cuda.set_device(gpu_id)
         set_seed(seed + int(gpu_id))
         device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+        print(f"[INFO] Starting task on GPU {gpu_id}: {task.dataset_name}-{task.modality}")
         process_task(
             task=task,
             device=device,
@@ -701,33 +851,49 @@ def run_task_on_gpu(
             base_output_dir=base_output_dir,
             perplexity=perplexity,
         )
+        print(f"[INFO] Completed task on GPU {gpu_id}: {task.dataset_name}-{task.modality}")
     except Exception as e:
-        print(f"[ERROR][GPU {gpu_id}] Task {task.dataset_name}-{task.modality}: {e}")
+        print(f"[ERROR] [GPU {gpu_id}] Task {task.dataset_name}-{task.modality} failed: {e}")
+        traceback.print_exc()
         raise
 
 
 def main():
     args = parse_args()
+    _setup_logging(args.log_level)
+    # Explicitly report which TSNE backend will be used (INFO level)
+    try:
+        _backend_name = _select_tsne_backend()
+        human = "cuML" if _backend_name == "cuml" else "openTSNE"
+        print(f"[INFO] Using TSNE backend: {_backend_name} ({human})")
+    except ImportError as e:
+        print(f"[ERROR] {str(e)}")
+        raise
     set_seed(args.seed)
     device = torch.device(args.device)
 
     # Build task list (config is required)
     if not os.path.exists(args.config):
+        print(f"[ERROR] Config file not found: {args.config}")
         raise FileNotFoundError(f"Config file not found: {args.config}")
     tasks = load_tasks_from_config(args.config)
+    print(f"[INFO] Loaded {len(tasks)} tasks from config: {args.config}")
 
     # Decide GPU assignment
     num_available = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if num_available == 0:
+        print("[ERROR] No CUDA device available; multi-GPU execution requires GPUs.")
         raise RuntimeError("No CUDA device available; multi-GPU execution requires GPUs.")
 
     # Determine GPU IDs to use: use all available by default
     gpu_ids = list(range(num_available))
+    print(f"[INFO] Available GPUs: {gpu_ids}")
 
     # Map tasks to GPUs round-robin
     jobs = []
     for i, t in enumerate(tasks):
         gpu_id = gpu_ids[i % len(gpu_ids)]
+        print(f"[INFO] Assign task {i}: {t.dataset_name}-{t.modality} -> GPU {gpu_id}")
         jobs.append((t, gpu_id, args.pretrain_weights, args.use_flash_attention, args.output_dir, args.perplexity, args.seed))
 
     # Parallel execution: one process per GPU (or per task if fewer tasks)

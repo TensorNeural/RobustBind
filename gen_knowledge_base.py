@@ -13,6 +13,7 @@ from typing import Optional, Tuple, List, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import matplotlib
+import re
 
 from model import MODALITY_TEMPLATES
 from shared_types import Modality
@@ -75,10 +76,10 @@ def guess_mime_type(modality: str, file_path: Path) -> str:
     if ext == ".png": return "image/png"
     if ext == ".webp": return "image/webp"
     if ext in (".mp4", ".m4v"): return "video/mp4"
-    if ext == ".mov": return "video/mov"
+    if ext == ".mov": return "video/quicktime"
     if ext == ".avi": return "video/avi"
     if ext == ".webm": return "video/webm"
-    if ext == ".mp3": return "audio/mp3"
+    if ext == ".mp3": return "audio/mpeg"
     if ext == ".wav": return "audio/wav"
     if ext == ".flac": return "audio/flac"
     return {
@@ -86,8 +87,89 @@ def guess_mime_type(modality: str, file_path: Path) -> str:
         "thermal": "image/png",
         "event": "image/png",
         "video": "video/mp4",
-        "audio": "audio/mp3",
+        "audio": "audio/mpeg",
     }.get(modality, "application/octet-stream")
+
+def _safe_template_for_modality(modality: str) -> str:
+    """Return a fallback template safely even if Modality(modality) fails."""
+    try:
+        return MODALITY_TEMPLATES.get(Modality(modality), "a {}")
+    except Exception:
+        return "a {}"
+
+def _cleanup_temp_paths(files: Union[Path, List[Path]]):
+    """Remove temporary files generated for event frames. No-op for single Path."""
+    try:
+        if isinstance(files, list):
+            for fp in files:
+                try:
+                    if isinstance(fp, Path) and fp.exists():
+                        fp.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        # Best-effort cleanup only
+        pass
+
+def sanitize_for_prompt(text: Optional[str]) -> str:
+    """Sanitize text to avoid special characters or regex-like symbols in model prompts.
+    - Keep ASCII letters, digits, space, period, comma, and hyphen only
+    - Drop other characters and collapse spaces
+    """
+    if not text:
+        return ""
+    # Remove non-ASCII
+    s = str(text).encode("ascii", "ignore").decode()
+    # Keep only allowed characters
+    s = re.sub(r"[^A-Za-z0-9 \.,\-]", " ", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def normalize_label(label: Optional[str]) -> str:
+    """Normalize raw label strings for consistent appearance in descriptions.
+    Heuristics:
+    - Remove WordNet-style synset ids (e.g., 'n01234567')
+    - Replace `_`, `/`, `-` with spaces
+    - If multiple parts (commas/semicolons), prefer the first common-name part
+    - Remove parenthetical scientific names or qualifiers
+    - Collapse spaces; Title Case for readability
+    """
+    if not label:
+        return ""
+    s = str(label).strip()
+    # Drop WordNet synset prefix if present
+    s = re.sub(r"^n\d{8}[ _-]*", "", s)
+    # Replace common separators with spaces
+    s = s.replace("_", " ").replace("/", " ").replace("-", " ")
+    # Prefer the first part before comma or semicolon
+    s = re.split(r"[;,]", s, maxsplit=1)[0]
+    # Remove any parenthetical content
+    s = re.sub(r"\([^)]*\)", "", s)
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    # Title Case
+    s = s.title()
+    return s
+
+def ensure_label_in_description(text: str, norm_label: str) -> str:
+    """Ensure the normalized label is included and prefixed (no colon).
+    - If text begins with '<Label>:' or '<Label> -/–', normalize to '<Label> '.
+    - If text already begins with '<Label> ' (case-insensitive), keep it.
+    - Else, prefix '<Label> ' before the text.
+    """
+    if not norm_label:
+        return text
+    if not text:
+        return norm_label
+    # Normalize any colon/dash after the label to a single space (case-insensitive)
+    pattern = r"^" + re.escape(norm_label) + r"\s*[:\-–]\s*"
+    text_norm = re.sub(pattern, f"{norm_label} ", text, count=1, flags=re.IGNORECASE)
+    # If already starts with label + space, keep
+    if text_norm.lower().startswith(norm_label.lower() + " "):
+        return text_norm
+    # Otherwise, prefix label and a space
+    return f"{norm_label} {text_norm}"
 
 def prepare_files_for_model(entry: dict, dataset_root: Path, modality: str, logger: logging.Logger, event_frames: int):
     rel_path = entry["data"]
@@ -244,18 +326,65 @@ def render_event_to_frames(event_abs_path: Path, target_size: int = 224, T: int 
 # ==========================================================
 
 def _build_event_prompt(label: Optional[str], num_frames: int) -> str:
-    label_part = f"This event sample belongs to the class '{label}'. " if label else ""
-    # Special prompt explaining rendering so Gemini knows what it's looking at.
-    return (
-        f"{label_part}"
+    norm_label = normalize_label(label)
+    full_label_note = f" Full label (verbatim): '{label}'." if label else ""
+    norm_label_note = f" Normalized label: '{norm_label}'." if norm_label else ""
+    label_part = f"This event sample belongs to the class '{norm_label or label}'." if (label or norm_label) else ""
+    # Keep explanation brief; provide BOTH full and normalized labels for disambiguation; require starting with normalized label.
+    # Build using sanitized components and ASCII-only wording
+    safe_label_part = sanitize_for_prompt(label_part)
+    safe_full_note = sanitize_for_prompt(full_label_note)
+    safe_norm_note = sanitize_for_prompt(norm_label_note)
+    preface = (safe_label_part + " " + safe_full_note + " " + safe_norm_note).strip()
+    guidance = (
         "You are given a sequence of event frames rendered from a neuromorphic event stream. "
-        "Frames are constructed by partitioning the timeline into equal temporal bins and aggregating per-pixel event counts. "
-        "Colorization follows the EventBind mapping: positive events are mapped to cyan (green+blue channels), "
-        "negative events to yellow (red+green channels); brighter colors indicate higher event density. "
         f"There are {num_frames} frames in temporal order. "
-        "Describe the persistent scene/content succinctly, focusing on stable structure across frames. "
-        "Start directly (no 'This image shows...'). Use one short, precise sentence."
+        "Begin your sentence with the normalized class label without punctuation. "
+        "Only describe the characteristics of the labeled object or action. "
+        "Only include attributes that are directly observable in the example; do not infer or guess. "
+        "Do not add any information that is not seen or heard in the example. "
+        "If the label has multiple parts separated by commas, only include the first part in the description. "
+        "For objects describe identity, shape, color or pattern, distinctive parts, pose. "
+        "For actions describe the action, the subject, and salient manner. "
+        "Exclude unrelated details like background, lighting, composition, counts, other objects, borders, on screen text, watermarks, timestamps, or UI. "
+        "Do not use the phrase is a. "
+        "Write one concise sentence with at most 16 words. Your output must contain exactly one sentence. "
+        "Use the full label and the visual example together to resolve ambiguity."
     )
+    prompt = ((preface + " ") if preface else "") + guidance
+    return sanitize_for_prompt(prompt)
+
+def remove_isa_phrases(text: str) -> str:
+    """Remove the phrase 'is a' (and 'is an') case-insensitively to satisfy style constraints.
+    Keeps grammar by collapsing to ' is '.
+    """
+    if not text:
+        return text
+    text = re.sub(r"(?i)\bis a\b", " is ", text)
+    text = re.sub(r"(?i)\bis an\b", " is ", text)
+    # Collapse any doubled spaces that may result
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def enforce_single_sentence(text: str) -> str:
+    """Ensure the output contains exactly one sentence.
+    - Keep content up to and including the first sentence terminator (., !, or ?)
+    - If none found, keep text as-is and append a period
+    - Collapse spaces and ensure a single trailing period
+    """
+    if not text:
+        return text
+    # Find first terminator
+    m = re.search(r"[.!?]", text)
+    if m:
+        text = text[: m.start() + 1]
+    # Normalize spaces
+    text = re.sub(r"\s+", " ", text).strip()
+    # Ensure ends with a single period
+    text = re.sub(r"[.!?]+$", ".", text)
+    if not text.endswith("."):
+        text += "."
+    return text
 
 def gemini_describe(client: genai.Client,
                     files: Union[Path, List[Path]],
@@ -279,8 +408,7 @@ def gemini_describe(client: genai.Client,
             parts.append(types.Part.from_bytes(data=bs, mime_type="image/png"))
 
         prompt = _build_event_prompt(label, num_frames=len(files))
-        contents = parts + [prompt]
-
+        contents = parts + [sanitize_for_prompt(prompt)]
     else:
         file_abs_path: Path = files
         file_size = file_abs_path.stat().st_size
@@ -295,19 +423,35 @@ def gemini_describe(client: genai.Client,
 
         # Use generic (non-event) prompt wording
         if label:
+            norm_label = normalize_label(label)
+            safe_modality = sanitize_for_prompt(modality)
+            safe_label = sanitize_for_prompt(label)
+            safe_norm_label = sanitize_for_prompt(norm_label)
             prompt = (
-                f"This {modality} belongs to the class '{label}'. "
-                f"Provide a concise, factual description of the main content in this {modality}. "
-                "Start directly without phrases like 'This image shows' or 'This video contains'. "
-                "Use one short, precise sentence focused only on relevant details."
+                f"This {safe_modality} belongs to the class {safe_norm_label or safe_label}. "
+                f"Full label verbatim: {safe_label}. "
+                + (f"Normalized label: {safe_norm_label}. " if safe_norm_label else "")
+                + "Begin your sentence with the normalized class label without punctuation. "
+                + "Only describe the characteristics of the labeled object or action. "
+                + "Only include attributes that are directly observable in the example; do not infer or guess. "
+                + "Do not add any information that is not seen or heard in the example. "
+                + "If the label has multiple parts separated by commas, only include the first part in the description. "
+                + "For objects describe identity, shape, color or pattern, distinctive parts, pose. "
+                + "For actions describe the action, the subject, and salient manner. "
+                + "Exclude unrelated details like background, lighting, composition, counts, other objects, borders, on screen text, watermarks, timestamps, or UI. "
+                + "Do not use the phrase is a. "
+                + "Write one concise sentence with at most 16 words. Your output must contain exactly one sentence. "
+                + "Use the full label and the example together to resolve ambiguity."
             )
         else:
+            safe_modality = sanitize_for_prompt(modality)
             prompt = (
-                f"Provide a concise, factual description of the main content in this {modality}. "
-                "Start directly without phrases like 'This image shows' or 'This video contains'. "
-                "Use one short, precise sentence focused only on relevant details."
+                f"Write one concise sentence with at most 16 words describing the main content in this {safe_modality}. "
+                "Your output must contain exactly one sentence. Start directly and avoid filler. Do not use the phrase is a. "
+                "Only include details that are directly observable in the example; do not infer or guess. "
+                "Do not add any information that is not seen or heard in the example."
             )
-        contents.append(prompt)
+        contents.append(sanitize_for_prompt(prompt))
 
     # Call model
     t0_predict = time.perf_counter()
@@ -320,17 +464,38 @@ def gemini_describe(client: genai.Client,
     )
     predict_latency = time.perf_counter() - t0_predict
     description = (getattr(resp, "text", None) or "").strip()
+    # Enforce style: remove 'is a'/'is an' phrases
+    description = remove_isa_phrases(description)
 
-    if resp.prompt_feedback is not None and resp.prompt_feedback.block_reason is not None:
-        logger.info(f"❗️ Gemini blocked the request: {resp.prompt_feedback.block_reason}")
-        template = MODALITY_TEMPLATES.get(Modality(modality), "a {}")
-        description = template.format(label)
+    pf = getattr(resp, "prompt_feedback", None)
+    block_reason = getattr(pf, "block_reason", None) if pf is not None else None
+    if block_reason is not None:
+        logger.info(f"❗️ Gemini blocked the request: {block_reason}")
+        template = _safe_template_for_modality(modality)
+        norm_label = normalize_label(label)
+        if norm_label:
+            description = f"{norm_label} {template.format(norm_label)}".strip()
+        else:
+            description = template.format(label).strip()
     elif not description:
         logger.info("❗️ Gemini returned an empty description, using fallback template.")
-        template = MODALITY_TEMPLATES.get(Modality(modality), "a {}")
-        description = template.format(label)
+        template = _safe_template_for_modality(modality)
+        norm_label = normalize_label(label)
+        if norm_label:
+            description = f"{norm_label} {template.format(norm_label)}".strip()
+        else:
+            description = template.format(label).strip()
+
+    # Enforce style again after fallbacks
+    description = remove_isa_phrases(description)
 
     # Logging
+    # Enforce inclusion and prefix of normalized label when provided
+    if label:
+        description = ensure_label_in_description(description, normalize_label(label))
+    # Enforce exactly one sentence at the end
+    description = enforce_single_sentence(description)
+
     if is_multi:
         logger.info(f"OK | {len(files)} event frames | label='{label}' | predict={predict_latency:.3f}s")
     else:
@@ -366,16 +531,19 @@ def describe_one(client: genai.Client, entry: Tuple[int, dict], dataset_root: Pa
 
     # Infinite exponential backoff for retries
     attempt = 0
-    while True:
-        try:
-            desc_txt, usage = gemini_describe(client, files_for_model, modality, model, logger, label)
-            logger.info(f"[✓] Processed {payload['data']} | label='{label}' | description='{desc_txt}'")
-            return idx, payload["data"], label, desc_txt, usage
-        except Exception as e:
-            attempt += 1
-            backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))  # Slower increase
-            logger.info(f"Error processing {payload['data']}: {e}. Retrying in {backoff_time:.2f}s...")
-            time.sleep(backoff_time)
+    try:
+        while True:
+            try:
+                desc_txt, usage = gemini_describe(client, files_for_model, modality, model, logger, label)
+                logger.info(f"[✓] Processed {payload['data']} | label='{label}' | description='{desc_txt}'")
+                return idx, payload["data"], label, desc_txt, usage
+            except Exception as e:
+                attempt += 1
+                backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))  # Slower increase
+                logger.info(f"Error processing {payload['data']}: {e}. Retrying in {backoff_time:.2f}s...")
+                time.sleep(backoff_time)
+    finally:
+        _cleanup_temp_paths(files_for_model)
 
 def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event_frames, model, deduplicated_align_data, output_base, shard_index):
     log_path = output_base / f"{dataset_dir_name}_shard_{shard_index}.log"
@@ -396,18 +564,21 @@ def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event
 
             # Infinite exponential backoff for retries
             attempt = 0
-            while True:
-                try:
-                    desc_txt, _ = gemini_describe(client, files_for_model, modality, model, logger, label)
-                    entry["description"] = desc_txt
-                    deduplicated_align_data[entry["data"]] = entry  # Replace the original entry
-                    logger.info(f"Processed {entry['data']} | label='{label}' | description='{desc_txt}' | ")
-                    break
-                except Exception as e:
-                    attempt += 1
-                    backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))
-                    logger.info(f"Error processing {entry['data']}: {e}. Retrying in {backoff_time:.2f}s...")
-                    time.sleep(backoff_time)
+            try:
+                while True:
+                    try:
+                        desc_txt, _ = gemini_describe(client, files_for_model, modality, model, logger, label)
+                        entry["description"] = desc_txt
+                        deduplicated_align_data[entry["data"]] = entry  # Replace the original entry
+                        logger.info(f"Processed {entry['data']} | label='{label}' | description='{desc_txt}' | ")
+                        break
+                    except Exception as e:
+                        attempt += 1
+                        backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))
+                        logger.info(f"Error processing {entry['data']}: {e}. Retrying in {backoff_time:.2f}s...")
+                        time.sleep(backoff_time)
+            finally:
+                _cleanup_temp_paths(files_for_model)
             pbar.update(1)
 
 # ==========================================================
@@ -465,7 +636,7 @@ def merge_shards(json_path: Path, modality: str, num_shards: int, use_json_root:
 
     for i in range(num_shards):
         shard_dir = output_base / f"{stem}_shard{i}-{num_shards}"
-        json_file = shard_dir / "align.json"
+        json_file = shard_dir / "aligned.json"
         meta_file = shard_dir / "align_meta.json"
         if json_file.exists() and meta_file.exists():
             logger.info(f"[INFO] Loading shard {i} outputs from {json_file} and {meta_file}")
@@ -514,25 +685,28 @@ def main():
     parser.add_argument("--dataset_root", default="/data/datasets")
     parser.add_argument("--json_root", default="./datasets")
     parser.add_argument("--model", default="gemini-2.5-flash-lite")
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=5, help="Limit number of entries per dataset (for testing).")
     parser.add_argument("--skip_modalities", nargs="*", default=[
-        "image",
-        "audio",
+        # "image",
+        # "audio",
         # "thermal",
-        "video",
+        # "video",
         # "event"
         ])
     parser.add_argument("--per_process_threads", type=int, default=1)
     parser.add_argument("--max_cores", type=int, default=None)
     parser.add_argument("--event_frames", type=int, default=8, help="Number of temporal bins for event rendering.")
-    parser.add_argument("--scan_and_fix", action="store_true", default=True, help="Scan for missing entries and descriptions in train_data.json and train_data_align.json, and fix them.")
-    parser.add_argument("--use_json_root", action="store_true", default=False, help="Flag to toggle output location between json_root and output_base.")
+    parser.add_argument("--use_json_root", action="store_true", default=True, help="Flag to toggle output location between json_root and output_base.")
+    parser.add_argument("--scan_and_fix", action="store_true", default=False, help="Scan for missing entries and descriptions in train_data.json and train_data_align.json, and fix them.")
     parser.add_argument("--copy_to_json_root", action="store_true", default=False, help="Copy JSON files from output directories into --json_root with the correct names.")
     args = parser.parse_args()
 
     run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     output_base = Path("output/knowledge_base")
     output_base.mkdir(parents=True, exist_ok=True)
+
+    # Initialize a global run logger early so we can log errors/info
+    logger = setup_logger(output_base / "run.log")
 
     if args.copy_to_json_root:
         copy_json_to_root(output_base, Path(args.json_root))
@@ -554,8 +728,8 @@ def main():
     mapping = [(modality, dataset) for dataset, modality in MODALITY_MAPPING.items()]
     mapping = [m for m in mapping if m[0] not in args.skip_modalities]
 
-    if not os.getenv("GEMINI_API_KEY"):
-        logger.info("[ERR] GEMINI_API_KEY is not set.")
+    if not os.getenv("GOOGLE_API_KEY"):
+        logger.info("[ERR] GOOGLE_API_KEY is not set.")
         return
 
     total_cores = os.cpu_count() or 1
@@ -602,13 +776,24 @@ def main():
 
 def copy_json_to_root(output_base: Path, json_root: Path):
     json_root.mkdir(parents=True, exist_ok=True)
-    for json_file in output_base.glob("*/**/*_align*.json"):  # Limit to first child level
-        # Extract dataset name from the file name
-        dataset_name = json_file.stem.split("_")[0]  # Assuming the dataset name is the first part of the file name
-        target_path = json_root / dataset_name / json_file.name
+    # Copy per-shard outputs to consistent names under json_root
+    # aligned.json -> train_data_align.json
+    # align_meta.json -> train_data_align_meta.json
+    for aligned_file in output_base.rglob("aligned.json"):
+        dataset_segment = aligned_file.parent.name  # e.g., "MSR-VTT_video_shard0-8"
+        dataset_name = dataset_segment.split("_")[0]
+        target_path = json_root / dataset_name / "train_data_align.json"
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(json_file, target_path)  # Copy instead of renaming
-        print(f"[✓] Copied {json_file} to {target_path}")
+        shutil.copy(aligned_file, target_path)
+        print(f"[✓] Copied {aligned_file} to {target_path}")
+
+    for meta_file in output_base.rglob("align_meta.json"):
+        dataset_segment = meta_file.parent.name
+        dataset_name = dataset_segment.split("_")[0]
+        target_path = json_root / dataset_name / "train_data_align_meta.json"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(meta_file, target_path)
+        print(f"[✓] Copied {meta_file} to {target_path}")
 
 def scan_and_fix_entries(json_root: Path, dataset_root: Path, logger: logging.Logger, model: str, event_frames: int, limit: Optional[int] = None, output_base: Optional[Path] = None):
     total_cores = os.cpu_count() or 1

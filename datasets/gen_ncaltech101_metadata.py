@@ -47,6 +47,18 @@ def generate_bin_json_both_splits(dataset_root, dataset_name):
     else:
         print("ℹ️  No val entries found; val_data.json not written.")
 
+    # Classes
+    all_entries = (train_entries or []) + (val_entries or [])
+    if all_entries:
+        class_names = sorted({e["label"] for e in all_entries})
+        class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+        classes_path = os.path.join(output_dir, "classes.json")
+        with open(classes_path, "w") as f:
+            json.dump(class_to_idx, f, indent=2)
+        print(f"📄 Saved classes.json with {len(class_to_idx)} classes → {classes_path}")
+    else:
+        print("ℹ️  No entries found; classes.json not written.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate .bin metadata JSON for N-Caltech-101 (both train and val).")
