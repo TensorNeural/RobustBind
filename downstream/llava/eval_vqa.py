@@ -110,7 +110,7 @@ def main():
     parser.add_argument("--projector_weight", required=True)
     parser.add_argument("--image_root", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--max_samples", type=int, default=200)
+    parser.add_argument("--max_samples", type=int, default=2000)
     parser.add_argument("--batch_size", type=int, default=200)
     parser.add_argument("--use_unibind", action='store_true', default=True, help="Use Unibind for encoder")
     parser.add_argument(

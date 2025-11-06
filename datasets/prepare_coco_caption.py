@@ -50,6 +50,12 @@ def download(url, dest_path):
                 pbar.update(len(chunk))
 
 def extract(zip_path, target_dir, rename_dir=None):
+    # If the renamed target already exists, skip extraction
+    if rename_dir:
+        new = os.path.join(target_dir, rename_dir)
+        if os.path.isdir(new) and os.listdir(new):
+            print(f"[✓] Found existing '{rename_dir}' at {new}. Skipping extract.")
+            return
     print(f"[⇪] Extracting {os.path.basename(zip_path)}")
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(target_dir)
@@ -60,6 +66,20 @@ def extract(zip_path, target_dir, rename_dir=None):
         if os.path.exists(old) and not os.path.exists(new):
             os.rename(old, new)
     print(f"[✓] Extracted to {target_dir}")
+
+
+def _dir_has_files(d):
+    try:
+        return any(os.path.isfile(os.path.join(d, f)) for f in os.listdir(d))
+    except Exception:
+        return False
+
+
+def is_coco_prepared(coco_root):
+    train = os.path.join(coco_root, "train")
+    val = os.path.join(coco_root, "val")
+    ann = os.path.join(coco_root, "annotations")
+    return os.path.isdir(train) and os.path.isdir(val) and os.path.isdir(ann)
 
 def prepare_coco(coco_root):
     os.makedirs(coco_root, exist_ok=True)
@@ -72,7 +92,7 @@ def prepare_coco(coco_root):
         elif "val2017" in key:
             extract(path, coco_root, rename_dir="val")
         else:
-            extract(path, os.path.join(coco_root, "annotations"), rename_dir="annotations")
+            extract(path, coco_root, rename_dir="annotations")
 
 def main():
     parser = argparse.ArgumentParser(description="Download and extract COCO Captioning 2017")
@@ -80,6 +100,11 @@ def main():
     args = parser.parse_args()
 
     print(f"✅ Preparing COCO Caption in: {args.output_dir}")
+    # Early exit if already prepared
+    if os.path.isdir(args.output_dir) and is_coco_prepared(args.output_dir):
+        print("⚠️ Output directory already prepared. Skipping prepare.")
+        return
+
     if not verify_coco_urls():
         print("❌ Some COCO URLs are unreachable. Aborting.")
         return

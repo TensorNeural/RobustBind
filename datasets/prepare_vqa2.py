@@ -55,6 +55,15 @@ def download(url, dest_path):
                 pbar.update(len(chunk))
 
 def extract(zip_path, target_dir, rename_dir=None):
+    # If the renamed target already exists and is non-empty, skip extraction
+    if rename_dir:
+        renamed = os.path.join(target_dir, rename_dir)
+        try:
+            if os.path.isdir(renamed) and any(os.scandir(renamed)):
+                print(f"[✓] Found existing '{rename_dir}' at {renamed}. Skipping extract.")
+                return
+        except Exception:
+            pass
     print(f"[⇪] Extracting {os.path.basename(zip_path)}")
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(target_dir)
@@ -65,6 +74,34 @@ def extract(zip_path, target_dir, rename_dir=None):
         if os.path.exists(old) and not os.path.exists(new):
             os.rename(old, new)
     print(f"[✓] Extracted to {target_dir}")
+
+
+def _dir_has_files(path):
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.is_file():
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _find_file_recursive(root, filename):
+    for dirpath, _, filenames in os.walk(root):
+        if filename in filenames:
+            return os.path.join(dirpath, filename)
+    return None
+
+
+def is_vqa_prepared(vqa_root):
+    # Require image dirs present and non-empty
+    required_dirs = ["train", "val", "test"]
+    for d in required_dirs:
+        p = os.path.join(vqa_root, d)
+        if not os.path.isdir(p):
+            return False
+    return True
 
 def prepare_vqa2(vqa_root):
     os.makedirs(vqa_root, exist_ok=True)
@@ -87,6 +124,11 @@ def main():
     args = parser.parse_args()
 
     print(f"✅ Preparing VQA2 in: {args.output_dir}")
+    # Early exit if already prepared
+    if os.path.isdir(args.output_dir) and is_vqa_prepared(args.output_dir):
+        print("⚠️ Output directory already prepared. Skipping prepare.")
+        return
+
     if not verify_vqa_urls():
         print("❌ Some VQA URLs are unreachable. Aborting.")
         return

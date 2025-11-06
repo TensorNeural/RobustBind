@@ -15,6 +15,7 @@ import multiprocessing as mp
 from PIL import Image
 import matplotlib.pyplot as plt
 from typing import Tuple, Optional
+import random
 
 # ---------------------------
 # Reader (.bin only)
@@ -234,6 +235,100 @@ def render_all(split_dir, static_root, size=224, T=8, num_workers=12, skip_exist
 # CLI
 # ---------------------------
 
+def _is_class_dir(path: str) -> bool:
+    try:
+        if not os.path.isdir(path):
+            return False
+        for fn in os.listdir(path):
+            if fn.lower().endswith('.bin'):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _discover_classes_root(dataset_root: str) -> Optional[str]:
+    # Prefer dataset_root directly if it contains class dirs
+    candidates = [d for d in os.listdir(dataset_root)
+                  if os.path.isdir(os.path.join(dataset_root, d))
+                  and d not in ("train", "val", "static")]
+    class_like = [os.path.join(dataset_root, d) for d in candidates if _is_class_dir(os.path.join(dataset_root, d))]
+    if class_like:
+        return dataset_root
+    # Else, if there is exactly one subdir, try inside it
+    if len(candidates) == 1:
+        inner = os.path.join(dataset_root, candidates[0])
+        inner_cands = [d for d in os.listdir(inner) if os.path.isdir(os.path.join(inner, d))]
+        inner_class_like = [os.path.join(inner, d) for d in inner_cands if _is_class_dir(os.path.join(inner, d))]
+        if inner_class_like:
+            return inner
+    return None
+
+
+def ensure_train_val_split(dataset_root: str, train_ratio: float = 0.8, seed: int = 42) -> None:
+    """Create train/ and val/ splits if missing by moving .bin files from class dirs.
+    - Detect class directories either directly under dataset_root or one level deeper.
+    - Uses per-class 80/20 random split (seeded).
+    - Idempotent: if train/ and val/ already exist, does nothing.
+    """
+    train_dir = os.path.join(dataset_root, 'train')
+    val_dir = os.path.join(dataset_root, 'val')
+    if os.path.isdir(train_dir) and os.path.isdir(val_dir):
+        return
+
+    classes_root = _discover_classes_root(dataset_root)
+    if not classes_root:
+        print(f"[N-Caltech-101] Could not find class directories under {dataset_root}; skipping split.")
+        return
+
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
+
+    rng = random.Random(seed)
+    moved_any = False
+    for cls in sorted(os.listdir(classes_root)):
+        cls_path = os.path.join(classes_root, cls)
+        if not _is_class_dir(cls_path):
+            continue
+        files = [f for f in os.listdir(cls_path) if f.lower().endswith('.bin')]
+        if not files:
+            continue
+        rng.shuffle(files)
+        split_idx = int(len(files) * train_ratio)
+        train_files = files[:split_idx]
+        val_files = files[split_idx:]
+
+        out_train = os.path.join(train_dir, cls)
+        out_val = os.path.join(val_dir, cls)
+        os.makedirs(out_train, exist_ok=True)
+        os.makedirs(out_val, exist_ok=True)
+
+        # Move files into split folders
+        for fn in train_files:
+            src = os.path.join(cls_path, fn)
+            dst = os.path.join(out_train, fn)
+            if not os.path.exists(dst):
+                shutil.move(src, dst)
+                moved_any = True
+        for fn in val_files:
+            src = os.path.join(cls_path, fn)
+            dst = os.path.join(out_val, fn)
+            if not os.path.exists(dst):
+                shutil.move(src, dst)
+                moved_any = True
+
+        # Clean up empty class dir
+        try:
+            if not any(os.scandir(cls_path)):
+                os.rmdir(cls_path)
+        except Exception:
+            pass
+
+    if moved_any:
+        print(f"[N-Caltech-101] Created train/val split at {dataset_root} with ratio {train_ratio:.2f}.")
+    else:
+        print(f"[N-Caltech-101] No .bin files moved; train/val may already exist or dataset is empty.")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_root", default="/data/datasets/N-Caltech-101")
@@ -241,6 +336,8 @@ def main():
     parser.add_argument("--frame_size", type=int, default=224)  # used by eventbind only
     parser.add_argument("--num_frames", type=int, default=2)
     parser.add_argument("--skip_existing", action="store_true", default=True)
+    parser.add_argument("--train_ratio", type=float, default=0.8)
+    parser.add_argument("--split_seed", type=int, default=42)
 
     # Method
     parser.add_argument("--method", choices=["eventbind", "scatter"], default="scatter")
@@ -253,6 +350,9 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.7)
 
     args = parser.parse_args()
+
+    # Create train/val split if missing
+    ensure_train_val_split(args.dataset_root, train_ratio=args.train_ratio, seed=args.split_seed)
 
     # Train
     static_train = os.path.join(args.dataset_root, "static", "train")

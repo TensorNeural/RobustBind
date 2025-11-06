@@ -9,11 +9,30 @@ def parse_split_file(file_path):
     with open(file_path, "r") as f:
         return [line.strip().split()[0] for line in f if line.strip()]
 
-def organize_ucf101(dataset_root):
-    video_root = os.path.join(dataset_root, "UCF-101")
+def resolve_split_files(split_dir: str, split_id: int):
+    """Return paths to trainlistXX.txt and testlistXX.txt for the requested split id (1-3).
+    Falls back to split 1 if requested files are missing.
+    """
+    sid = f"{split_id:02d}"
+    train_split = os.path.join(split_dir, f"trainlist{sid}.txt")
+    test_split = os.path.join(split_dir, f"testlist{sid}.txt")
+    if not (os.path.isfile(train_split) and os.path.isfile(test_split)):
+        # Fallback to split 1
+        fallback_train = os.path.join(split_dir, "trainlist01.txt")
+        fallback_test = os.path.join(split_dir, "testlist01.txt")
+        if os.path.isfile(fallback_train) and os.path.isfile(fallback_test):
+            print(f"[UCF101] Requested split {split_id} not found. Falling back to split 1.")
+            return fallback_train, fallback_test
+        raise FileNotFoundError(f"UCF101 split files not found for split {split_id} in {split_dir}")
+    return train_split, test_split
+
+
+def organize_ucf101(dataset_root, split_id: int = 1):
+    video_root = os.path.join(dataset_root)
     split_dir = os.path.join(dataset_root, "ucfTrainTestlist")
-    train_split = os.path.join(split_dir, "trainlist01.txt")
-    test_split = os.path.join(split_dir, "testlist01.txt")
+    train_split, test_split = resolve_split_files(split_dir, split_id)
+    print(f"[UCF101] Using train split: {train_split}")
+    print(f"[UCF101] Using test split: {test_split}")
 
     train_videos = parse_split_file(train_split)
     test_videos = parse_split_file(test_split)
@@ -40,10 +59,11 @@ def organize_ucf101(dataset_root):
     print("UCF101 organization complete.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Organize UCF101 into train/test using trainlist01.txt and testlist01.txt from ucfTrainTestlist/")
+    parser = argparse.ArgumentParser(description="Organize UCF101 into train/test using trainlistXX.txt and testlistXX.txt from ucfTrainTestlist/ (splits 1-3)")
     parser.add_argument("DATASET_ROOT", help="Path to the root directory (contains UCF-101/ and ucfTrainTestlist/)")
+    parser.add_argument("--split-id", type=int, choices=[1, 2, 3], default=1, help="Which split list to use (default: 1)")
     args = parser.parse_args()
-    organize_ucf101(args.DATASET_ROOT)
+    organize_ucf101(args.DATASET_ROOT, split_id=args.split_id)
 
 if __name__ == "__main__":
     main()

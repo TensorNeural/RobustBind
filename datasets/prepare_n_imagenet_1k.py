@@ -31,25 +31,54 @@ def extract_tar_safe(tar_path):
         print(f"❌ Failed to extract {tar_path}: {e}")
         return False
 
-def extract_all_tar_gz_in_dir_parallel(directory, max_workers=12):
-    tar_paths = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(".tar.gz")]
+def extract_all_tar_gz_recursive(root, max_workers=12):
+    tar_paths = []
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            if f.endswith('.tar.gz'):
+                tar_paths.append(os.path.join(dirpath, f))
     if not tar_paths:
+        print("ℹ️ No .tar.gz files found to extract.")
         return
-    print(f"🗜️ Extracting {len(tar_paths)} .tar.gz files in {directory} ...")
+    print(f"🗜️ Extracting {len(tar_paths)} .tar.gz files under {root} ...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(tqdm(executor.map(extract_tar_safe, tar_paths),
-                  total=len(tar_paths), desc="Extracting", unit="file"))
+        list(tqdm(executor.map(extract_tar_safe, tar_paths), total=len(tar_paths), desc="Extracting", unit="file"))
 
-def move_class_folders_to_train(part_path, train_dir):
+def move_class_dir_to_train(class_dir, train_dir):
     os.makedirs(train_dir, exist_ok=True)
-    for class_name in os.listdir(part_path):
-        src_class = os.path.join(part_path, class_name)
-        if not os.path.isdir(src_class) or not class_name.startswith("n"):
-            continue
-        dst_class = os.path.join(train_dir, class_name)
-        os.makedirs(dst_class, exist_ok=True)
-        for f in os.listdir(src_class):
-            shutil.move(os.path.join(src_class, f), os.path.join(dst_class, f))
+    class_name = os.path.basename(class_dir)
+    if not class_name.startswith('n'):
+        return
+    dst_class = os.path.join(train_dir, class_name)
+    os.makedirs(dst_class, exist_ok=True)
+    for f in os.listdir(class_dir):
+        src_f = os.path.join(class_dir, f)
+        if os.path.isfile(src_f):
+            dst_f = os.path.join(dst_class, f)
+            if not os.path.exists(dst_f):
+                shutil.move(src_f, dst_f)
+
+
+def gather_class_dirs_with_npz(root):
+    class_dirs = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = os.path.basename(dirpath)
+        if base.startswith('n') and any(fn.endswith('.npz') for fn in filenames):
+            class_dirs.append(dirpath)
+    return class_dirs
+
+
+def prepare_training_split(root):
+    train_dir = os.path.join(root, 'train')
+    # 1) Extract all tar.gz recursively (produced by training parts)
+    extract_all_tar_gz_recursive(root)
+    # 2) Move class dirs discovered anywhere under root into train/<class>
+    class_dirs = gather_class_dirs_with_npz(root)
+    moved = 0
+    for cdir in tqdm(class_dirs, desc="Organizing train", unit="cls"):
+        move_class_dir_to_train(cdir, train_dir)
+        moved += 1
+    print(f"✅ Organized {moved} class folders into {train_dir}")
 
 # =========================
 # Scatter rendering (original Script 1)
@@ -215,6 +244,39 @@ def convert_npz_to_outputs(data_split_dir, vis_dir, val_dir,
 # CLI
 # =========================
 
+def _looks_like_class_dir(path):
+    try:
+        entries = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+        # Heuristic: many synset-like dirs e.g., n01440764
+        n_like = sum(1 for d in entries if d.startswith("n") and len(d) >= 5)
+        return n_like >= 10
+    except Exception:
+        return False
+
+
+def _find_val_dir(root):
+    # Prefer root/val
+    cand = os.path.join(root, "val")
+    if os.path.isdir(cand) and _looks_like_class_dir(cand):
+        return cand
+    # Sometimes extracted as validation/
+    cand = os.path.join(root, "validation")
+    if os.path.isdir(cand) and _looks_like_class_dir(cand):
+        return cand
+    # If root itself contains class folders
+    if os.path.isdir(root) and _looks_like_class_dir(root):
+        return root
+    # Search one level deep for a folder that looks like val
+    try:
+        for d in os.listdir(root):
+            p = os.path.join(root, d)
+            if os.path.isdir(p) and _looks_like_class_dir(p):
+                return p
+    except Exception:
+        pass
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare N-ImageNet-1K static/vis (scatter) and static/val (EventBind)")
     parser.add_argument("--dataset_root", default="/data/datasets/N-ImageNet-1K", type=str)
@@ -228,11 +290,15 @@ def main():
     args = parser.parse_args()
 
     root = os.path.abspath(args.dataset_root)
-    val_dir_in = os.path.join(root, "val")
+    val_dir_in = _find_val_dir(root)
     static_vis = os.path.join(root, "static", "vis")
     static_val = os.path.join(root, "static", "val")
 
-    if os.path.isdir(val_dir_in):
+    # Prepare training (if training parts extracted)
+    prepare_training_split(root)
+
+    if val_dir_in and os.path.isdir(val_dir_in):
+        print(f"✅ Using validation directory: {val_dir_in}")
         convert_npz_to_outputs(
             val_dir_in,
             vis_dir=static_vis,
@@ -247,7 +313,7 @@ def main():
             gamma=args.gamma
         )
     else:
-        print(f"⚠️ Split missing: {val_dir_in}")
+        print(f"⚠️ Could not locate a 'val' directory under {root}. Expected structure is <root>/val/<class>/*.npz or similar.")
 
     print("🎉 Done: static/vis (scatter) and static/val (EventBind) created!")
 

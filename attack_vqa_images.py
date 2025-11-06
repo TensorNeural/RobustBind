@@ -183,7 +183,7 @@ def main(args):
             # orig_pixels = image_tensor.detach().clone()
             # unnormalize_inplace(orig_pixels, mean, std)
 
-            adv_input = two_stage_attack_l2(logger, model, image_tensor, emb_orig, stage1, stage2, mean, std, cosine_threshold=0)
+            adv_input = two_stage_attack_l2(logger, model, image_tensor, emb_orig, stage1, stage2, mean, std, cosine_threshold=0.2)
 
             for j, sample in enumerate(batch):
                 filename = os.path.basename(sample["image"])
@@ -220,8 +220,8 @@ if __name__ == "__main__":
     parser.add_argument("--image_root", type=str, required=True)
     parser.add_argument("--pretrain_weights", type=str, required=True)
     parser.add_argument("--steps", type=int, default=100)
-    parser.add_argument("--max_samples", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--max_samples", type=int, default=2000)
+    parser.add_argument("--batch_size", type=int, default=50)
     # parser.add_argument("--epsilons", type=int, nargs="+", default=[2, 4])
     # parser.add_argument("--model_tags", type=str, nargs="+", default=["unibind", "robustbind2", "robustbind4"])
     parser.add_argument("--epsilons", type=int, nargs="+", default=[2, 4])

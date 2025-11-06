@@ -37,3 +37,7 @@ torchvision
 decord
 tqdm
 torchmetrics
+requests
+rarfile
+Pillow
+pandas
