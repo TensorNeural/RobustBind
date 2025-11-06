@@ -18,20 +18,8 @@ from shared_types import Modality
 from model import UniBindClassifier, ForwardMode, MODALITY_TEMPLATES
 from data_util import get_transform_fn, load_and_transform_text, load_label_mapping, get_normalization_tensors
 from attack import AttackModel, APGDAttack, two_stage_attack
+from openTSNE import TSNE
 
-
-# ========= TSNE backends =========
-try:
-    from cuml.manifold import TSNE as CuMLTSNE  # type: ignore
-    import cupy as cp  # type: ignore
-    _TSNE_BACKEND = "cuml"
-except Exception:
-    try:
-        from openTSNE import TSNE as OpenTSNE  # type: ignore
-        _TSNE_BACKEND = "openTSNE"
-    except Exception:
-        from sklearn.manifold import TSNE as SkTSNE  # type: ignore
-        _TSNE_BACKEND = "sklearn"
 # Default LoRA checkpoints for robust variants (if user doesn't specify lora_weights)
 LORA_WEIGHTS_MAP: Dict[str, Dict[str, str]] = {
     "image": {
@@ -53,7 +41,7 @@ def run_tsne(
     learning_rate: int = 400,
     n_iter: int = 2000,
     early_exaggeration: float = 2.0,
-    init: str = "random",
+    initialization: str = "random",
     pca_dims: Optional[int] = None,
 ) -> np.ndarray:
     if X.shape[0] <= 2:
@@ -62,57 +50,105 @@ def run_tsne(
             np.linspace(0.25, 0.75, X.shape[0]).reshape(-1, 1),
             np.linspace(0.25, 0.75, X.shape[0]).reshape(-1, 1),
         ])
-
-    # Optional PCA pre-reduction to denoise high-D embeddings
-    if pca_dims is not None and pca_dims > 0 and pca_dims < X.shape[1]:
-        try:
-            if _TSNE_BACKEND == "cuml":
-                from cuml.decomposition import PCA as CuMLPCA  # type: ignore
-                X = CuMLPCA(n_components=int(pca_dims), random_state=random_state).fit_transform(cp.asarray(X))
-                X = cp.asnumpy(X)
-            else:
-                from sklearn.decomposition import PCA as SkPCA  # type: ignore
-                X = SkPCA(n_components=int(pca_dims), random_state=random_state).fit_transform(X)
-        except Exception:
-            pass
-
-    if _TSNE_BACKEND == "cuml":
-        coords = CuMLTSNE(
-            n_components=2,
-            perplexity=perplexity,
-            learning_rate=learning_rate,
-            n_iter=n_iter,
-            random_state=random_state,
-            early_exaggeration=early_exaggeration,
-            init=init,
-        ).fit_transform(cp.asarray(X))
-        coords = cp.asnumpy(coords)
-    elif _TSNE_BACKEND == "openTSNE":
-        tsne = OpenTSNE(
-            n_components=2,
-            perplexity=perplexity,
-            learning_rate=learning_rate,
-            n_iter=n_iter,
-            early_exaggeration=early_exaggeration,
-            init=init,
-            random_state=random_state,
-            n_jobs=-1,
-        )
-        coords = tsne.fit(X)
-    else:
-        tsne = SkTSNE(
-            n_components=2,
-            perplexity=perplexity,
-            learning_rate=max(200, learning_rate),
-            n_iter=n_iter,
-            init=init,
-            random_state=random_state,
-        )
-        coords = tsne.fit_transform(X)
+    
+    tsne = TSNE(
+        n_components=2,
+        perplexity=perplexity,
+        learning_rate=learning_rate,
+        n_iter=n_iter,
+        early_exaggeration=early_exaggeration,
+        initialization=initialization,
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    coords = tsne.fit(X)
 
     # Normalize to [0,1] for consistent plotting margins
     coords = (coords - coords.min(0)) / (coords.max(0) - coords.min(0) + 1e-9)
     return coords
+
+
+def _normalize_rows(X: np.ndarray, eps: float = 1e-9) -> np.ndarray:
+    """L2-normalize each row vector to unit length."""
+    n = np.linalg.norm(X, axis=1, keepdims=True)
+    return X / (n + eps)
+
+
+def _procrustes_align(source: np.ndarray, target: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+    """Solve similarity transform (scale s, rotation R, translation t) s*source*R + t ~= target.
+    source, target: (N, 2)
+    Returns: (s, R (2x2), t (1x2))
+    """
+    # Center
+    mu_s = source.mean(axis=0, keepdims=True)
+    mu_t = target.mean(axis=0, keepdims=True)
+    S0 = source - mu_s
+    T0 = target - mu_t
+    # Rotation via SVD
+    M = S0.T @ T0  # 2x2
+    U, _, Vt = np.linalg.svd(M)
+    R = U @ Vt
+    # Fix improper rotation
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
+    # Scale
+    var_S = (S0 ** 2).sum()
+    s = np.trace(R.T @ M) / (var_S + 1e-9)
+    # Translation
+    t = mu_t - s * mu_s @ R
+    return float(s), R, t
+
+
+def _fit_tsne_and_place_text(
+    X_samples: np.ndarray,
+    X_text: Optional[np.ndarray],
+    tsne_cfg: Dict[str, Any],
+    fallback_perplexity: int,
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Fit t-SNE on samples; place text points using transform if available, else Procrustes alignment.
+    Returns (coords_samples, coords_text_or_None).
+    """
+    if X_text is not None and X_text.ndim == 1:
+        X_text = X_text[None, :]
+
+    # OpenTSNE supports transform of new points
+    tsne = TSNE(
+        n_components=int(tsne_cfg.get("n_components", 2)),
+        perplexity=int(tsne_cfg.get("perplexity", fallback_perplexity)),
+        learning_rate=int(tsne_cfg.get("learning_rate", 50)),
+        n_iter=int(tsne_cfg.get("n_iter", 1000)),
+        early_exaggeration=float(tsne_cfg.get("early_exaggeration", 8.0)),
+        initialization="pca",
+        random_state=42,
+        n_jobs=-1,
+    )
+    # Optional PCA pre-reduction prior to OpenTSNE
+    X_fit = X_samples
+    pca_dims = int(tsne_cfg.get("pca_dims", 50))
+    if pca_dims and 0 < pca_dims < X_samples.shape[1]:
+        try:
+            from sklearn.decomposition import PCA as SkPCA  # type: ignore
+            pca = SkPCA(n_components=pca_dims, random_state=int(tsne_cfg.get("random_state", 42)))
+            X_fit = pca.fit_transform(X_samples)
+            X_text_p = pca.transform(X_text) if X_text is not None else None
+        except Exception:
+            X_text_p = X_text
+    else:
+        X_text_p = X_text
+    embedding = tsne.fit(X_fit)
+    coords_samples = np.asarray(embedding)
+    if X_text_p is not None:
+        coords_text = embedding.transform(X_text_p)
+    else:
+        coords_text = None
+    # Normalize to [0,1]
+    allc = coords_samples if coords_text is None else np.vstack([coords_samples, coords_text])
+    allc = (allc - allc.min(0)) / (allc.max(0) - allc.min(0) + 1e-9)
+    if coords_text is not None:
+        return allc[: len(coords_samples)], allc[len(coords_samples) :]
+    else:
+        return allc, None
 
 
 def slugify(s: str) -> str:
@@ -322,7 +358,10 @@ def encode_text_for_class(model: UniBindClassifier, modality: Modality, cls: str
     tokens = load_and_transform_text([prompt], device=device)
     with torch.no_grad():
         t = model.encode_text(tokens)
-        return t.detach().cpu().numpy()[0]
+        v = t.detach().cpu().numpy()[0]
+        # Ensure unit vector
+        n = np.linalg.norm(v) + 1e-9
+        return v / n
 
 
 def plot_tsne_per_class(
@@ -448,6 +487,7 @@ def process_task(
                         raise ValueError("attack_enabled=True requires attack_epsilon (e.g., 2/255 or 4/255)")
                     x = maybe_run_attack(model, modality, x, device, eps_float)
                 emb = model(x, ForwardMode.EMBEDDINGS).detach().cpu().numpy()
+                emb = _normalize_rows(emb)  # ensure unit vectors
                 all_embs.append(emb)
                 all_colors += [color] * emb.shape[0]
 
@@ -477,31 +517,15 @@ def process_task(
         if not all_embs:
             return
         X = np.vstack(all_embs)
-        # Fit once on samples + text for coherent layout
-        if text_points:
-            X_text = np.vstack([t[0][None, :] for t in text_points])
-            X_all = np.vstack([X, X_text])
-        else:
-            X_all = X
         tsne_cfg = task.tsne or {}
-        coords_all = run_tsne(
-            X_all,
-            perplexity=int(tsne_cfg.get("perplexity", perplexity)),
-            random_state=int(tsne_cfg.get("random_state", 42)),
-            learning_rate=int(tsne_cfg.get("learning_rate", 400)),
-            n_iter=int(tsne_cfg.get("n_iter", 2000)),
-            early_exaggeration=float(tsne_cfg.get("early_exaggeration", 12.0)),
-            init=str(tsne_cfg.get("init", "random")),
-            pca_dims=int(tsne_cfg.get("pca_dims", 50)),
-        )
-        coords = coords_all[: X.shape[0]]
+        X_text = np.vstack([t[0][None, :] for t in text_points]) if text_points else None
+        coords, coords_text = _fit_tsne_and_place_text(X, X_text, tsne_cfg, perplexity)
 
         plt.figure(figsize=(9, 7))
         plt.scatter(coords[:, 0], coords[:, 1], c=all_colors, s=36, alpha=0.65, linewidths=0)
 
         # Project text embeddings with the same TSNE fit? Simpler: append and re-run for alignment
-        if text_points:
-            coords_text = coords_all[-len(text_points):]
+        if text_points and coords_text is not None:
             for (pt, color, label), (cx, cy) in zip(text_points, coords_text):
                 plt.scatter([cx], [cy], c=[color], marker='*', s=140, edgecolors='k', linewidths=0.7, label=label)
 
@@ -563,6 +587,7 @@ def process_task(
             x = maybe_run_attack(model, modality, x, device, eps_float)
         # Encode
         sample_emb = model(x, ForwardMode.EMBEDDINGS).detach().cpu().numpy()
+        sample_emb = _normalize_rows(sample_emb)  # ensure unit vectors
         if sample_emb is None:
             continue
         text_emb = encode_text_for_class(model, modality, cls, device)
@@ -586,24 +611,14 @@ def process_task(
         with open(os.path.join(emb_dir, f"{cls_slug}_meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
 
-        # Plot TSNE per class including text
+        # Plot TSNE per class: fit on samples, then place text
         tsne_cfg = task.tsne or {}
-        # Per-class plotting with optional TSNE overrides
-        X_all = np.vstack([sample_emb, text_emb[None, :]])
-        coords = run_tsne(
-            X_all,
-            perplexity=int(tsne_cfg.get("perplexity", perplexity)),
-            random_state=int(tsne_cfg.get("random_state", 42)),
-            learning_rate=int(tsne_cfg.get("learning_rate", 400)),
-            n_iter=int(tsne_cfg.get("n_iter", 2000)),
-            early_exaggeration=float(tsne_cfg.get("early_exaggeration", 12.0)),
-            init=str(tsne_cfg.get("init", "random")),
-            pca_dims=int(tsne_cfg.get("pca_dims", 50)),
-        )
+        coords_samples, coords_text = _fit_tsne_and_place_text(sample_emb, text_emb[None, :], tsne_cfg, perplexity)
         n = sample_emb.shape[0]
         plt.figure(figsize=(7, 6))
-        plt.scatter(coords[:n, 0], coords[:n, 1], s=50, c="#1f77b4", alpha=0.65, label="samples")
-        plt.scatter(coords[n:, 0], coords[n:, 1], s=130, c="#ff7f0e", marker="*", edgecolors="k", linewidths=0.7, label="text: " + cls)
+        plt.scatter(coords_samples[:, 0], coords_samples[:, 1], s=50, c="#1f77b4", alpha=0.65, label="samples")
+        if coords_text is not None:
+            plt.scatter(coords_text[:, 0], coords_text[:, 1], s=130, c="#ff7f0e", marker="*", edgecolors="k", linewidths=0.7, label="text: " + cls)
         plt.title(f"t-SNE: {task.dataset_name} [{modality.name}] — {cls}")
         plt.legend(loc="best")
         out_path = os.path.join(tsne_dir, f"{slugify(cls)}.png")
@@ -615,7 +630,7 @@ def process_task(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Sample UniBind embeddings and plot per-class t-SNE with text (config-only)")
     # Multi-task config (required)
-    p.add_argument("--config", type=str, default="tools/vis_configs/basic.json", help="Path to JSON config with an array of tasks")
+    p.add_argument("--config", type=str, default="tools/vis_configs/sample.json", help="Path to JSON config with an array of tasks")
 
     # Model + compute
     p.add_argument("--pretrain-weights", type=str, default="./ckpts/pretrained_weights_flash_atten_image_patchs.pt")

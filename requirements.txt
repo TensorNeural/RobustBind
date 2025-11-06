@@ -41,3 +41,4 @@ requests
 rarfile
 Pillow
 pandas
+openTSNE==1.0.4
