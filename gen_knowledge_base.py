@@ -520,7 +520,8 @@ def partition_indices(n_items: int, num_shards: int, shard_index: int):
     return [i for i in range(n_items) if (i % num_shards) == shard_index]
 
 def describe_one(client: genai.Client, entry: Tuple[int, dict], dataset_root: Path,
-                 modality: str, model: str, logger: logging.Logger, event_frames: int):
+                 modality: str, model: str, logger: logging.Logger, event_frames: int,
+                 max_retries: int):
     idx, payload = entry
     label = payload.get("label", "")
 
@@ -532,7 +533,7 @@ def describe_one(client: genai.Client, entry: Tuple[int, dict], dataset_root: Pa
     # Infinite exponential backoff for retries
     attempt = 0
     try:
-        while True:
+        while attempt < max_retries:
             try:
                 desc_txt, usage = gemini_describe(client, files_for_model, modality, model, logger, label)
                 logger.info(f"[✓] Processed {payload['data']} | label='{label}' | description='{desc_txt}'")
@@ -540,16 +541,19 @@ def describe_one(client: genai.Client, entry: Tuple[int, dict], dataset_root: Pa
             except Exception as e:
                 attempt += 1
                 backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))  # Slower increase
-                logger.info(f"Error processing {payload['data']}: {e}. Retrying in {backoff_time:.2f}s...")
+                logger.info(f"Error processing {payload['data']}: {e}. Retrying in {backoff_time:.2f}s... (attempt {attempt}/{max_retries})")
                 time.sleep(backoff_time)
+        logger.warning(f"[SKIP] Exceeded max_retries={max_retries} — excluding from output | {payload['data']}")
+        return None
     finally:
         _cleanup_temp_paths(files_for_model)
 
-def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event_frames, model, deduplicated_align_data, output_base, shard_index):
+def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event_frames, model, deduplicated_align_data, output_base, shard_index, max_retries: int = 6):
     log_path = output_base / f"{dataset_dir_name}_shard_{shard_index}.log"
     logger = setup_logger(log_path)
 
     client = genai.Client()
+    skipped = []
     with tqdm(total=len(shard_entries), desc=f"Processing shard {shard_index} for {dataset_dir_name}", unit="entry", dynamic_ncols=True) as pbar:
         logger.info(f"[INFO] Processing {len(shard_entries)} entries in shard {shard_index} for {dataset_dir_name}...")
         for entry in shard_entries:
@@ -565,7 +569,7 @@ def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event
             # Infinite exponential backoff for retries
             attempt = 0
             try:
-                while True:
+                while attempt < max_retries:
                     try:
                         desc_txt, _ = gemini_describe(client, files_for_model, modality, model, logger, label)
                         entry["description"] = desc_txt
@@ -575,11 +579,20 @@ def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event
                     except Exception as e:
                         attempt += 1
                         backoff_time = max(0.02, (2 ** attempt) + random.uniform(0, 0.1))
-                        logger.info(f"Error processing {entry['data']}: {e}. Retrying in {backoff_time:.2f}s...")
+                        logger.info(f"Error processing {entry['data']}: {e}. Retrying in {backoff_time:.2f}s... (attempt {attempt}/{max_retries})")
                         time.sleep(backoff_time)
+                else:
+                    logger.warning(f"[SKIP] Exceeded max_retries={max_retries} — excluding from output | {entry['data']}")
+                    skipped.append({"data": entry.get("data"), "label": entry.get("label", "")})
             finally:
                 _cleanup_temp_paths(files_for_model)
             pbar.update(1)
+    # Write per-shard skipped file under output_base
+    skipped_path = output_base / f"{dataset_dir_name}_shard_{shard_index}_skipped.json"
+    try:
+        save_output_json(skipped_path, skipped)
+    except Exception:
+        logger.info(f"[WARN] Failed to write skipped list to {skipped_path}")
 
 # ==========================================================
 # Dataset processing
@@ -587,7 +600,7 @@ def process_shard(shard_entries, dataset_root, dataset_dir_name, modality, event
 
 def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, modality: str, model: str,
                     limit: Optional[int], num_threads: int, num_shards: int, shard_index: int, shard_dir: Path,
-                    event_frames: int):
+                    event_frames: int, max_retries: int):
     entries = load_input_json(json_path)
     if limit is not None:
         entries = entries[:limit]
@@ -600,18 +613,26 @@ def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, m
     logger = setup_logger(log_path)
 
     output_rows, meta_rows = [], []
+    skipped_rows = []
     desc = f"{json_path.parent.name} ({modality}) [shard {shard_index+1}/{num_shards}]"
     logger.info(f"[INFO] processing shard {shard_index+1}/{num_shards} with {num_threads} threads...")
 
     with ThreadPoolExecutor(max_workers=num_threads) as ex, \
          tqdm(total=len(shard_entries), desc=desc, unit="file", position=shard_index, leave=True, dynamic_ncols=True) as pbar:
-        futures = [ex.submit(describe_one, client, e, dataset_root, modality, model, logger, event_frames) for e in shard_entries]
-        for fut in as_completed(futures):
+        future_map = {}
+        for e in shard_entries:
+            fut = ex.submit(describe_one, client, e, dataset_root, modality, model, logger, event_frames, max_retries)
+            future_map[fut] = e
+        for fut in as_completed(future_map):
             res = fut.result()
+            idx, payload = future_map[fut]
             if res is not None:
-                idx, rel_path, label, desc_txt, usage = res
+                _, rel_path, label, desc_txt, usage = res
                 output_rows.append((idx, {"data": rel_path, "description": desc_txt, "label": label}))
                 meta_rows.append((idx, {"data": rel_path, "label": label, "usage": usage}))
+            else:
+                # Excluded due to max_retries or missing file
+                skipped_rows.append({"data": payload.get("data"), "label": payload.get("label", "")})
             pbar.update(1)
 
     output_rows.sort(key=lambda x: x[0])
@@ -619,9 +640,11 @@ def process_dataset(client: genai.Client, json_path: Path, dataset_root: Path, m
 
     align_json_path = shard_dir / "aligned.json"
     meta_json_path = shard_dir / "align_meta.json"
+    skipped_json_path = shard_dir / "skipped.json"
 
     save_output_json(align_json_path, [row for _, row in output_rows])
     save_output_json(meta_json_path, [row for _, row in meta_rows])
+    save_output_json(skipped_json_path, skipped_rows)
 
 
 # ==========================================================
@@ -633,17 +656,24 @@ def merge_shards(json_path: Path, modality: str, num_shards: int, use_json_root:
     logger.info(f"[INFO] Merging {num_shards} shards for {stem}...")
 
     parts, parts_meta = [], []
+    parts_skipped = []
 
     for i in range(num_shards):
         shard_dir = output_base / f"{stem}_shard{i}-{num_shards}"
         json_file = shard_dir / "aligned.json"
         meta_file = shard_dir / "align_meta.json"
+        skipped_file = shard_dir / "skipped.json"
         if json_file.exists() and meta_file.exists():
             logger.info(f"[INFO] Loading shard {i} outputs from {json_file} and {meta_file}")
             parts.append(load_input_json(json_file))
             parts_meta.append(load_input_json(meta_file))
         else:
             logger.info(f"[WARN] Missing output for shard {i}, skipping merge.")
+        if skipped_file.exists():
+            try:
+                parts_skipped.append(load_input_json(skipped_file))
+            except Exception:
+                pass
 
     if not parts:
         logger.info(f"[ERR] No shard outputs found for {stem}")
@@ -656,22 +686,48 @@ def merge_shards(json_path: Path, modality: str, num_shards: int, use_json_root:
         output_dir = json_root / json_path.parent.name
         align_json_path = output_dir / "train_data_align.json"
         meta_json_path = output_dir / "train_data_align_meta.json"
+        skipped_json_path = output_dir / "train_data_align_skipped.json"
+        summary_json_path = output_dir / "train_data_align_summary.json"
         output_dir.mkdir(parents=True, exist_ok=True)
     else:
         align_json_path = output_base / f"{stem}_data_align.json"
         meta_json_path = output_base / f"{stem}_data_align_meta.json"
+        skipped_json_path = output_base / f"{stem}_data_align_skipped.json"
+        summary_json_path = output_base / f"{stem}_data_align_summary.json"
 
     save_output_json(align_json_path, merged)
     save_output_json(meta_json_path, merged_meta)
+    if parts_skipped:
+        merged_skipped = [item for part in parts_skipped for item in part]
+        save_output_json(skipped_json_path, merged_skipped)
+    else:
+        merged_skipped = []
+
+    # Write a simple summary with counts
+    summary = {
+        "dataset": json_path.parent.name,
+        "modality": modality,
+        "num_shards": num_shards,
+        "succeeded": len(merged),
+        "skipped": len(merged_skipped),
+        "processed": len(merged) + len(merged_skipped),
+        "outputs": {
+            "align": str(align_json_path),
+            "meta": str(meta_json_path),
+            "skipped": str(skipped_json_path),
+        },
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    save_output_json(summary_json_path, summary)
 
 # ==========================================================
 # Shard runner (per-process DI: create client once here)
 # ==========================================================
 
-def run_one_shard(json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir, event_frames):
+def run_one_shard(json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir, event_frames, max_retries):
     # DI: one client per process
     client = genai.Client()
-    process_dataset(client, json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir, event_frames)
+    process_dataset(client, json_path, dataset_path, modality, model, limit, num_threads, total_shards, shard_index, shard_dir, event_frames, max_retries)
 
 
 # ==========================================================
@@ -685,7 +741,7 @@ def main():
     parser.add_argument("--dataset_root", default="/data/datasets")
     parser.add_argument("--json_root", default="./datasets")
     parser.add_argument("--model", default="gemini-2.5-flash-lite")
-    parser.add_argument("--limit", type=int, default=5, help="Limit number of entries per dataset (for testing).")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of entries per dataset (for testing).")
     parser.add_argument("--skip_modalities", nargs="*", default=[
         # "image",
         # "audio",
@@ -699,6 +755,7 @@ def main():
     parser.add_argument("--use_json_root", action="store_true", default=True, help="Flag to toggle output location between json_root and output_base.")
     parser.add_argument("--scan_and_fix", action="store_true", default=False, help="Scan for missing entries and descriptions in train_data.json and train_data_align.json, and fix them.")
     parser.add_argument("--copy_to_json_root", action="store_true", default=False, help="Copy JSON files from output directories into --json_root with the correct names.")
+    parser.add_argument("--max_retries", type=int, default=6, help="Max retry attempts per example before excluding from outputs.")
     args = parser.parse_args()
 
     run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -718,7 +775,7 @@ def main():
     if args.scan_and_fix:
         log_path = output_base / "scan_and_fix.log"
         logger = setup_logger(log_path)
-        scan_and_fix_entries(Path(args.json_root), Path(args.dataset_root), logger, args.model, args.event_frames, args.limit, output_base)
+        scan_and_fix_entries(Path(args.json_root), Path(args.dataset_root), logger, args.model, args.event_frames, args.limit, output_base, args.max_retries)
         return
 
     dataset_root_base = Path(args.dataset_root)
@@ -752,9 +809,22 @@ def main():
         try:
             for i in range(total_cores):
                 shard_dir = output_base / f"{dataset_name}_{modality}_shard{i}-{total_cores}"
-                p = mp.Process(target=run_one_shard,
-                               args=(json_path, dataset_path, modality, args.model, args.limit,
-                                     args.per_process_threads, total_cores, i, shard_dir, args.event_frames))
+                p = mp.Process(
+                    target=run_one_shard,
+                    args=(
+                        json_path,
+                        dataset_path,
+                        modality,
+                        args.model,
+                        args.limit,
+                        args.per_process_threads,
+                        total_cores,
+                        i,
+                        shard_dir,
+                        args.event_frames,
+                        args.max_retries,
+                    ),
+                )
                 p.start()
                 procs.append(p)
 
@@ -795,7 +865,7 @@ def copy_json_to_root(output_base: Path, json_root: Path):
         shutil.copy(meta_file, target_path)
         print(f"[✓] Copied {meta_file} to {target_path}")
 
-def scan_and_fix_entries(json_root: Path, dataset_root: Path, logger: logging.Logger, model: str, event_frames: int, limit: Optional[int] = None, output_base: Optional[Path] = None):
+def scan_and_fix_entries(json_root: Path, dataset_root: Path, logger: logging.Logger, model: str, event_frames: int, limit: Optional[int] = None, output_base: Optional[Path] = None, max_retries: int = 6):
     total_cores = os.cpu_count() or 1
 
     for dataset_dir in tqdm(json_root.iterdir(), desc="Scanning datasets", unit="dataset", dynamic_ncols=True):
@@ -859,7 +929,7 @@ def scan_and_fix_entries(json_root: Path, dataset_root: Path, logger: logging.Lo
                     try:
                         pool.starmap(
                             process_shard,
-                            [(shard, dataset_root, dataset_dir.name, modality, event_frames, model, shared_deduplicated_align_data, output_base, i)
+                            [(shard, dataset_root, dataset_dir.name, modality, event_frames, model, shared_deduplicated_align_data, output_base, i, max_retries)
                              for i, shard in enumerate(shards)]
                         )
                     finally:
