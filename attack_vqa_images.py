@@ -103,7 +103,7 @@ def setup_logger(rank, output_path):
 def main(args):
     local_rank, rank, world_size, device = setup_distributed()
 
-    args.output_dir = "output/llava/attack/vqa"
+    args.output_dir = "/data/output/llava/attack/vqa"
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(args.output_dir, f"rank{rank}_{timestamp}.log")

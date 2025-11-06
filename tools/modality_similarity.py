@@ -24,7 +24,7 @@ def log(step, msg):
 
 def create_output_dir():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_dir = os.path.join("output", "similarity", timestamp)
+    output_dir = os.path.join("/data/output", "similarity", timestamp)
     os.makedirs(output_dir, exist_ok=True)
     log("MAIN", f"Saving to {output_dir}")
     return output_dir
@@ -162,7 +162,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--embedding_dir", type=str,
-                        default="output/alignment/2025-07-27_23-27-43",
+                        default="/data/output/alignment/2025-07-27_23-27-43",
                         help="Directory with saved .npy embeddings")
     parser.add_argument("--metric", type=str,
                         choices=["cosine", "centroid", "chamfer"],

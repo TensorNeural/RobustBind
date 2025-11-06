@@ -53,19 +53,19 @@ def main():
     parser.add_argument(
         '--clean_json',
         type=str,
-        default="./output/llava/eval/vqa/2025-07-30_05-27/vqa_results.json",
+        default="/data/output/llava/eval/vqa/2025-07-30_05-27/vqa_results.json",
         help='Path to clean vqa_results.json'
     )
     parser.add_argument(
         '--adv_json',
         type=str,
-        default="./output/llava/eval/vqa/2025-07-30_08-02/robustbind4/vqa_results.json",
+        default="/data/output/llava/eval/vqa/2025-07-30_08-02/robustbind4/vqa_results.json",
         help='Path to adversarial vqa_results.json'
     )
     parser.add_argument(
         '--output_csv',
         type=str,
-        default=f'./output/llava/eval/vqa/comparison_{timestamp}.csv',
+        default=f'/data/output/llava/eval/vqa/comparison_{timestamp}.csv',
         help='Output CSV path'
     )
     args = parser.parse_args()

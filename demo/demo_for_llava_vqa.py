@@ -129,7 +129,7 @@ def main():
     local_cache = os.path.join(os.getcwd(), ".cache")
     metadata_path = "datasets/VQA2/val_data.json"
     image_root = "/data/datasets/VQA2"
-    output_dir = os.path.join(os.getcwd(), "output")
+    output_dir = "/data/output"
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "vqa2_llava_results.json")
     max_samples = 5000

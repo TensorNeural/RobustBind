@@ -95,7 +95,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--search_dir",
         required=True,
-        help="Path to cross_modality_search/{timestamp}, e.g., ./output/cross_modality_search/2025-05-20_07-04-54"
+        help="Path to cross_modality_search/{timestamp}, e.g., /data/output/cross_modality_search/2025-05-20_07-04-54"
     )
     args = parser.parse_args()
     main(args.search_dir)

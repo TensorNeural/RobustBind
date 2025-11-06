@@ -788,7 +788,7 @@ def parse_args() -> argparse.Namespace:
 
     # TSNE & output
     p.add_argument("--perplexity", type=int, default=5)
-    p.add_argument("--output-dir", type=str, default="./output")
+    p.add_argument("--output-dir", type=str, default="/data/output")
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])  # noqa
     return p.parse_args()
 

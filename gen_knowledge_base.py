@@ -442,6 +442,7 @@ def gemini_describe(client: genai.Client,
                 + "Do not use the phrase is a. "
                 + "Write one concise sentence with at most 16 words. Your output must contain exactly one sentence. "
                 + "Use the full label and the example together to resolve ambiguity."
+                + "The label should only appear at the start. Don't repeat the label in the middle of the sentence. "
             )
         else:
             safe_modality = sanitize_for_prompt(modality)
@@ -759,7 +760,7 @@ def main():
     args = parser.parse_args()
 
     run_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    output_base = Path("output/knowledge_base")
+    output_base = Path("/data/output/knowledge_base")
     output_base.mkdir(parents=True, exist_ok=True)
 
     # Initialize a global run logger early so we can log errors/info

@@ -194,9 +194,9 @@ def main():
     # Export-only options (no embedding/clustering)
     p.add_argument("--export-class-list", action="store_true", default=False,
                    help="Export consolidated class list per dataset for LLM-based grouping and exit")
-    p.add_argument("--classes-out", type=str, default="./output/classes_all.json",
+    p.add_argument("--classes-out", type=str, default="/data/output/classes_all.json",
                    help="Output path for consolidated class list when using --export-class-list")
-    p.add_argument("--gemini-prompt-out", type=str, default="./output/gemini_grouping_prompt.txt",
+    p.add_argument("--gemini-prompt-out", type=str, default="/data/output/gemini_grouping_prompt.txt",
                    help="Output path for a ready-to-use Gemini prompt scaffold")
     # Gemini LLM grouping options
     p.add_argument("--gemini-run", action="store_true", default=True,
@@ -205,7 +205,7 @@ def main():
                    help="Gemini model name (e.g., gemini-2.5-flash, gemini-1.5-pro)")
     p.add_argument("--gemini-api-key-env", type=str, default="GOOGLE_API_KEY",
                    help="Environment variable name holding the Gemini API key")
-    p.add_argument("--gemini-out", type=str, default="./output/label_groups_gemini.json",
+    p.add_argument("--gemini-out", type=str, default="/data/output/label_groups_gemini.json",
                    help="Output JSON path for Gemini-produced groups")
     p.add_argument("--verbose", action="store_true", default=False, help="Enable verbose logs for Gemini path")
     p.add_argument("--pretrain-weights", type=str, default="./ckpts/pretrained_weights_flash_atten_image_patchs.pt")
@@ -228,7 +228,7 @@ def main():
     p.add_argument("--agg-linkage", type=str, default="average", choices=["average", "complete", "single"], help="Agglomerative linkage")
     p.add_argument("--agg-distance-threshold", type=float, default=0.5, help="Agglomerative distance_threshold (use with n_clusters=None)")
     p.add_argument("--agg-n-clusters", type=int, default=-1, help="Agglomerative fixed n_clusters; -1 means None (use distance_threshold)")
-    p.add_argument("--output-dir", type=str, default="./output")
+    p.add_argument("--output-dir", type=str, default="/data/output")
     p.add_argument("--output-name", type=str, default="label_groups.json")
     p.add_argument("--keep-noise-singletons", action="store_true", default=True,
                    help="Keep HDBSCAN noise points each as their own singleton group (default: on)")

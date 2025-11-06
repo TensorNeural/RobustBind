@@ -7,8 +7,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 # === Config ===
-embedding_dir = "./output/embeddings"
-output_dir = "./output/diagnostics"
+embedding_dir = "/data/output/embeddings"
+output_dir = "/data/output/diagnostics"
 os.makedirs(output_dir, exist_ok=True)
 
 # === Load UNIBIND_CLEAN modality embeddings ===

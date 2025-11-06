@@ -221,7 +221,7 @@ def main():
     parser.add_argument("--dataset_root", required=True)
     parser.add_argument("--pretrained_model", required=True)
     parser.add_argument("--unibind_weights", required=True)
-    parser.add_argument("--output_dir", default="output/llava")
+    parser.add_argument("--output_dir", default="/data/output/llava")
     parser.add_argument("--coco_epochs", type=int, default=3)
     parser.add_argument("--vqa_epochs", type=int, default=4)
     parser.add_argument("--coco_max_samples", type=int, default=None)

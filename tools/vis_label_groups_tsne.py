@@ -286,8 +286,8 @@ def plot_tsne_by_group(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="t-SNE of label groups using OpenTSNE (colors per group)")
-    p.add_argument("--input", type=str, default="./output/label_groups_gemini.json", help="Path to label groups JSON")
-    p.add_argument("--output", type=str, default="./output/tsne/label_groups_gemini_tsne.png", help="Path to save PNG")
+    p.add_argument("--input", type=str, default="/data/output/label_groups_gemini.json", help="Path to label groups JSON")
+    p.add_argument("--output", type=str, default="/data/output/tsne/label_groups_gemini_tsne.png", help="Path to save PNG")
     p.add_argument("--perplexity", type=float, default=30.0)
     p.add_argument("--metric", type=str, default="cosine")
     p.add_argument("--seed", type=int, default=42)

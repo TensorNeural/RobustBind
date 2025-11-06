@@ -203,7 +203,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", required=True, choices=[e.value for e in BindModelType])
     parser.add_argument("--modality", required=True)
     parser.add_argument("--dataset_name", required=True)
-    parser.add_argument("--output_dir", default="output")
+    parser.add_argument("--output_dir", default="/data/output")
     parser.add_argument("--dataset_root", required=True)
     parser.add_argument("--clean_val_json", required=True)
     parser.add_argument("--attack_val_json", required=True)

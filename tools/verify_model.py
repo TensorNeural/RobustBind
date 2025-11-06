@@ -49,7 +49,7 @@ def main():
     # === Update these paths as needed ===
     pretrain_weights_path = "./ckpts/pretrained_weights.pt"
     centre_embedding_path = "./centre_embs/image_in_center_embeddings.pkl"
-    checkpoint_path = "./output/best_model.pt"
+    checkpoint_path = "/data/output/best_model.pt"
 
     # === Load center embeddings ===
     centre_embeddings, centre_labels = load_centre_embeddings(centre_embedding_path, device)

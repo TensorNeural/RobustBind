@@ -8,6 +8,8 @@ from datetime import datetime
 import time
 import json
 from urllib import request as urlrequest, error as urlerror
+import csv
+from typing import List
 # Discord webhook will be read from environment in main() and passed into helper.
 from pathlib import Path
 
@@ -42,7 +44,21 @@ class RelativePathFormatter(logging.Formatter):
         record.relativepath = os.path.relpath(os.path.abspath(record.pathname), run_dir)
         return super().format(record)
 
-def run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs, output_base):
+def _ensure_csv(path: Path, header: List[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        with path.open('w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+
+
+def _append_csv(path: Path, row: list):
+    with path.open('a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
+
+
+def run_alignment_training(args, device, logger, writer, train_loader, val_loader, raw_emb, raw_lbls, lbl_to_idx, epochs, output_base, session_output_dir: Path):
     run_start_time = time.time()
     logger.info(f"[Align] Running alignment training with train modality: {args.train_modality}")
     unibind_train = UniBind(
@@ -55,6 +71,24 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
     ).to(device)
 
     unibind_train.enable_modality_head_mlp()
+
+    # Optionally auto-load previously trained robust LoRA from this session and keep it frozen
+    if getattr(args, 'align_robust', False):
+        # Build expected ckpt filename for LoRA robust
+        eps_int = getattr(args, 'robust_epsilon_int', 4)
+        rank = getattr(args, 'robust_lora_rank', 4)
+        alpha = getattr(args, 'robust_lora_alpha', 8)
+        ckpts_dir = Path('./ckpts')
+        robust_name = f"robust_{args.train_modality.value}_lora_r{rank}a{alpha}_eps{eps_int}.pt"
+        robust_ckpt = ckpts_dir / robust_name
+        if robust_ckpt.exists():
+            try:
+                unibind_train.load_lora_weights(str(robust_ckpt))
+                logger.info(f"[Align] Loaded frozen robust LoRA weights: {robust_ckpt}")
+            except Exception as e:
+                logger.warning(f"[Align] Failed to load LoRA weights into alignment model: {e}")
+        else:
+            logger.warning(f"[Align] Expected robust weights not found for align-robust: {robust_ckpt}")
     unibind_train = ProxyDDP(unibind_train, device_ids=[device.index], output_device=device.index, find_unused_parameters=True)
 
     model_val = UniBindClassifier(
@@ -79,10 +113,10 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
     logger.info(f"[Align] Params | trainable={trainable_params_count:,} / total={total_params:,} ({pct_trainable:.2f}% trainable)")
 
     trainable_params = [p for p in unibind_train.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=3e-3, weight_decay=1e-4)
+    optimizer = AdamW(trainable_params, lr=args.align_max_lr, weight_decay=1e-4)
     scheduler = OneCycleLR(
         optimizer,
-        max_lr=3e-3,
+        max_lr=args.align_max_lr,
         steps_per_epoch=len(train_loader),
         epochs=epochs,
         pct_start=0.1,
@@ -92,6 +126,14 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
 
     best_acc = -1.0
     modality = Modality(args.train_modality)
+
+    # CSV for alignment validation (rank 0 only)
+    align_csv = session_output_dir / "val_alignment.csv"
+    if dist.get_rank() == 0:
+        _ensure_csv(align_csv, [
+            "timestamp","session","mode","model_type","modality",
+            "train_dataset","val_dataset","epoch","acc","tag"
+        ])
 
     for epoch in range(epochs):
         logger.info(f"[Align][Epoch {epoch + 1}/{epochs}] Starting training")
@@ -110,7 +152,18 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
             modality=modality
         )
 
-        ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_mlp_{args.model_type}.pt")
+        # Epoch naming mirrors final naming format with an epoch_ prefix
+        if getattr(args, 'align_robust', False):
+            eps_int = getattr(args, 'robust_epsilon_int', 4)
+            rank = getattr(args, 'robust_lora_rank', 4)
+            alpha = getattr(args, 'robust_lora_alpha', 8)
+            base_name = (
+                f"epoch_{epoch + 1}_align_robust_{args.train_modality.value}"
+                f"_lora_r{rank}a{alpha}_eps{eps_int}"
+            )
+        else:
+            base_name = f"epoch_{epoch + 1}_align_{args.train_modality.value}"
+        ckpt_path = os.path.join(output_base, base_name + ".pt")
         if dist.get_rank() == 0:
             unibind_train.save_modality_head_mlp_weights(ckpt_path)
 
@@ -124,12 +177,47 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
             # Emit per-epoch alignment accuracy to TensorBoard
             writer.add_scalar("val/acc", acc, epoch + 1)
             writer.flush()
+            # Also append to session CSV
+            _append_csv(align_csv, [
+                datetime.utcnow().isoformat(),
+                str(getattr(args, 'session_timestamp', '')),
+                "alignment" + ("+frozen_lora" if getattr(args, 'align_robust', False) else ""),
+                args.model_type,
+                args.train_modality.value,
+                args.train_dataset_name,
+                args.val_dataset_name,
+                epoch + 1,
+                float(acc),
+                ""
+            ])
 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
-            best_ckpt_path = os.path.join(output_base, f"best_mlp_weights_{args.model_type}.pt")
+            # Internal best naming (unchanged), final copy below follows the exact final naming
+            mode_suffix = "align_robust" if getattr(args, 'align_robust', False) else "align"
+            best_name = f"best_{mode_suffix}_{args.train_modality.value}"
+            best_ckpt_path = os.path.join(output_base, best_name + ".pt")
             shutil.copyfile(ckpt_path, best_ckpt_path)
             logger.info(f"[Align] Best checkpoint saved: {best_ckpt_path}")
+
+            # Also copy to ./ckpts with clear naming
+            try:
+                ckpts_dir = Path("./ckpts")
+                ckpts_dir.mkdir(parents=True, exist_ok=True)
+                if getattr(args, 'align_robust', False):
+                    # align_robust_(modality)_lora_r{rank}a{alpha}_eps{eps}.pt
+                    eps_int = getattr(args, 'robust_epsilon_int', 4)
+                    rank = getattr(args, 'robust_lora_rank', 4)
+                    alpha = getattr(args, 'robust_lora_alpha', 8)
+                    copy_name = f"align_robust_{args.train_modality.value}_lora_r{rank}a{alpha}_eps{eps_int}"
+                else:
+                    # align_(modality).pt
+                    copy_name = f"align_{args.train_modality.value}"
+                copy_path = ckpts_dir / (copy_name + ".pt")
+                shutil.copyfile(best_ckpt_path, copy_path)
+                logger.info(f"[Align] Copied best weights to {copy_path}")
+            except Exception as e:
+                logger.warning(f"[Align] Failed to copy best weights to ./ckpts: {e}")
 
     writer.close()
 
@@ -151,12 +239,13 @@ def run_robust_training(
     val_lbls,
     val_lbl_to_idx,
     epochs,
-    output_base
+    output_base,
+    session_output_dir: Path
 ):
     run_start_time = time.time()
     logger.info(f"[Robust] Running robust training with train modality: {args.train_modality}")
     if args.robust_use_modality_head_mlp:
-        logger.info(f"[Robust] Modality head MLP requested. Weights path: {args.robust_modality_head_mlp_weights}")
+        logger.info(f"[Robust] Alignment head requested. Weights path: {args.robust_modality_head_mlp_weights}")
         
     train_mean, train_std = get_normalization_tensors(args.train_modality, device)
     val_mean, val_std = get_normalization_tensors(args.val_modality, device)
@@ -223,7 +312,7 @@ def run_robust_training(
         model=AttackModel(model_train, train_mean, train_std),
         epsilon=args.robust_epsilon,
         alpha=1 / 255,
-        steps=10,
+        steps=args.robust_pgd_steps,
         norm='linf',
         random_start=True,
         clamp_min=0.0,
@@ -250,10 +339,12 @@ def run_robust_training(
     logger.info(f"[Robust] Params | trainable={trainable_params_count:,} / total={total_params:,} ({pct_trainable:.2f}% trainable)")
 
     params = [p for p in model_train.parameters() if p.requires_grad]
-    optimizer = AdamW(params, lr=3e-3, weight_decay=1e-4)
+    # Choose LR based on training mode
+    robust_max_lr = args.robust_max_lr_lora if args.robust_training_mode == "lora" else args.robust_max_lr_full
+    optimizer = AdamW(params, lr=robust_max_lr, weight_decay=1e-4)
     scheduler = OneCycleLR(
         optimizer,
-        max_lr=3e-3,
+        max_lr=robust_max_lr,
         steps_per_epoch=len(train_loader),
         epochs=epochs,
         pct_start=0.1,
@@ -269,6 +360,14 @@ def run_robust_training(
         writer.add_text("config/lora_alpha", str(args.robust_lora_alpha))
         writer.add_scalar("config/lora_rank", args.robust_lora_rank, 0)
         writer.add_scalar("config/lora_alpha", args.robust_lora_alpha, 0)
+
+    # CSV for robust validation (rank 0 only)
+    robust_csv = session_output_dir / "val_robust.csv"
+    if dist.get_rank() == 0:
+        _ensure_csv(robust_csv, [
+            "timestamp","session","mode","model_type","modality",
+            "train_dataset","val_dataset","epoch","robust_acc","epsilon","lora_rank","lora_alpha"
+        ])
 
     for epoch in range(epochs):
         logger.info(f"[Robust][Epoch {epoch + 1}/{epochs}] Starting training")
@@ -297,11 +396,14 @@ def run_robust_training(
         )
 
         if args.robust_training_mode == "full_fine_tune":
-            ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_backbone_{args.model_type}.pt")
+            # Epoch naming mirrors final naming format with an epoch_ prefix
+            ckpt_base = f"epoch_{epoch + 1}_robust_{args.train_modality.value}_full_finetune_eps{args.robust_epsilon_int}"
+            ckpt_path = os.path.join(output_base, ckpt_base + ".pt")
             if dist.get_rank() == 0:
                 model_train.save_backbone(ckpt_path)
         else:
-            ckpt_path = os.path.join(output_base, f"epoch_{epoch + 1}_lora_{args.model_type}.pt")
+            ckpt_base = f"epoch_{epoch + 1}_robust_{args.train_modality.value}_lora_r{args.robust_lora_rank}a{args.robust_lora_alpha}_eps{args.robust_epsilon_int}"
+            ckpt_path = os.path.join(output_base, ckpt_base + ".pt")
             if dist.get_rank() == 0:
                 model_train.save_lora_weights(ckpt_path)
 
@@ -321,15 +423,47 @@ def run_robust_training(
             # Emit per-epoch robust accuracy to TensorBoard
             writer.add_scalar("val/robust_acc", acc, epoch + 1)
             writer.flush()
+            # Append to session CSV
+            _append_csv(robust_csv, [
+                datetime.utcnow().isoformat(),
+                str(getattr(args, 'session_timestamp', '')),
+                f"robust/{args.robust_training_mode}",
+                args.model_type,
+                args.train_modality.value,
+                args.train_dataset_name,
+                args.val_dataset_name,
+                epoch + 1,
+                float(acc),
+                args.robust_epsilon_int,
+                args.robust_lora_rank if args.robust_training_mode == 'lora' else '',
+                args.robust_lora_alpha if args.robust_training_mode == 'lora' else '',
+            ])
 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
             if args.robust_training_mode == "full_fine_tune":
-                best_ckpt_path = os.path.join(output_base, f"best_backbone_weights_{args.model_type}.pt")
+                # Copy to ./ckpts/robust_(modality)_full_finetune_epsN.pt
+                best_name = f"robust_{args.train_modality.value}_full_finetune_eps{args.robust_epsilon_int}"
+                best_ckpt_path = os.path.join(output_base, best_name + ".pt")
                 shutil.copyfile(ckpt_path, best_ckpt_path)
             else:
-                best_ckpt_path = os.path.join(output_base, f"best_lora_weights_{args.model_type}.pt")
+                # Copy to ./ckpts/robust_(modality)_lora_r{rank}a{alpha}_epsN.pt
+                best_name = f"robust_{args.train_modality.value}_lora_r{args.robust_lora_rank}a{args.robust_lora_alpha}_eps{args.robust_epsilon_int}"
+                best_ckpt_path = os.path.join(output_base, best_name + ".pt")
                 shutil.copyfile(ckpt_path, best_ckpt_path)
+
+            # Copy to ./ckpts with clear naming (skip full_fine_tune per request)
+            if args.robust_training_mode == "full_fine_tune":
+                logger.info("[Robust] Skipping copy of full_finetune weights to ./ckpts (per configuration)")
+            else:
+                try:
+                    ckpts_dir = Path("./ckpts")
+                    ckpts_dir.mkdir(parents=True, exist_ok=True)
+                    copy_path = ckpts_dir / (best_name + ".pt")
+                    shutil.copyfile(best_ckpt_path, copy_path)
+                    logger.info(f"[Robust] Copied best weights to {copy_path}")
+                except Exception as e:
+                    logger.warning(f"[Robust] Failed to copy best weights to ./ckpts: {e}")
 
     writer.close()
     logger.info(f"[Robust] Best robust accuracy: {best_acc:.4f}")
@@ -380,8 +514,17 @@ def auto_discover_alignment_mlp(args, session_output_dir: Path, logger: logging.
         logger.info(f"[AutoLoad][Robust] Using user-provided modality head MLP weights: {args.robust_modality_head_mlp_weights}")
         return True
     
-    candidate = session_output_dir / "align" / args.train_modality.value / f"best_mlp_weights_{args.model_type}.pt"
-    if candidate.exists():
+    # Prefer final ckpts naming align_(modality).pt from same session; fallback to session best or legacy
+    ckpts_candidate = Path("./ckpts") / f"align_{args.train_modality.value}.pt"
+    candidate_session_best = session_output_dir / "align" / args.train_modality.value / f"best_align_{args.train_modality.value}.pt"
+    legacy1 = session_output_dir / "align" / args.train_modality.value / f"best_mlp_weights_{args.model_type}_{args.train_modality.value}.pt"
+    legacy2 = session_output_dir / "align" / args.train_modality.value / f"best_mlp_weights_{args.model_type}.pt"
+    candidate = None
+    for c in [ckpts_candidate, candidate_session_best, legacy1, legacy2]:
+        if c.exists():
+            candidate = c
+            break
+    if candidate and Path(candidate).exists():
         args.robust_modality_head_mlp_weights = str(candidate)
         if not args.robust_use_modality_head_mlp:
             args.robust_use_modality_head_mlp = True
@@ -421,6 +564,7 @@ def main():
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
 
     parser.add_argument("--align_modality_head_mlp_weights", default=None)
+    parser.add_argument("--align_robust", action="store_true", default=False, help="If set, auto-load robust weights from this session and freeze them during alignment")
 
     parser.add_argument("--robust_train_attack_loss", default="l2")
     parser.add_argument("--robust_val_attack_loss", default="ce")
@@ -429,18 +573,23 @@ def main():
     parser.add_argument("--robust_lora_rank", type=int, default=4)
     parser.add_argument("--robust_lora_alpha", type=float, default=8)
     parser.add_argument("--robust_epsilon", type=int, default=4)
+    parser.add_argument("--robust_pgd_steps", type=int, default=10, help="Number of PGD steps for inner maximization during adversarial training")
 
     parser.add_argument("--robust_training_mode", choices=["lora", "full_fine_tune"], default="lora", help="Mode for robust training")
 
     parser.add_argument("--robust_use_modality_head_mlp", action="store_true", default=False)
     parser.add_argument("--robust_modality_head_mlp_weights", default=None)
 
-    parser.add_argument("--tensorboard_data_dir", default="tensorboard")
-    parser.add_argument("--output_dir", default="output")
+    # Removed unused: --tensorboard_data_dir, --output_dir
     parser.add_argument("--session_output_dir", default=None)
     parser.add_argument("--session_timestamp", default=None)
     parser.add_argument("--tensorboard_root", default=None)
     parser.add_argument("--epochs", type=int, default=2, help="Total number of training epochs")
+    parser.add_argument("--limit_samples", type=int, default=100, help="If set, overrides both train_max_samples and val_max_samples for quick testing")
+    # Learning rate controls
+    parser.add_argument("--align_max_lr", type=float, default=3e-3, help="Max LR for OneCycle during alignment training")
+    parser.add_argument("--robust_max_lr_lora", type=float, default=3e-3, help="Max LR for OneCycle during robust LoRA training")
+    parser.add_argument("--robust_max_lr_full", type=float, default=3e-4, help="Max LR for OneCycle during robust full fine-tuning")
     args = parser.parse_args()
 
     if args.val_center_emb is None:
@@ -466,10 +615,11 @@ def main():
     if args.training_mode == "alignment":
         subdir = f"align/{args.train_modality.value}"
     else:
+        eps_label = f"eps{args.robust_epsilon_int}"
         if args.robust_training_mode == "lora":
-            subdir = f"robust/{args.train_modality.value}/lora_r{args.robust_lora_rank}_a{args.robust_lora_alpha}_{args.robust_epsilon}"
+            subdir = f"robust/{args.train_modality.value}/lora_r{args.robust_lora_rank}a{args.robust_lora_alpha}_{eps_label}"
         else:
-            subdir = f"robust/{args.train_modality.value}/full_fine_tune_{args.robust_epsilon}"
+            subdir = f"robust/{args.train_modality.value}/full_fine_tune_{eps_label}"
 
     run_output_base = session_output_dir / subdir
     run_output_base.mkdir(parents=True, exist_ok=True)
@@ -485,6 +635,12 @@ def main():
     logger.setLevel(logging.INFO)
     logger.handlers = [ch, fh]
 
+    # If limit_samples is provided, override train/val max samples for quick testing
+    if args.limit_samples is not None and args.limit_samples > 0:
+        args.train_max_samples = args.limit_samples
+        args.val_max_samples = args.limit_samples
+        logger.info(f"[Config] limit_samples active: train_max_samples=val_max_samples={args.limit_samples}")
+
     # Read Discord webhook once and reuse
     discord_webhook = os.getenv("DISCORD_WEBHOOK_URL")
 
@@ -493,7 +649,7 @@ def main():
         # Auto discover alignment MLP (if any) after logger setup
         found_mlp = auto_discover_alignment_mlp(args, session_output_dir, logger)
         if args.robust_use_modality_head_mlp and not found_mlp and not args.robust_modality_head_mlp_weights:
-            logger.warning("[Robust] Modality head MLP requested but no weights found. Proceeding with randomly initialized head.")
+            logger.warning("[Robust] Alignment head requested but no weights found. Proceeding with randomly initialized head.")
 
     # Load val centers (required)
     train_emb, train_lbls, train_lbl_to_idx = None, None, None
@@ -511,6 +667,7 @@ def main():
     if args.training_mode == "robust":
         logger.info(f"{prefix} Mode selected: {args.robust_training_mode}")
         logger.info(f"{prefix} epsilon={args.robust_epsilon_int}/255")
+        logger.info(f"{prefix} inner PGD steps={args.robust_pgd_steps}")
         if args.robust_training_mode == "lora":
             logger.info(f"{prefix} lora_rank={args.robust_lora_rank} lora_alpha={args.robust_lora_alpha}")
     else:
@@ -589,7 +746,8 @@ def main():
             val_lbls,
             val_lbl_to_idx,
             args.epochs,
-            run_output_base
+            run_output_base,
+            session_output_dir
         )
     else:
         logger.info(f"[Robust] ({args.robust_training_mode}) {args.train_modality} | Train dataset: {args.train_dataset_name} | Val dataset: {args.val_dataset_name} | Epsilon: {args.robust_epsilon_int}/255 | Epochs: {args.epochs}")
@@ -610,7 +768,8 @@ def main():
             val_lbls,
             val_lbl_to_idx,
             args.epochs,
-            run_output_base
+            run_output_base,
+            session_output_dir
         )
 
     # Notify finish (rank 0 only)

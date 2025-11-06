@@ -463,7 +463,7 @@ if __name__ == "__main__":
     parser.add_argument("--center_emb_point", required=True)
     parser.add_argument("--label_map", required=True)
     parser.add_argument("--pretrain_weights", required=True)
-    parser.add_argument("--output_dir", default="./output")
+    parser.add_argument("--output_dir", default="/data/output")
     parser.add_argument("--use_flash_attention", action="store_true", default=False)
     args = parser.parse_args()
 

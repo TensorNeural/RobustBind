@@ -145,11 +145,11 @@ def extract_embeddings(model, x, device):
         return model(x, ForwardMode.EMBEDDINGS).cpu().numpy()
 
 def embeddings_already_saved(name):
-    return os.path.exists(f"output/embeddings/{name}.npy")
+    return os.path.exists(f"/data/output/embeddings/{name}.npy")
 
 def save_embeddings(name, embeddings):
-    os.makedirs("output/embeddings", exist_ok=True)
-    np.save(f"output/embeddings/{name}.npy", embeddings)
+    os.makedirs("/data/output/embeddings", exist_ok=True)
+    np.save(f"/data/output/embeddings/{name}.npy", embeddings)
 
 def get_class_samples(modality, dataset_name, val_json, train_json, dataset_root, device, label_to_index, logger):
     target_classes = CLASS_NAMES_PER_MODALITY[modality]
@@ -167,7 +167,7 @@ def get_class_samples(modality, dataset_name, val_json, train_json, dataset_root
             raise ValueError(f"Too few samples for class {cls}")
         combined_matches.extend(random.sample(matches, samples_per_class))
 
-    tmp_json = f"./output/tmp_combined_{modality.name}.json"
+    tmp_json = f"/data/output/tmp_combined_{modality.name}.json"
     json.dump(combined_data, open(tmp_json, "w"))
     dataset = JsonDataset(os.path.join(dataset_root, dataset_name), tmp_json, get_transform_fn(modality), label_to_index)
     loader = DataLoader(Subset(dataset, combined_matches), batch_size=len(combined_matches), shuffle=False)
@@ -175,7 +175,7 @@ def get_class_samples(modality, dataset_name, val_json, train_json, dataset_root
 
 # === t-SNE Plotting
 def plot_tsne_per_combo(name_prefix, save_dir):
-    folder = "output/embeddings"
+    folder = "/data/output/embeddings"
     all_embs, all_colors = [], []
 
     for modality in MODALITIES:
@@ -204,7 +204,7 @@ def generate_all_tsne_combo_charts(output_dir, only_clean, only_unibind):
 
 # === Main
 def main(args):
-    tsne_dir = os.path.join("output", "tsne_charts", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    tsne_dir = os.path.join("/data/output", "tsne_charts", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     logger = setup_logger(tsne_dir)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

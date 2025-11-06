@@ -5,7 +5,7 @@ set -e
 ROOT_DIR="/data/datasets"
 CKPT_DIR="./ckpts"
 CENTER_EMB_DIR="./centre_embs"
-OUTPUT_DIR="./output"
+OUTPUT_DIR="/data/output"
 
 # === Center Embedding Files ===
 CENTER_AUDIO="${CENTER_EMB_DIR}/audio_esc_center_embeddings.pkl"

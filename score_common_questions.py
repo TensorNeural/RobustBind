@@ -131,22 +131,22 @@ def analyze_disagreements(result_data, common_qids):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--clean_json', type=str, required=False,
-        default='output/llava/eval/vqa/2025-07-31_10-24/clean/unibind/vqa_results.json')
+        default='/data/output/llava/eval/vqa/2025-07-31_10-24/clean/unibind/vqa_results.json')
     parser.add_argument('--random_json', type=str, required=False,
-        default='output/llava/eval/vqa/2025-07-31_10-24/random/unibind/vqa_results.json')
+        default='/data/output/llava/eval/vqa/2025-07-31_10-24/random/unibind/vqa_results.json')
     parser.add_argument('--result_jsons', type=str, nargs='+', required=False,
         default=[
-            'output/llava/eval/vqa/2025-07-31_10-24/clean/unibind/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_10-24/clean/robustbind2/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_10-24/clean/robustbind4/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_09-08/eps2/unibind/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_09-08/eps2/robustbind2/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_09-08/eps2/robustbind4/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_09-08/eps4/unibind/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_09-08/eps4/robustbind2/vqa_results.json',
-            'output/llava/eval/vqa/2025-07-31_09-08/eps4/robustbind4/vqa_results.json'
+            '/data/output/llava/eval/vqa/2025-07-31_10-24/clean/unibind/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_10-24/clean/robustbind2/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_10-24/clean/robustbind4/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_09-08/eps2/unibind/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_09-08/eps2/robustbind2/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_09-08/eps2/robustbind4/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_09-08/eps4/unibind/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_09-08/eps4/robustbind2/vqa_results.json',
+            '/data/output/llava/eval/vqa/2025-07-31_09-08/eps4/robustbind4/vqa_results.json'
         ])
-    parser.add_argument('--output_dir', type=str, default='output/llava/eval/vqa/filtered')
+    parser.add_argument('--output_dir', type=str, default='/data/output/llava/eval/vqa/filtered')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
