@@ -125,6 +125,8 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
     )
 
     best_acc = -1.0
+    best_epoch = -1
+    best_epoch = -1
     modality = Modality(args.train_modality)
 
     # CSV for alignment validation (rank 0 only)
@@ -177,22 +179,11 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
             # Emit per-epoch alignment accuracy to TensorBoard
             writer.add_scalar("val/acc", acc, epoch + 1)
             writer.flush()
-            # Also append to session CSV
-            _append_csv(align_csv, [
-                datetime.utcnow().isoformat(),
-                str(getattr(args, 'session_timestamp', '')),
-                "alignment" + ("+frozen_lora" if getattr(args, 'align_robust', False) else ""),
-                args.model_type,
-                args.train_modality.value,
-                args.train_dataset_name,
-                args.val_dataset_name,
-                epoch + 1,
-                float(acc),
-                ""
-            ])
+            # Per-epoch CSV reporting disabled; only final result will be written
 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
+            best_epoch = epoch + 1
             # Internal best naming (unchanged), final copy below follows the exact final naming
             mode_suffix = "align_robust" if getattr(args, 'align_robust', False) else "align"
             best_name = f"best_{mode_suffix}_{args.train_modality.value}"
@@ -222,6 +213,19 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
     writer.close()
 
     if dist.get_rank() == 0:
+        # Append only the final/best result to session CSV
+        _append_csv(align_csv, [
+            datetime.utcnow().isoformat(),
+            str(getattr(args, 'session_timestamp', '')),
+            "alignment" + ("+frozen_lora" if getattr(args, 'align_robust', False) else ""),
+            args.model_type,
+            args.train_modality.value,
+            args.train_dataset_name,
+            args.val_dataset_name,
+            best_epoch,
+            float(best_acc),
+            ""
+        ])
         logger.info(f"[Align] Best alignment accuracy: {best_acc:.4f}")
     return best_acc, time.time() - run_start_time
 
@@ -423,24 +427,11 @@ def run_robust_training(
             # Emit per-epoch robust accuracy to TensorBoard
             writer.add_scalar("val/robust_acc", acc, epoch + 1)
             writer.flush()
-            # Append to session CSV
-            _append_csv(robust_csv, [
-                datetime.utcnow().isoformat(),
-                str(getattr(args, 'session_timestamp', '')),
-                f"robust/{args.robust_training_mode}",
-                args.model_type,
-                args.train_modality.value,
-                args.train_dataset_name,
-                args.val_dataset_name,
-                epoch + 1,
-                float(acc),
-                args.robust_epsilon_int,
-                args.robust_lora_rank if args.robust_training_mode == 'lora' else '',
-                args.robust_lora_alpha if args.robust_training_mode == 'lora' else '',
-            ])
+            # Per-epoch CSV reporting disabled; only final result will be written
 
         if dist.get_rank() == 0 and acc > best_acc:
             best_acc = acc
+            best_epoch = epoch + 1
             if args.robust_training_mode == "full_fine_tune":
                 # Copy to ./ckpts/robust_(modality)_full_finetune_epsN.pt
                 best_name = f"robust_{args.train_modality.value}_full_finetune_eps{args.robust_epsilon_int}"
@@ -466,6 +457,22 @@ def run_robust_training(
                     logger.warning(f"[Robust] Failed to copy best weights to ./ckpts: {e}")
 
     writer.close()
+    # Append only the final/best result to session CSV
+    if dist.get_rank() == 0:
+        _append_csv(robust_csv, [
+            datetime.utcnow().isoformat(),
+            str(getattr(args, 'session_timestamp', '')),
+            f"robust/{args.robust_training_mode}",
+            args.model_type,
+            args.train_modality.value,
+            args.train_dataset_name,
+            args.val_dataset_name,
+            best_epoch,
+            float(best_acc),
+            args.robust_epsilon_int,
+            args.robust_lora_rank if args.robust_training_mode == 'lora' else '',
+            args.robust_lora_alpha if args.robust_training_mode == 'lora' else '',
+        ])
     logger.info(f"[Robust] Best robust accuracy: {best_acc:.4f}")
     return best_acc, time.time() - run_start_time
 
