@@ -122,8 +122,8 @@ def render_npz_to_png(src_path, dst_path, width=224, height=224):
     try:
         ev = np.load(src_path)["event_data"]
         x, y, p = ev["x"], ev["y"], ev["p"]
-        x_norm = (x - x.min()) / (x.ptp() + 1e-5) * (width - 1)
-        y_norm = (y - y.min()) / (y.ptp() + 1e-5) * (height - 1)
+        x_norm = (x - x.min()) / (np.ptp(x) + 1e-5) * (width - 1)
+        y_norm = (y - y.min()) / (np.ptp(y) + 1e-5) * (height - 1)
         fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
         ax.set_xlim(0, width)
         ax.set_ylim(0, height)

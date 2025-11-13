@@ -288,6 +288,25 @@ def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
 
+def _attach_file_logger(log_path: str, level: int = logging.INFO) -> None:
+    """Attach a file handler to the module logger once per path."""
+    logger = LOGGER
+    # Avoid duplicate handlers for the same file
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler):
+            try:
+                if getattr(h, "baseFilename", None) == os.path.abspath(log_path):
+                    return
+            except Exception:
+                pass
+    ensure_dir(os.path.dirname(log_path))
+    fh = logging.FileHandler(log_path)
+    fh.setLevel(level)
+    fmt = logging.Formatter("%(asctime)s | %(processName)s | %(levelname)s | %(name)s: %(message)s", datefmt="%H:%M:%S")
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -317,11 +336,15 @@ class Task:
     model_variant: str = "original"  # "original" | "robust"
     robust_level: Optional[str] = None  # "eps2" | "eps4"
     lora_weights: Optional[str] = None
+    # Optional explicit aligner weights path (alignment head)
+    aligner_weights: Optional[str] = None
     # Required when attack_enabled=True to compute logits
     centre_emb_path: Optional[str] = None
     # Combined plot support
     plot_name: Optional[str] = None  # used when plot_mode == "combined"
     combine: Optional[List[Dict[str, Any]]] = None  # list of per-entry dicts
+    # Combined mode color sharing control: if True, share color by modality instead of class
+    combine_color_by_modality: bool = False
     # TSNE params override per task (optional)
     tsne: Optional[Dict[str, Any]] = None
 
@@ -342,6 +365,7 @@ class TaskEntry:
     model_variant: str = "original"
     robust_level: Optional[str] = None
     lora_weights: Optional[str] = None
+    aligner_weights: Optional[str] = None
     centre_emb_path: Optional[str] = None
     tsne: Optional[Dict[str, Any]] = None
 
@@ -417,6 +441,8 @@ def build_unibind(
     label_to_index: Optional[Dict[str, int]] = None,
     use_lora: bool = False,
     lora_weights: Optional[str] = None,
+    use_modality_head_mlp: bool = False,
+    modality_head_mlp_weights: Optional[str] = None,
 ) -> UniBindClassifier:
     model = UniBindClassifier(
         device=device,
@@ -428,6 +454,8 @@ def build_unibind(
         use_lora=use_lora,
         lora_weights=lora_weights,
         use_flash_attention=use_flash_attention,
+        use_modality_head_mlp=use_modality_head_mlp,
+        modality_head_mlp_weights=modality_head_mlp_weights,
     )
     model.eval()
     return model.to(device)
@@ -506,8 +534,19 @@ def plot_tsne_per_class(
     n = X.shape[0]
 
     plt.figure(figsize=(7, 6))
-    plt.scatter(coords[:n, 0], coords[:n, 1], s=50, c="#1f77b4", alpha=0.65, label="samples")
-    plt.scatter(coords[n:, 0], coords[n:, 1], s=130, c="#ff7f0e", marker="*", edgecolors="k", linewidths=0.7, label="text: " + cls)
+    plt.scatter(coords[:n, 0], coords[:n, 1], s=50, c="#1f77b4", alpha=0.65, label=f"{dataset_name}/{cls}")
+    # Text embedding point with transparency and modality/class annotation
+    plt.scatter(
+        coords[n:, 0],
+        coords[n:, 1],
+        s=130,
+        c="#ff7f0e",
+        marker="*",
+        edgecolors="k",
+        linewidths=0.7,
+        alpha=0.8,
+        label=f"{modality.value}/{cls}",
+    )
     plt.title(f"t-SNE: {dataset_name} [{modality.name}] — {cls}")
     plt.legend(loc="best")
     ensure_dir(out_dir)
@@ -524,20 +563,32 @@ def process_task(
     use_flash_attention: bool,
     base_output_dir: str,
     perplexity: int,
+    session_tsne_dir: str,
 ) -> None:
+    # Use the shared, pre-created session t-SNE directory
+    tsne_child_dir = session_tsne_dir
     # Handle combined plot mode
     if task.plot_mode == "combined":
         if not task.combine or not isinstance(task.combine, list):
             raise ValueError("For plot_mode='combined', 'combine' must be a list of entries.")
 
+        # For combined plots, write under a dedicated subdir within the shared session dir
+        combined_sub = slugify(task.plot_name) if task.plot_name else "combined"
+        tsne_child_dir = os.path.join(session_tsne_dir, combined_sub)
+        ensure_dir(tsne_child_dir)
+        _attach_file_logger(os.path.join(tsne_child_dir, "run.log"))
+        LOGGER.info(f"Initialized combined t-SNE output dir: {tsne_child_dir}")
+
         all_embs: List[np.ndarray] = []
         all_colors: List[str] = []
-        text_points: List[tuple] = []  # (text_emb, color, class_label)
-        # Assign colors per CLASS (same class shares the same color across datasets/modalities)
+        text_points: List[tuple] = []  # (text_emb, color, class_label, modality_value)
+        # Assign colors per CLASS (default) or per MODALITY if configured
         palette = list(plt.get_cmap('tab10').colors) + list(plt.get_cmap('tab20').colors)
         color_cycle = cycle(palette)
         class_color: Dict[str, str] = {}
+        modality_color: Dict[str, str] = {}
         seen_text_class: set = set()
+        sample_legend: Dict[str, tuple] = {}
 
         for entry in task.combine:
             te = TaskEntry(
@@ -555,6 +606,7 @@ def process_task(
                 model_variant=entry.get("model_variant", "original"),
                 robust_level=entry.get("robust_level"),
                 lora_weights=entry.get("lora_weights"),
+                aligner_weights=entry.get("aligner_weights") or entry.get("alignment_weights"),
                 centre_emb_path=entry.get("centre_emb_path"),
                 tsne=entry.get("tsne"),
             )
@@ -578,24 +630,29 @@ def process_task(
             centre_labels = None
             if te.attack_enabled and te.centre_emb_path:
                 centre_emb, centre_labels, label_to_index, _ = load_label_mapping(te.centre_emb_path, device)
+            # Enable LoRA only if robust; aligner head is separate and does NOT imply LoRA
             use_lora = te.model_variant == "robust"
             # Select default lora by robust_level if not provided
+            # Resolve aligner (alignment head) vs LoRA weights separately.
+            aligner_w = te.aligner_weights  # align_<modality>.pt or align_robust_<modality>_lora_rXaY_epsZ.pt
             lora_w = te.lora_weights
             if use_lora and (lora_w is None) and te.robust_level:
                 lora_w = LORA_WEIGHTS_MAP.get(modality.value, {}).get(te.robust_level)
             # Validate LoRA path exists; if missing, fall back to original gracefully
             if use_lora and (not lora_w or not os.path.exists(lora_w)):
-                print(
-                    "[WARN] "
+                msg = (
                     f"LoRA weights not found for {modality.name} (requested level='{te.robust_level}'). "
                     f"Path: {lora_w}. Falling back to original model."
                 )
+                print(f"[WARN] {msg}")
+                LOGGER.warning(msg)
                 use_lora = False
                 lora_w = None
 
             model = build_unibind(modality, device, pretrain_weights, use_flash_attention,
                                   centre_embeddings=centre_emb, centre_labels=centre_labels,
-                                  label_to_index=label_to_index, use_lora=use_lora, lora_weights=lora_w)
+                                  label_to_index=label_to_index, use_lora=use_lora, lora_weights=lora_w,
+                                  use_modality_head_mlp=bool(aligner_w), modality_head_mlp_weights=aligner_w)
 
             emb_dir = os.path.join(base_output_dir, "embeddings", f"{te.dataset_name}-{modality.name}")
             ensure_dir(emb_dir)
@@ -603,11 +660,17 @@ def process_task(
             for cls, paths in cls2paths.items():
                 if not paths:
                     continue
-                # Resolve color for this class
+                # Compute a stable class key and resolve color for this entry (by class or by modality)
                 cls_key = cls.strip().lower()
-                if cls_key not in class_color:
-                    class_color[cls_key] = tuple(next(color_cycle))
-                color = class_color[cls_key]
+                if getattr(task, 'combine_color_by_modality', False):
+                    mod_key = modality.value
+                    if mod_key not in modality_color:
+                        modality_color[mod_key] = tuple(next(color_cycle))
+                    color = modality_color[mod_key]
+                else:
+                    if cls_key not in class_color:
+                        class_color[cls_key] = tuple(next(color_cycle))
+                    color = class_color[cls_key]
                 transform = get_transform_fn(modality)
                 with torch.no_grad():
                     x = transform(paths, device=device)
@@ -637,13 +700,20 @@ def process_task(
                         "attack_epsilon": te.attack_epsilon,
                         "model_variant": te.model_variant,
                         "lora_weights": te.lora_weights,
+                        "aligner_weights": aligner_w,
                         "created": datetime.utcnow().isoformat() + "Z",
                     }, f, indent=2)
-                print(f"[INFO] Cached embeddings for class='{cls}' in {emb_dir}")
+                msg = f"Cached embeddings for class='{cls}' in {emb_dir}"
+                print(f"[INFO] {msg}")
+                LOGGER.info(msg)
                 # Keep one text embedding per class label to overlay and legend
                 if cls_key not in seen_text_class:
-                    text_points.append((text_emb, color, cls))
+                    text_points.append((text_emb, color, cls, modality.value))
                     seen_text_class.add(cls_key)
+                # Track sample legend entry as dataset/class
+                lbl = f"{te.dataset_name}/{cls}"
+                if lbl not in sample_legend:
+                    sample_legend[lbl] = color
 
         if not all_embs:
             return
@@ -655,21 +725,33 @@ def process_task(
         plt.figure(figsize=(9, 7))
         plt.scatter(coords[:, 0], coords[:, 1], c=all_colors, s=36, alpha=0.65, linewidths=0)
 
-        # Project text embeddings with the same TSNE fit? Simpler: append and re-run for alignment
+        # Overlay text embeddings with modality/class labels
         if text_points and coords_text is not None:
-            for (pt, color, label), (cx, cy) in zip(text_points, coords_text):
-                plt.scatter([cx], [cy], c=[color], marker='*', s=140, edgecolors='k', linewidths=0.7, label=label)
+            for (pt, color, cls_label, modality_value), (cx, cy) in zip(text_points, coords_text):
+                plt.scatter([cx], [cy], c=[color], marker='*', s=140, edgecolors='k', linewidths=0.7, alpha=0.8, label=f"{modality_value}/{cls_label}")
 
-        title = task.plot_name or f"combined_tsne_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        title = task.plot_name or "combined_tsne"
         plt.title(title)
-        plt.legend(loc='best', fontsize=8)
-        tsne_dir = os.path.join(base_output_dir, "tsne", "combined")
-        ensure_dir(tsne_dir)
-        out_path = os.path.join(tsne_dir, f"{slugify(title)}.png")
+        # Build legend: include sample entries as dataset/class plus any text entries
+        from matplotlib.lines import Line2D
+        ax = plt.gca()
+        handles, labels = ax.get_legend_handles_labels()
+        sample_handles: List[Line2D] = []
+        sample_labels: List[str] = []
+        for lbl in sorted(sample_legend.keys()):
+            c = sample_legend[lbl]
+            sample_handles.append(Line2D([0], [0], marker='o', color='w', label=lbl, markerfacecolor=c, markersize=6, alpha=0.65, linestyle='None'))
+            sample_labels.append(lbl)
+        handles = sample_handles + handles
+        labels = sample_labels + labels
+        plt.legend(handles, labels, loc='best', fontsize=8)
+        out_path = os.path.join(tsne_child_dir, f"{slugify(title)}.png")
         plt.tight_layout()
         plt.savefig(out_path, dpi=300)
         plt.close()
-        print(f"[INFO] Saved combined t-SNE figure: {out_path}")
+        msg = f"Saved combined t-SNE figure: {out_path}"
+        print(f"[INFO] {msg}")
+        LOGGER.info(msg)
         return
 
     # Default: per-class individual plots
@@ -685,29 +767,37 @@ def process_task(
     if task.attack_enabled and task.centre_emb_path:
         centre_emb, centre_labels, label_to_index, _ = load_label_mapping(task.centre_emb_path, device)
 
+    # Enable LoRA only if model_variant == robust (aligner head is separate)
     use_lora = task.model_variant == "robust"
+    aligner_w = task.aligner_weights
+    # Resolve LoRA weights for single-task mode
     lora_w = task.lora_weights
     if use_lora and (lora_w is None) and task.robust_level:
         lora_w = LORA_WEIGHTS_MAP.get(modality.value, {}).get(task.robust_level)
     # Validate LoRA path exists; if missing, fall back to original gracefully
     if use_lora and (not lora_w or not os.path.exists(lora_w)):
-        print(
-            "[WARN] "
+        msg = (
             f"LoRA weights not found for {modality.name} (requested level='{task.robust_level}'). "
             f"Path: {lora_w}. Falling back to original model."
         )
+        print(f"[WARN] {msg}")
+        LOGGER.warning(msg)
         use_lora = False
         lora_w = None
 
     model = build_unibind(modality, device, pretrain_weights, use_flash_attention,
                           centre_embeddings=centre_emb, centre_labels=centre_labels,
-                          label_to_index=label_to_index, use_lora=use_lora, lora_weights=lora_w)
+                          label_to_index=label_to_index, use_lora=use_lora, lora_weights=lora_w,
+                          use_modality_head_mlp=bool(aligner_w), modality_head_mlp_weights=aligner_w)
 
     # Output structure
     emb_dir = os.path.join(base_output_dir, "embeddings", f"{task.dataset_name}-{modality.name}")
-    tsne_dir = os.path.join(base_output_dir, "tsne", f"{task.dataset_name}-{modality.name}")
     ensure_dir(emb_dir)
-    ensure_dir(tsne_dir)
+    # For per-class plots, create a task-specific subdir within the shared session dir
+    tsne_child_dir = os.path.join(session_tsne_dir, f"{task.dataset_name}-{modality.name}")
+    ensure_dir(tsne_child_dir)
+    _attach_file_logger(os.path.join(tsne_child_dir, "run.log"))
+    LOGGER.info(f"Initialized per-class t-SNE output dir: {tsne_child_dir}")
 
     for cls, paths in tqdm(cls2paths.items(), desc=f"{task.dataset_name} [{modality.name}]", ncols=80):
         if not paths:
@@ -742,27 +832,42 @@ def process_task(
             "attack_epsilon": task.attack_epsilon,
             "model_variant": task.model_variant,
             "lora_weights": task.lora_weights,
+            "aligner_weights": aligner_w,
             "created": datetime.utcnow().isoformat() + "Z",
         }
         with open(os.path.join(emb_dir, f"{cls_slug}_meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
-        print(f"[INFO] Cached embeddings for class='{cls}' in {emb_dir}")
+        msg = f"Cached embeddings for class='{cls}' in {emb_dir}"
+        print(f"[INFO] {msg}")
+        LOGGER.info(msg)
 
         # Plot TSNE per class: fit on samples, then place text
         tsne_cfg = task.tsne or {}
         coords_samples, coords_text = _fit_tsne_and_place_text(sample_emb, text_emb[None, :], tsne_cfg, perplexity)
         n = sample_emb.shape[0]
         plt.figure(figsize=(7, 6))
-        plt.scatter(coords_samples[:, 0], coords_samples[:, 1], s=50, c="#1f77b4", alpha=0.65, label="samples")
+        plt.scatter(coords_samples[:, 0], coords_samples[:, 1], s=50, c="#1f77b4", alpha=0.65, label=f"{task.dataset_name}/{cls}")
         if coords_text is not None:
-            plt.scatter(coords_text[:, 0], coords_text[:, 1], s=130, c="#ff7f0e", marker="*", edgecolors="k", linewidths=0.7, label="text: " + cls)
+            plt.scatter(
+                coords_text[:, 0],
+                coords_text[:, 1],
+                s=130,
+                c="#ff7f0e",
+                marker="*",
+                edgecolors="k",
+                linewidths=0.7,
+                alpha=0.8,
+                label=f"{modality.value}/{cls}",
+            )
         plt.title(f"t-SNE: {task.dataset_name} [{modality.name}] — {cls}")
         plt.legend(loc="best")
-        out_path = os.path.join(tsne_dir, f"{slugify(cls)}.png")
+        out_path = os.path.join(tsne_child_dir, f"{slugify(cls)}.png")
         plt.tight_layout()
         plt.savefig(out_path, dpi=300)
         plt.close()
-        print(f"[INFO] Saved t-SNE: {out_path}")
+        msg = f"Saved t-SNE: {out_path}"
+        print(f"[INFO] {msg}")
+        LOGGER.info(msg)
 
 
 def _setup_logging(level: str) -> None:
@@ -778,7 +883,7 @@ def _setup_logging(level: str) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Sample UniBind embeddings and plot per-class t-SNE with text (config-only)")
     # Multi-task config (required)
-    p.add_argument("--config", type=str, default="tools/vis_configs/sample.json", help="Path to JSON config with an array of tasks")
+    p.add_argument("--config", type=str, default="tools/vis_configs/robustbind_align.json", help="Path to JSON config with an array of tasks")
 
     # Model + compute
     p.add_argument("--pretrain-weights", type=str, default="./ckpts/pretrained_weights_flash_atten_image_patchs.pt")
@@ -815,9 +920,11 @@ def load_tasks_from_config(cfg_path: str) -> List[Task]:
             model_variant=item.get("model_variant", "original"),
             robust_level=item.get("robust_level"),
             lora_weights=item.get("lora_weights"),
+            aligner_weights=item.get("aligner_weights") or item.get("alignment_weights"),
             centre_emb_path=item.get("centre_emb_path"),
             plot_name=item.get("plot_name"),
             combine=item.get("combine"),
+            combine_color_by_modality=bool(item.get("combine_color_by_modality", False)),
             tsne=item.get("tsne"),
         ))
     return tasks
@@ -835,6 +942,7 @@ def run_task_on_gpu(
     base_output_dir: str,
     perplexity: int,
     seed: int,
+    session_tsne_dir: str,
 ):
     try:
         # Set default CUDA device for this process
@@ -850,6 +958,7 @@ def run_task_on_gpu(
             use_flash_attention=use_flash_attention,
             base_output_dir=base_output_dir,
             perplexity=perplexity,
+            session_tsne_dir=session_tsne_dir,
         )
         print(f"[INFO] Completed task on GPU {gpu_id}: {task.dataset_name}-{task.modality}")
     except Exception as e:
@@ -889,12 +998,18 @@ def main():
     gpu_ids = list(range(num_available))
     print(f"[INFO] Available GPUs: {gpu_ids}")
 
+    # Create shared session timestamp directory BEFORE any task executes
+    session_timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    session_root = os.path.join(args.output_dir, "tsne", session_timestamp)
+    ensure_dir(session_root)
+    print(f"[INFO] Created shared session directory: {session_root}")
+
     # Map tasks to GPUs round-robin
     jobs = []
     for i, t in enumerate(tasks):
         gpu_id = gpu_ids[i % len(gpu_ids)]
         print(f"[INFO] Assign task {i}: {t.dataset_name}-{t.modality} -> GPU {gpu_id}")
-        jobs.append((t, gpu_id, args.pretrain_weights, args.use_flash_attention, args.output_dir, args.perplexity, args.seed))
+        jobs.append((t, gpu_id, args.pretrain_weights, args.use_flash_attention, args.output_dir, args.perplexity, args.seed, session_root))
 
     # Parallel execution: one process per GPU (or per task if fewer tasks)
     procs = min(len(gpu_ids), len(jobs))

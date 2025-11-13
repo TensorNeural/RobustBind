@@ -256,8 +256,8 @@ def _accumulate_histogram(x_coords, y_coords, polarities, height, width):
     return positive_events, negative_events
 
 def _normalize_coords(x, y, size):
-    x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1)).astype(np.int32)
-    y = ((y - y.min()) / (y.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+    x = ((x - x.min()) / (np.ptp(x) + 1e-5) * (size - 1)).astype(np.int32)
+    y = ((y - y.min()) / (np.ptp(y) + 1e-5) * (size - 1)).astype(np.int32)
     return x, y
 
 def render_event_to_frames(event_abs_path: Path, target_size: int = 224, T: int = 8,
@@ -293,7 +293,7 @@ def render_event_to_frames(event_abs_path: Path, target_size: int = 224, T: int 
 
     frame_paths: List[Path] = []
     if group_by == "time":
-        t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+        t_norm = (t - t.min()) / (np.ptp(t) + 1e-5)
         edges = np.linspace(0.0, 1.0, T + 1, dtype=np.float32)
         fidx = 0
         for i in range(T):
@@ -744,10 +744,10 @@ def main():
     parser.add_argument("--model", default="gemini-2.5-flash-lite")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of entries per dataset (for testing).")
     parser.add_argument("--skip_modalities", nargs="*", default=[
-        # "image",
-        # "audio",
-        # "thermal",
-        # "video",
+        "image",
+        "audio",
+        "thermal",
+        "video",
         # "event"
         ])
     parser.add_argument("--per_process_threads", type=int, default=1)

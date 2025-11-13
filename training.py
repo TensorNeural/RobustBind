@@ -12,7 +12,7 @@ from transform import unnormalize_inplace, normalize_inplace
 from loss import l2_loss, ce_loss
 import torch.distributed as dist
 
-from utils.utils import gen_label, loss_fun
+from utils.utils import gen_label, loss_fun, all_gather_batch_with_grad, all_gather_batch
 from imagebind.imagebind_model import ModalityType
 
 def train_alignment_epoch(
@@ -26,6 +26,11 @@ def train_alignment_epoch(
     total_epochs: int,
     writer: SummaryWriter,
     modality: Modality,
+    align_temperature: float = 1.0,
+    align_symmetric: bool = False,
+    align_all_gather: bool = False,
+    align_label_smoothing: float = 0.0,
+    align_mask_same_label: bool = False,
 ):
     epoch_start_time = time.time()
     step_base = epoch * len(data_loader)
@@ -43,6 +48,9 @@ def train_alignment_epoch(
         # to device
         inputs_tensor = inputs_tensor.to(device, non_blocking=True)
         descriptions = descriptions.to(device, non_blocking=True)
+        labels_tensor = batch.get('labels', None)
+        if labels_tensor is not None:
+            labels_tensor = labels_tensor.to(device, non_blocking=True)
 
         merged_inputs = {
             MODALITY_MAP[modality]: inputs_tensor,
@@ -52,10 +60,47 @@ def train_alignment_epoch(
         with GpuMemoryTracker(logger):
             text_embeddings, modality_embeddings = model(merged_inputs)
 
+        # Optionally gather negatives across GPUs for stronger contrast
+        if align_all_gather and dist.is_initialized() and dist.get_world_size() > 1:
+            text_embeddings, modality_embeddings = all_gather_batch_with_grad([
+                text_embeddings, modality_embeddings
+            ])
+            # Keep labels in sync with embeddings if masking is enabled
+            if align_mask_same_label and labels_tensor is not None:
+                (labels_tensor,) = all_gather_batch([labels_tensor])
+
         with GpuMemoryTracker(logger):
             logits = modality_embeddings @ text_embeddings.t()
+            # Temperature scaling (divide by tau)
+            if align_temperature is not None and align_temperature > 0:
+                logits = logits / align_temperature
             labels = gen_label(logits, device)
-            loss_val = loss_fun(logits, labels)
+            # Optionally mask negatives that share the same class label
+            if align_mask_same_label and labels_tensor is not None:
+                B = logits.size(0)
+                diag = torch.eye(B, dtype=torch.bool, device=device)
+                same = labels_tensor.unsqueeze(1) == labels_tensor.unsqueeze(0)
+                neg_same = same & (~diag)
+                logits = logits.masked_fill(neg_same, -1e9)
+
+            if align_symmetric:
+                # Text->modality direction
+                logits_t2m = text_embeddings @ modality_embeddings.t()
+                if align_temperature is not None and align_temperature > 0:
+                    logits_t2m = logits_t2m / align_temperature
+                # Use label smoothing if provided; else default loss_fun
+                if align_label_smoothing and align_label_smoothing > 0.0:
+                    loss_m2t = F.cross_entropy(logits, labels, reduction='mean', label_smoothing=align_label_smoothing)
+                    loss_t2m = F.cross_entropy(logits_t2m, labels, reduction='mean', label_smoothing=align_label_smoothing)
+                else:
+                    loss_m2t = loss_fun(logits, labels)
+                    loss_t2m = loss_fun(logits_t2m, labels)
+                loss_val = 0.5 * (loss_m2t + loss_t2m)
+            else:
+                if align_label_smoothing and align_label_smoothing > 0.0:
+                    loss_val = F.cross_entropy(logits, labels, reduction='mean', label_smoothing=align_label_smoothing)
+                else:
+                    loss_val = loss_fun(logits, labels)
 
         optimizer.zero_grad(set_to_none=True)
         loss_val.backward()
@@ -67,9 +112,9 @@ def train_alignment_epoch(
         lr = optimizer.param_groups[0]['lr']
         logger.info(
             f"[ALIGN] Epoch={epoch+1}/{total_epochs}, Step={batch_idx+1}/{len(data_loader)}, "
-            f"LR={lr:.6f}, Loss={loss_val.item():.6f}"
+            f"LR={lr:.6f}, Loss={loss_val.item():.6f}, tau={align_temperature:.4f}, sym={align_symmetric}, gather={align_all_gather}, ls={align_label_smoothing}, mask_same={align_mask_same_label}"
         )
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and writer is not None:
             writer.add_scalar("alignment/loss", loss_val.item(), step_total)
             writer.add_scalar("alignment/lr", lr, step_total)
 
@@ -193,10 +238,11 @@ def train_robust_epoch(
                     f"CleanCos={clean_cos.item():.4f}, RobustCos={robust_cos.item():.4f}, "
                     f"AvgCleanCos={cos_sim_meter.avg:.4f}, AvgRobustCos={rcos_sim_meter.avg:.4f}"
                 )
-                writer.add_scalar("train/loss", loss_val.item(), step_total)
-                writer.add_scalar("train/clean_cos", clean_cos.item(), step_total)
-                writer.add_scalar("train/robust_cos", robust_cos.item(), step_total)
-                writer.add_scalar("train/lr", lr, step_total)
+                if dist.get_rank() == 0 and writer is not None:
+                    writer.add_scalar("train/loss", loss_val.item(), step_total)
+                    writer.add_scalar("train/clean_cos", clean_cos.item(), step_total)
+                    writer.add_scalar("train/robust_cos", robust_cos.item(), step_total)
+                    writer.add_scalar("train/lr", lr, step_total)
 
             elif train_loss_type == 'ce':
                 final_logits_clean, _ = model_train(inputs_tensor, mode=ForwardMode.LOGITS)
@@ -210,10 +256,11 @@ def train_robust_epoch(
                     f"CleanAcc={clean_acc:.2f}, RobustAcc={robust_acc:.2f}, "
                     f"AvgCleanAcc={acc_meter.avg:.2f}, AvgRobustAcc={racc_meter.avg:.2f}"
                 )
-                writer.add_scalar("train/loss", loss_val.item(), step_total)
-                writer.add_scalar("train/clean_acc", clean_acc, step_total)
-                writer.add_scalar("train/robust_acc", robust_acc, step_total)
-                writer.add_scalar("train/lr", lr, step_total)
+                if dist.get_rank() == 0 and writer is not None:
+                    writer.add_scalar("train/loss", loss_val.item(), step_total)
+                    writer.add_scalar("train/clean_acc", clean_acc, step_total)
+                    writer.add_scalar("train/robust_acc", robust_acc, step_total)
+                    writer.add_scalar("train/lr", lr, step_total)
 
         del inputs_tensor, lbl, inp_unorm, adv_inp, loss_val
         torch.cuda.empty_cache()

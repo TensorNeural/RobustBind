@@ -65,9 +65,9 @@ declare -A MODEL_TYPE_TO_MODALITIES=(
 ALIGN_EPOCHS=50  # default epochs if not overridden per-dataset
 
 declare -A ALIGN_TRAIN_MODALITY_TO_DATASET=(
-  [image]="ImageNet-1K"
-  [video]="MSR-VTT"
-  [audio]="ESC-50"
+  # [image]="ImageNet-1K"
+  # [video]="MSR-VTT"
+  # [audio]="ESC-50"
   [thermal]="LLVIP"
   [event]="N-Caltech-101"
 )
@@ -81,7 +81,7 @@ declare -A ALIGN_VAL_MODALITY_TO_DATASET=(
 )
 
 declare -A ALIGN_DATASET_TO_BATCH_SIZE=(
-  [ImageNet-1K]=2000
+  [ImageNet-1K]=512
   [MSR-VTT]=200
   [ESC-50]=500
   [LLVIP]=2000
@@ -121,10 +121,10 @@ declare -A ALIGN_VAL_JSON_MAP=(
 )
 
 declare -A ALIGN_DATASET_TO_EPOCHS=(
-  [ImageNet-1K]=6
+  [ImageNet-1K]=50
   [MSR-VTT]=30
   [ESC-50]=100
-  [LLVIP]=8
+  [LLVIP]=100
   [N-Caltech-101]=25
 )
 
@@ -140,7 +140,7 @@ declare -A ALIGN_EMB_SUFFIX_MAP=(
 
 # Robust config
 # ROBUST_EPSILONS=(2 4)
-ROBUST_EPSILONS=(2)
+ROBUST_EPSILONS=(2 4)
 ROBUST_LORA_RANKS=(
   4 
   # 4 
@@ -296,120 +296,120 @@ declare -A ROBUST_VAL_EMB_SUFFIX_MAP=(
 
 # Robust runs
 # --- Robust notifications: start ---
-ROBUST_START_EPOCH=$(date +%s)
-post_discord "🚦 Robust started\n• **Session:** \`${SESSION_TIMESTAMP}\`"
+# ROBUST_START_EPOCH=$(date +%s)
+# post_discord "🚦 Robust started\n• **Session:** \`${SESSION_TIMESTAMP}\`"
 
-for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
-  for modality in ${MODEL_TYPE_TO_MODALITIES[$model_type]}; do
-    train_dataset="${ROBUST_TRAIN_MODALITY_TO_DATASET[$modality]}"; [[ -z "$train_dataset" ]] && continue
-    val_dataset="${ROBUST_VAL_MODALITY_TO_DATASET[$modality]}"; [[ -z "$val_dataset" ]] && continue
+# for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
+#   for modality in ${MODEL_TYPE_TO_MODALITIES[$model_type]}; do
+#     train_dataset="${ROBUST_TRAIN_MODALITY_TO_DATASET[$modality]}"; [[ -z "$train_dataset" ]] && continue
+#     val_dataset="${ROBUST_VAL_MODALITY_TO_DATASET[$modality]}"; [[ -z "$val_dataset" ]] && continue
 
-    train_bs="${ROBUST_DATASET_TO_BATCH_SIZE[$train_dataset]}"
-    val_bs="${ROBUST_DATASET_TO_BATCH_SIZE[$val_dataset]}"
-    train_max="${ROBUST_TRAIN_MAX_SAMPLES_MAP[$train_dataset]}"
-    val_max="${ROBUST_VAL_MAX_SAMPLES_MAP[$val_dataset]}"
-    train_json="${ROBUST_TRAIN_JSON_MAP[$train_dataset]}"
-    val_json="${ROBUST_VAL_JSON_MAP[$val_dataset]}"
+#     train_bs="${ROBUST_DATASET_TO_BATCH_SIZE[$train_dataset]}"
+#     val_bs="${ROBUST_DATASET_TO_BATCH_SIZE[$val_dataset]}"
+#     train_max="${ROBUST_TRAIN_MAX_SAMPLES_MAP[$train_dataset]}"
+#     val_max="${ROBUST_VAL_MAX_SAMPLES_MAP[$val_dataset]}"
+#     train_json="${ROBUST_TRAIN_JSON_MAP[$train_dataset]}"
+#     val_json="${ROBUST_VAL_JSON_MAP[$val_dataset]}"
 
-    train_emb_suffix="${ROBUST_TRAIN_EMB_SUFFIX_MAP[$train_dataset]}"
-    val_emb_suffix="${ROBUST_VAL_EMB_SUFFIX_MAP[$val_dataset]}"
+#     train_emb_suffix="${ROBUST_TRAIN_EMB_SUFFIX_MAP[$train_dataset]}"
+#     val_emb_suffix="${ROBUST_VAL_EMB_SUFFIX_MAP[$val_dataset]}"
 
-    if [[ -n "$train_emb_suffix" ]]; then
-      train_emb_path="./centre_embs/${modality}_${train_emb_suffix}_center_embeddings.pkl"
-      TRAIN_CENTER_ARG=(--train_center_emb "$train_emb_path")
-    else
-      TRAIN_CENTER_ARG=()
-    fi
+#     if [[ -n "$train_emb_suffix" ]]; then
+#       train_emb_path="./centre_embs/${modality}_${train_emb_suffix}_center_embeddings.pkl"
+#       TRAIN_CENTER_ARG=(--train_center_emb "$train_emb_path")
+#     else
+#       TRAIN_CENTER_ARG=()
+#     fi
 
-    if [[ -n "$val_emb_suffix" ]]; then
-      val_emb_path="./centre_embs/${modality}_${val_emb_suffix}_center_embeddings.pkl"
-      VAL_CENTER_ARG=(--val_center_emb "$val_emb_path")
-    else
-      echo "[WARN] No val emb suffix for $val_dataset ($modality); skipping run (val centers required)." >&2
-      continue
-    fi
+#     if [[ -n "$val_emb_suffix" ]]; then
+#       val_emb_path="./centre_embs/${modality}_${val_emb_suffix}_center_embeddings.pkl"
+#       VAL_CENTER_ARG=(--val_center_emb "$val_emb_path")
+#     else
+#       echo "[WARN] No val emb suffix for $val_dataset ($modality); skipping run (val centers required)." >&2
+#       continue
+#     fi
 
-    for eps in "${ROBUST_EPSILONS[@]}"; do
-      for mode in "${ROBUST_MODES[@]}"; do
-        if [[ "$mode" == "lora" ]]; then
-          for rank in "${ROBUST_LORA_RANKS[@]}"; do
-            for alpha in "${ROBUST_LORA_ALPHAS[@]}"; do
-              torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
-                --training_mode robust \
-                --model_type "$model_type" \
-                --train_modality "$modality" \
-                --val_modality "$modality" \
-                --train_dataset_name "$train_dataset" \
-                --val_dataset_name "$val_dataset" \
-                --train_dataset_root "/data/datasets/$train_dataset" \
-                --val_dataset_root "/data/datasets/$val_dataset" \
-                --train_json "$train_json" \
-                --val_json "$val_json" \
-                --pretrain_weights "$PRETRAIN_WEIGHTS" \
-                "${TRAIN_CENTER_ARG[@]}" \
-                "${VAL_CENTER_ARG[@]}" \
-                --train_batch_size "$train_bs" \
-                --val_batch_size "$val_bs" \
-                --num_workers "$NUM_WORKERS" \
-                --train_max_samples "$train_max" \
-                --val_max_samples "$val_max" \
-                --robust_train_attack_loss l2 \
-                --robust_val_attack_loss ce \
-                --robust_train_loss l2 \
-                --robust_lora_rank "$rank" \
-                --robust_lora_alpha "$alpha" \
-                --robust_epsilon "$eps" \
-                --robust_training_mode "$mode" \
-                --epochs "$ROBUST_EPOCHS" \
-                --use_flash_attention \
-                \
-                --session_output_dir "$SESSION_OUTPUT_DIR" \
-                --session_timestamp "$SESSION_TIMESTAMP" \
-                --tensorboard_root "$TENSORBOARD_ROOT"
-            done
-          done
-        else
-          torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
-            --training_mode robust \
-            --model_type "$model_type" \
-            --train_modality "$modality" \
-            --val_modality "$modality" \
-            --train_dataset_name "$train_dataset" \
-            --val_dataset_name "$val_dataset" \
-            --train_dataset_root "/data/datasets/$train_dataset" \
-            --val_dataset_root "/data/datasets/$val_dataset" \
-            --train_json "$train_json" \
-            --val_json "$val_json" \
-            --pretrain_weights "$PRETRAIN_WEIGHTS" \
-            "${TRAIN_CENTER_ARG[@]}" \
-            "${VAL_CENTER_ARG[@]}" \
-            --train_batch_size "$train_bs" \
-            --val_batch_size "$val_bs" \
-            --num_workers "$NUM_WORKERS" \
-            --train_max_samples "$train_max" \
-            --val_max_samples "$val_max" \
-            --robust_train_attack_loss l2 \
-            --robust_val_attack_loss ce \
-            --robust_train_loss l2 \
-            --robust_epsilon "$eps" \
-            --robust_training_mode "$mode" \
-            --epochs "$ROBUST_EPOCHS" \
-            --use_flash_attention \
-            \
-            --session_output_dir "$SESSION_OUTPUT_DIR" \
-            --session_timestamp "$SESSION_TIMESTAMP" \
-            --tensorboard_root "$TENSORBOARD_ROOT"
-        fi
-      done
-    done
-  done
-done
+#     for eps in "${ROBUST_EPSILONS[@]}"; do
+#       for mode in "${ROBUST_MODES[@]}"; do
+#         if [[ "$mode" == "lora" ]]; then
+#           for rank in "${ROBUST_LORA_RANKS[@]}"; do
+#             for alpha in "${ROBUST_LORA_ALPHAS[@]}"; do
+#               torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
+#                 --training_mode robust \
+#                 --model_type "$model_type" \
+#                 --train_modality "$modality" \
+#                 --val_modality "$modality" \
+#                 --train_dataset_name "$train_dataset" \
+#                 --val_dataset_name "$val_dataset" \
+#                 --train_dataset_root "/data/datasets/$train_dataset" \
+#                 --val_dataset_root "/data/datasets/$val_dataset" \
+#                 --train_json "$train_json" \
+#                 --val_json "$val_json" \
+#                 --pretrain_weights "$PRETRAIN_WEIGHTS" \
+#                 "${TRAIN_CENTER_ARG[@]}" \
+#                 "${VAL_CENTER_ARG[@]}" \
+#                 --train_batch_size "$train_bs" \
+#                 --val_batch_size "$val_bs" \
+#                 --num_workers "$NUM_WORKERS" \
+#                 --train_max_samples "$train_max" \
+#                 --val_max_samples "$val_max" \
+#                 --robust_train_attack_loss l2 \
+#                 --robust_val_attack_loss ce \
+#                 --robust_train_loss l2 \
+#                 --robust_lora_rank "$rank" \
+#                 --robust_lora_alpha "$alpha" \
+#                 --robust_epsilon "$eps" \
+#                 --robust_training_mode "$mode" \
+#                 --epochs "$ROBUST_EPOCHS" \
+#                 --use_flash_attention \
+#                 \
+#                 --session_output_dir "$SESSION_OUTPUT_DIR" \
+#                 --session_timestamp "$SESSION_TIMESTAMP" \
+#                 --tensorboard_root "$TENSORBOARD_ROOT"
+#             done
+#           done
+#         else
+#           torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
+#             --training_mode robust \
+#             --model_type "$model_type" \
+#             --train_modality "$modality" \
+#             --val_modality "$modality" \
+#             --train_dataset_name "$train_dataset" \
+#             --val_dataset_name "$val_dataset" \
+#             --train_dataset_root "/data/datasets/$train_dataset" \
+#             --val_dataset_root "/data/datasets/$val_dataset" \
+#             --train_json "$train_json" \
+#             --val_json "$val_json" \
+#             --pretrain_weights "$PRETRAIN_WEIGHTS" \
+#             "${TRAIN_CENTER_ARG[@]}" \
+#             "${VAL_CENTER_ARG[@]}" \
+#             --train_batch_size "$train_bs" \
+#             --val_batch_size "$val_bs" \
+#             --num_workers "$NUM_WORKERS" \
+#             --train_max_samples "$train_max" \
+#             --val_max_samples "$val_max" \
+#             --robust_train_attack_loss l2 \
+#             --robust_val_attack_loss ce \
+#             --robust_train_loss l2 \
+#             --robust_epsilon "$eps" \
+#             --robust_training_mode "$mode" \
+#             --epochs "$ROBUST_EPOCHS" \
+#             --use_flash_attention \
+#             \
+#             --session_output_dir "$SESSION_OUTPUT_DIR" \
+#             --session_timestamp "$SESSION_TIMESTAMP" \
+#             --tensorboard_root "$TENSORBOARD_ROOT"
+#         fi
+#       done
+#     done
+#   done
+# done
 
-# --- Robust notifications: end ---
-ROBUST_END_EPOCH=$(date +%s)
-ROBUST_ELAPSED=$(( ROBUST_END_EPOCH - ROBUST_START_EPOCH ))
-ROBUST_DUR=$(fmt_duration "$ROBUST_ELAPSED")
-post_discord "🏁 Robust finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${ROBUST_DUR}\`"
+# # --- Robust notifications: end ---
+# ROBUST_END_EPOCH=$(date +%s)
+# ROBUST_ELAPSED=$(( ROBUST_END_EPOCH - ROBUST_START_EPOCH ))
+# ROBUST_DUR=$(fmt_duration "$ROBUST_ELAPSED")
+# post_discord "🏁 Robust finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${ROBUST_DUR}\`"
 
 # --- Alignment notifications: start ---
 ALIGN_START_EPOCH=$(date +%s)
@@ -467,78 +467,78 @@ ALIGN_ELAPSED=$(( ALIGN_END_EPOCH - ALIGN_START_EPOCH ))
 ALIGN_DUR=$(fmt_duration "$ALIGN_ELAPSED")
 post_discord "🏁 Alignment finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${ALIGN_DUR}\`"
 
-# --- Alignment with frozen robust LoRA ---
-# For each robust LoRA combination, train alignment with backbone+LoRA frozen.
-FROZEN_ALIGN_START_EPOCH=$(date +%s)
-post_discord "🚦 Frozen-LoRA alignment started\n• **Session:** \`${SESSION_TIMESTAMP}\`"
+# # --- Alignment with frozen robust LoRA ---
+# # For each robust LoRA combination, train alignment with backbone+LoRA frozen.
+# FROZEN_ALIGN_START_EPOCH=$(date +%s)
+# post_discord "🚦 Frozen-LoRA alignment started\n• **Session:** \`${SESSION_TIMESTAMP}\`"
 
-for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
-  for modality in ${MODEL_TYPE_TO_MODALITIES[$model_type]}; do
-    # Use the same alignment datasets as in the first alignment stage
-    train_dataset="${ALIGN_TRAIN_MODALITY_TO_DATASET[$modality]}"
-    val_dataset="${ALIGN_VAL_MODALITY_TO_DATASET[$modality]}"
-    [[ -z "$train_dataset" || -z "$val_dataset" ]] && continue
+# for model_type in "${!MODEL_TYPE_TO_MODALITIES[@]}"; do
+#   for modality in ${MODEL_TYPE_TO_MODALITIES[$model_type]}; do
+#     # Use the same alignment datasets as in the first alignment stage
+#     train_dataset="${ALIGN_TRAIN_MODALITY_TO_DATASET[$modality]}"
+#     val_dataset="${ALIGN_VAL_MODALITY_TO_DATASET[$modality]}"
+#     [[ -z "$train_dataset" || -z "$val_dataset" ]] && continue
 
-    train_bs="${ALIGN_DATASET_TO_BATCH_SIZE[$train_dataset]}"
-    val_bs="${ALIGN_DATASET_TO_BATCH_SIZE[$val_dataset]}"
-    train_max="${ALIGN_TRAIN_MAX_SAMPLES_MAP[$train_dataset]}"
-    val_max="${ALIGN_VAL_MAX_SAMPLES_MAP[$val_dataset]}"
-    train_json="${ALIGN_TRAIN_JSON_MAP[$train_dataset]}"
-    val_json="${ALIGN_VAL_JSON_MAP[$val_dataset]}"
-    emb_suffix="${ALIGN_EMB_SUFFIX_MAP[$val_dataset]}"
-    emb_path="./centre_embs/${modality}_${emb_suffix}_center_embeddings.pkl"
-    [[ -z "$train_bs" || -z "$val_bs" || -z "$train_max" || -z "$val_max" || -z "$train_json" || -z "$val_json" || -z "$emb_suffix" ]] && continue
+#     train_bs="${ALIGN_DATASET_TO_BATCH_SIZE[$train_dataset]}"
+#     val_bs="${ALIGN_DATASET_TO_BATCH_SIZE[$val_dataset]}"
+#     train_max="${ALIGN_TRAIN_MAX_SAMPLES_MAP[$train_dataset]}"
+#     val_max="${ALIGN_VAL_MAX_SAMPLES_MAP[$val_dataset]}"
+#     train_json="${ALIGN_TRAIN_JSON_MAP[$train_dataset]}"
+#     val_json="${ALIGN_VAL_JSON_MAP[$val_dataset]}"
+#     emb_suffix="${ALIGN_EMB_SUFFIX_MAP[$val_dataset]}"
+#     emb_path="./centre_embs/${modality}_${emb_suffix}_center_embeddings.pkl"
+#     [[ -z "$train_bs" || -z "$val_bs" || -z "$train_max" || -z "$val_max" || -z "$train_json" || -z "$val_json" || -z "$emb_suffix" ]] && continue
 
-    for eps in "${ROBUST_EPSILONS[@]}"; do
-      for rank in "${ROBUST_LORA_RANKS[@]}"; do
-        for alpha in "${ROBUST_LORA_ALPHAS[@]}"; do
-          best_lora_ckpt="./ckpts/best_lora_weights_${model_type}_${modality}_r${rank}_a${alpha}_eps${eps}.pt"
-          if [[ ! -f "$best_lora_ckpt" ]]; then
-            echo "[INFO] Skip frozen-LoRA alignment: missing $best_lora_ckpt" >&2
-            continue
-          fi
+#     for eps in "${ROBUST_EPSILONS[@]}"; do
+#       for rank in "${ROBUST_LORA_RANKS[@]}"; do
+#         for alpha in "${ROBUST_LORA_ALPHAS[@]}"; do
+#           best_lora_ckpt="./ckpts/best_lora_weights_${model_type}_${modality}_r${rank}_a${alpha}_eps${eps}.pt"
+#           if [[ ! -f "$best_lora_ckpt" ]]; then
+#             echo "[INFO] Skip frozen-LoRA alignment: missing $best_lora_ckpt" >&2
+#             continue
+#           fi
 
-          torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
-            --training_mode alignment \
-            --model_type "$model_type" \
-            --train_modality "$modality" \
-            --val_modality "$modality" \
-            --train_dataset_name "$train_dataset" \
-            --val_dataset_name "$val_dataset" \
-            --train_dataset_root "/data/datasets/$train_dataset" \
-            --val_dataset_root "/data/datasets/$val_dataset" \
-            --train_json "$train_json" \
-            --val_json "$val_json" \
-            --pretrain_weights "$PRETRAIN_WEIGHTS" \
-            --val_center_emb "$emb_path" \
-            --train_batch_size "$train_bs" \
-            --val_batch_size "$val_bs" \
-            --num_workers "$NUM_WORKERS" \
-            --train_max_samples "$train_max" \
-            --val_max_samples "$val_max" \
-            --epochs "${ALIGN_DATASET_TO_EPOCHS[$train_dataset]:-$ALIGN_EPOCHS}" \
-            --use_flash_attention \
-            \
-            --session_output_dir "$SESSION_OUTPUT_DIR" \
-            --session_timestamp "$SESSION_TIMESTAMP" \
-            --tensorboard_root "$TENSORBOARD_ROOT" \
-            --align_robust \
-            --robust_lora_rank "$rank" \
-            --robust_lora_alpha "$alpha" \
-            --robust_epsilon "$eps"
-        done
-      done
-    done
-  done
-done
+#           torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) train_robust_unibind.py \
+#             --training_mode alignment \
+#             --model_type "$model_type" \
+#             --train_modality "$modality" \
+#             --val_modality "$modality" \
+#             --train_dataset_name "$train_dataset" \
+#             --val_dataset_name "$val_dataset" \
+#             --train_dataset_root "/data/datasets/$train_dataset" \
+#             --val_dataset_root "/data/datasets/$val_dataset" \
+#             --train_json "$train_json" \
+#             --val_json "$val_json" \
+#             --pretrain_weights "$PRETRAIN_WEIGHTS" \
+#             --val_center_emb "$emb_path" \
+#             --train_batch_size "$train_bs" \
+#             --val_batch_size "$val_bs" \
+#             --num_workers "$NUM_WORKERS" \
+#             --train_max_samples "$train_max" \
+#             --val_max_samples "$val_max" \
+#             --epochs "${ALIGN_DATASET_TO_EPOCHS[$train_dataset]:-$ALIGN_EPOCHS}" \
+#             --use_flash_attention \
+#             \
+#             --session_output_dir "$SESSION_OUTPUT_DIR" \
+#             --session_timestamp "$SESSION_TIMESTAMP" \
+#             --tensorboard_root "$TENSORBOARD_ROOT" \
+#             --align_robust \
+#             --robust_lora_rank "$rank" \
+#             --robust_lora_alpha "$alpha" \
+#             --robust_epsilon "$eps"
+#         done
+#       done
+#     done
+#   done
+# done
 
-FROZEN_ALIGN_END_EPOCH=$(date +%s)
-FROZEN_ALIGN_ELAPSED=$(( FROZEN_ALIGN_END_EPOCH - FROZEN_ALIGN_START_EPOCH ))
-FROZEN_ALIGN_DUR=$(fmt_duration "$FROZEN_ALIGN_ELAPSED")
-post_discord "🏁 Frozen-LoRA alignment finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${FROZEN_ALIGN_DUR}\`"
+# FROZEN_ALIGN_END_EPOCH=$(date +%s)
+# FROZEN_ALIGN_ELAPSED=$(( FROZEN_ALIGN_END_EPOCH - FROZEN_ALIGN_START_EPOCH ))
+# FROZEN_ALIGN_DUR=$(fmt_duration "$FROZEN_ALIGN_ELAPSED")
+# post_discord "🏁 Frozen-LoRA alignment finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${FROZEN_ALIGN_DUR}\`"
 
-# --- Session-level notification: end ---
-SESSION_END_EPOCH=$(date +%s)
-SESSION_ELAPSED=$(( SESSION_END_EPOCH - SESSION_START_EPOCH ))
-SESSION_DUR=$(fmt_duration "$SESSION_ELAPSED")
-post_discord "✅ Session finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${SESSION_DUR}\`\n• **Output:** \`${SESSION_OUTPUT_DIR}\`"
+# # --- Session-level notification: end ---
+# SESSION_END_EPOCH=$(date +%s)
+# SESSION_ELAPSED=$(( SESSION_END_EPOCH - SESSION_START_EPOCH ))
+# SESSION_DUR=$(fmt_duration "$SESSION_ELAPSED")
+# post_discord "✅ Session finished\n• **Session:** \`${SESSION_TIMESTAMP}\`\n• **Duration:** \`${SESSION_DUR}\`\n• **Output:** \`${SESSION_OUTPUT_DIR}\`"

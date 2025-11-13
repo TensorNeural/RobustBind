@@ -151,7 +151,12 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
             epoch=epoch,
             total_epochs=epochs,
             writer=writer,
-            modality=modality
+            modality=modality,
+            align_temperature=getattr(args, 'align_temperature', 1.0),
+            align_symmetric=getattr(args, 'align_symmetric', False),
+            align_all_gather=getattr(args, 'align_all_gather', False),
+            align_label_smoothing=getattr(args, 'align_label_smoothing', 0.0),
+            align_mask_same_label=getattr(args, 'align_mask_same_label', False),
         )
 
         # Epoch naming mirrors final naming format with an epoch_ prefix
@@ -210,7 +215,8 @@ def run_alignment_training(args, device, logger, writer, train_loader, val_loade
             except Exception as e:
                 logger.warning(f"[Align] Failed to copy best weights to ./ckpts: {e}")
 
-    writer.close()
+    if dist.get_rank() == 0 and writer is not None:
+        writer.close()
 
     if dist.get_rank() == 0:
         # Append only the final/best result to session CSV
@@ -456,7 +462,8 @@ def run_robust_training(
                 except Exception as e:
                     logger.warning(f"[Robust] Failed to copy best weights to ./ckpts: {e}")
 
-    writer.close()
+    if dist.get_rank() == 0 and writer is not None:
+        writer.close()
     # Append only the final/best result to session CSV
     if dist.get_rank() == 0:
         _append_csv(robust_csv, [
@@ -572,6 +579,12 @@ def main():
 
     parser.add_argument("--align_modality_head_mlp_weights", default=None)
     parser.add_argument("--align_robust", action="store_true", default=False, help="If set, auto-load robust weights from this session and freeze them during alignment")
+    # Stronger alignment options
+    parser.add_argument("--align_temperature", type=float, default=1.0, help="InfoNCE temperature (tau); logits are divided by tau")
+    parser.add_argument("--align_symmetric", action="store_true", default=False, help="Use symmetric loss: modality->text and text->modality")
+    parser.add_argument("--align_all_gather", action="store_true", default=False, help="All-gather embeddings across GPUs for larger negative pool")
+    parser.add_argument("--align_label_smoothing", type=float, default=0.0, help="Label smoothing for alignment CE loss (0.0 disables)")
+    parser.add_argument("--align_mask_same_label", action="store_true", default=False, help="Do not treat same-class samples in the batch as negatives")
 
     parser.add_argument("--robust_train_attack_loss", default="l2")
     parser.add_argument("--robust_val_attack_loss", default="ce")
@@ -685,7 +698,7 @@ def main():
     logger.info(f"[TensorBoard] Log directory: {tb_path}")
 
     tb_path.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(tb_path))
+    writer = SummaryWriter(log_dir=str(tb_path)) if dist.get_rank() == 0 else None
 
     # Build loaders with separate label mappings
     train_loader = train_data_loader(

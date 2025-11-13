@@ -140,8 +140,8 @@ def render_eventbind_frames_from_npz(npz_path, out_dir, size=224, T=8,
         return
 
     t = np.arange(xs.shape[0], dtype=np.float32)
-    xs = ((xs - xs.min()) / (xs.ptp() + 1e-5) * (size - 1)).astype(np.int32)
-    ys = ((ys - ys.min()) / (ys.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+    xs = ((xs - xs.min()) / (np.ptp(xs) + 1e-5) * (size - 1)).astype(np.int32)
+    ys = ((ys - ys.min()) / (np.ptp(ys) + 1e-5) * (size - 1)).astype(np.int32)
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -165,7 +165,7 @@ def render_eventbind_frames_from_npz(npz_path, out_dir, size=224, T=8,
             rgb = _eventbind_colorize(pmap, nmap, gain=gain, gamma=gamma)
             Image.fromarray(rgb).save(os.path.join(out_dir, f"frame_{i:03d}.png"), format="PNG")
     else:
-        t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+        t_norm = (t - t.min()) / (np.ptp(t) + 1e-5)
         edges = np.linspace(0.0, 1.0, T + 1)
         fidx = 0
         for i in range(T):

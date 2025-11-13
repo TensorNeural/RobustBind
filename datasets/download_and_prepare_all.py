@@ -32,7 +32,8 @@ LOG_DIR = REPO_ROOT / "output"
 DATASETS: List[Dict[str, Any]] = [
     {
         "name": "ImageNet-1K",
-        "url": "https://storage.googleapis.com/kaggle-competitions-data/kaggle-v2/6799/4225553/bundle/archive.zip?GoogleAccessId=web-data@kaggle-161607.iam.gserviceaccount.com&Expires=1762423661&Signature=dQTjSkwjHctspd0KGmGKMAF5dGS61mM4BuBPsHm9WLuWLTYOTK0gyuEL%2BlhyP9cpW8SNlJ0vsNZjkE63SDWLyBaxb66p1q7bT09y5L9Ws7qNIuzQtnK7JstuhX%2BAxP6V70SEPMRDI7eMfDXhviW58f3Ek%2BEB%2Fzo5wlnrFVx4mwRUFvjx%2BQJivylAnTZxLUHvVbr%2FoIDN8HIIDXByY6AD%2B8BglB2aKWTKIe6mYeIDPgJTrk4sFIbY9ah%2F8PBbMtgnplXJfsgrTOJ5HRjQjA4T7i1wFEL9%2BJUrowdffO3KPDeYPcZCPMnDVyB9UvCLYTEcv%2BR%2B%2BOaBXE19YIWSgl6LEg%3D%3D&response-content-disposition=attachment%3B+filename%3Dimagenet-object-localization-challenge.zip",
+        # https://www.kaggle.com/competitions/imagenet-object-localization-challenge/data
+        "url": "https://storage.googleapis.com/kaggle-competitions-data/kaggle-v2/6799/4225553/bundle/archive.zip?GoogleAccessId=web-data@kaggle-161607.iam.gserviceaccount.com&Expires=1763112681&Signature=hObVutiZ0JvE40UAPbGuAIRmZv3mkTPfFRjdC5TWtIQib5pnOMJwCrYD%2FbgjodyZSJwrCdEC4k8TBsgVN6xr1MjD2jVOX5ND%2BZ8jV4uitXy8yYBdWgAW%2BSecd%2Fq8mspbpiHFWxXMJ%2Bn5EA61F3HGBivFiJjeSrVTTUj6fVKMJkwZhtS4eO5B1i4Aijjy0ZSjCdRS9UZ8kW%2FJdd6JwmxYi0v%2B9cn9RaHqO14%2FzTgb7NEu4lcxgDCETHxCACX1Gz3EJ0avfTpgkZGzxWG8hP48i2qdxtQCfaTETRcxU%2Btte5u%2BYBcGrUf5H6S7Q6dv6Rw02FEFYz7a1WfTOykKhs1gIw%3D%3D&response-content-disposition=attachment%3B+filename%3Dimagenet-object-localization-challenge.zip",
         "dest_file": ROOT / "ImageNet-1K.zip",
         "extract_to": ROOT / "ImageNet-1K",
         "type": "zip",
@@ -113,7 +114,8 @@ DATASETS: List[Dict[str, Any]] = [
     },
     {
         "name": "MSR-VTT",
-        "url": "https://storage.googleapis.com/kaggle-data-sets/5556037/9190888/bundle/archive.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20251103%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20251103T165552Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=2692a71c8255f1b80929e594ff9760a338121ba938be3a054d2c252f5917a27a496a32264e49e7a17c51342d7c11af6c5d99785d10a83cf1e2b076bb6656e0a12def64623f617cc5160d5706bde80e4ae4af217781002706b3f77f10073ca059334ecd783efeeac7b538998222763b147c5ec105265dc21adc426d0fbcd6b2078b01e96280d098e29ba6be59d78c5e671357199c87163056b808b0e324ae72248cdb1cc7c1d5f7472cda9396aa0de013dae5ffaeb6c71fb21c552309e824fb42e8b7c27c9a65c5a46d491bfe3aa26c1f71c5d137d9856a92b30dfc58ecff5247fd51646f8f778e1e71792245909e378e3dac79c59a5cb07364974b0e9d4c4ea7",
+        # https://www.kaggle.com/datasets/khoahunhtngng/msrvtt
+        "url": "https://storage.googleapis.com/kaggle-data-sets/5556037/9190888/bundle/archive.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20251111%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20251111T093512Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=6641ef59b45b9e3e5f10d7e64bb81e7a5b80dcb16d524789ad4eddaea04be9e06e778121828931bff3e5c6f9a2151f8f82bc9c7e31a05d290fd5309ad2e0665ba9a25aa0e80bb61d475d8bb641fa179a02f3efdd177a36be03300ddfa018daee9076684f1099aeb1a7d785e1f59630bf01a5922c76d77e1d1efac8bf5d8a37661ab08a7fff417101bf04160b38fffd2fdbd435a34497c51fd85b374bd533e5a90d9cd5e80bf90023ef47d1eaecd54bc07f00e07ce71099297fa430db7839f373b81c066899876574b23b77a6a3454925cf956dc04c5a641b9f48009972f14c4ca81a68edb5d053c189157189b9a3e1d8c951a3fb633f473006ee83fbda14210c",
         "dest_file": ROOT / "MSR-VTT.zip",
         "extract_to": ROOT / "MSR-VTT",
         "type": "zip",
@@ -240,7 +242,8 @@ DATASETS: List[Dict[str, Any]] = [
     },
     {
         "name": "ModelNet40",
-        "url": "https://storage.googleapis.com/kaggle-data-sets/943894/1599485/bundle/archive.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20251105%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20251105T070851Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=3d783cc591464b9f6279b37523549668be66cde36da51d005ee04e88da51c4e73fea64efd57a9cfa143232cc3cf6ce586af434134bf0306f846e552c434ec44b5ec21c682cc4473a1cfc27e39168e129fb6e51ce40f0f86f12219687cb89f4fdb39cf34c8e26795b10f82b589fd94b35c39ee0a7365d7b09b11a113d241658863d7264b5adccedc36716d8d7fbf65bd821924803aaf2bb5cd22feefac0a0ed38d0f34927891203f5853aaf54fbd98f3ca265903ca4486c5ffbde0538c36466684cf9bdb77b8d276af8682030b567febd00de2c9602ec4fa4eafc27a9bbada10658874c55324dabf41bc273da76bac17b9f783fa9f8207df3975a1a455bbc662d",
+        # https://www.kaggle.com/datasets/balraj98/modelnet40-princeton-3d-object-dataset
+        "url": "https://storage.googleapis.com/kaggle-data-sets/943894/1599485/bundle/archive.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20251111%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20251111T093430Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=469bb99acbe5fabbf8b4a38ffc7da06b3e789d7edf57c166a96b54a3a62bb162c0cb521039172f149e3a31bfad3900005c9666a40e5fe1b39faa45ca7419f9c9c1c221985a516e408d7e6b3ff8a64c1c51d89a25ddc8a431fc83bc1e5208b07f3a32baf26e840dd7698389d245f6c633a70cde47e9ce19504a351b5ce84966229baf20a765ccd04e4fb4b35b2c98a392116b55cb7d2968082caeea383b31f5d1d85cf9a212dc5dcfbe014cb0a6a70b8f11ea805000065aa7dfff88dbbbe082fc0742c9391ae46ac905dce5ac6046951ca15aebc98fc295e0e234029d5cb51bf764939208411e0b5e940227bfb99c37f3676a54e5c1ce43800b838b9d0f05740b",
         "dest_file": ROOT / "ModelNet40.zip",
         "extract_to": ROOT / "ModelNet40",  # expected container with ModelNet40/ inside or already placed
         "type": "zip",
@@ -859,7 +862,7 @@ def generate_jsons(task: dict) -> None:
 
 # ---------- Worker ----------
 
-def process_dataset(task: dict, delete_archive_after: bool = False):
+def process_dataset(task: dict, delete_archive_after: bool = False, skip_gen: bool = False):
     name = task["name"]
     url = task.get("url")
     dest: Optional[Path] = task.get("dest_file")
@@ -930,10 +933,13 @@ def process_dataset(task: dict, delete_archive_after: bool = False):
         raise RuntimeError(f"prepare failed: {e}")
 
     # Run JSON generation step if configured
-    try:
-        generate_jsons(task)
-    except Exception as e:
-        raise RuntimeError(f"gen failed: {e}")
+    if not skip_gen:
+        try:
+            generate_jsons(task)
+        except Exception as e:
+            raise RuntimeError(f"gen failed: {e}")
+    else:
+        print(f"[{name}] Skipping gen step (--skip-gen flag set)")
 
     if delete_archive_after and dest is not None and dest.exists():
         try:
@@ -946,7 +952,7 @@ def process_dataset(task: dict, delete_archive_after: bool = False):
 # ---------- Main ----------
 
 def main(max_workers: Optional[int] = None, delete_archives: bool = False,
-         only: Optional[set] = None, skip: Optional[set] = None):
+         only: Optional[set] = None, skip: Optional[set] = None, skip_gen: bool = False):
     # Normalize name filters to lowercase
     only = {n.lower() for n in only} if only else set()
     skip = {n.lower() for n in skip} if skip else set()
@@ -973,7 +979,7 @@ def main(max_workers: Optional[int] = None, delete_archives: bool = False,
     errors: Dict[str, str] = {}
 
     with ThreadPoolExecutor(max_workers=eff_workers) as ex:
-        futs = {ex.submit(process_dataset, task, delete_archives): task["name"] for task in selected}
+        futs = {ex.submit(process_dataset, task, delete_archives, skip_gen): task["name"] for task in selected}
         for fut in as_completed(futs):
             name = futs[fut]
             try:
@@ -999,21 +1005,23 @@ if __name__ == "__main__":
         # "N-ImageNet-1K",
     ], help="Only process these dataset names (comma-separated or repeated)")
     ap.add_argument("--skip", action="append", default=[
-        "FSD-50K",
+        "N-ImageNet-1K",
+        # "FSD-50K",
         "MSR-VTT",
         "ESC-50",
         "ImageNet-1K",
         "LLVIP",
         "ModelNet40",
-        "UrbanSound8K",
+        # "UrbanSound8K",
         "Kinetics-400",
         "Places365",
         "N-Caltech-101",
-        "UCF101",
+        # "UCF101",
         "COCO-Caption",
         "VQA2",
     ], help="Skip these dataset names (comma-separated or repeated)")
     ap.add_argument("--dry-run-preview", action="store_true", default=False, help="Only log the first two directory levels inside available archives; no extraction or preparation")
+    ap.add_argument("--skip-gen", action="store_true", default=True, help="Skip the metadata generation step")
 
     args = ap.parse_args()
 
@@ -1055,4 +1063,4 @@ if __name__ == "__main__":
             preview_archive_for_task(task, force=True)
         print("Done.")
     else:
-        main(max_workers=args.max_workers, delete_archives=args.delete_archives, only=only_set, skip=skip_set)
+        main(max_workers=args.max_workers, delete_archives=args.delete_archives, only=only_set, skip=skip_set, skip_gen=args.skip_gen)

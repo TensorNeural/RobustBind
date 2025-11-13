@@ -72,8 +72,8 @@ def render_eventbind_images(
         return
 
     # Normalize coordinates into [0, size-1]
-    x = ((x - x.min()) / (x.ptp() + 1e-5) * (size - 1)).astype(np.int32)
-    y = ((y - y.min()) / (y.ptp() + 1e-5) * (size - 1)).astype(np.int32)
+    x = ((x - x.min()) / (np.ptp(x) + 1e-5) * (size - 1)).astype(np.int32)
+    y = ((y - y.min()) / (np.ptp(y) + 1e-5) * (size - 1)).astype(np.int32)
 
     # Sort by time
     order = np.argsort(t, kind="stable")
@@ -101,7 +101,7 @@ def render_eventbind_images(
             rgb = _eventbind_colorize(pos, neg, gain=gain, gamma=gamma)
             Image.fromarray(rgb).save(os.path.join(out_dir, f"frame_{i:03d}.png"), format="PNG", compress_level=6)
     else:
-        t_norm = (t - t.min()) / (t.ptp() + 1e-5)
+        t_norm = (t - t.min()) / (np.ptp(t) + 1e-5)
         edges = np.linspace(0.0, 1.0, T + 1, dtype=np.float32)
         fidx = 0
         for i in range(T):
