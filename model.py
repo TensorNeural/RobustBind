@@ -1,4 +1,5 @@
 import torch
+import threading
 import torch.nn as nn
 import torch.nn.init as init
 import torch_scatter
@@ -695,7 +696,7 @@ class CLIPClassifier(Model):
             self.class_strings = class_strings
         self.logger = logger or logging.getLogger(__name__)
         self.model_name = model_name
-    # CLIPClassifier allows gradients through the CLIP encoders by default.
+        # CLIPClassifier allows gradients through the CLIP encoders by default.
 
         # Load CLIP model + processor
         self.processor = CLIPProcessor.from_pretrained(self.model_name, cache_dir="./.cache/clip")
