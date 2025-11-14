@@ -21,6 +21,8 @@ torchaudio
 einops
 ipdb
 ninja
+peft
+opencv-python
 fairscale
 fire
 sentencepiece
@@ -35,3 +37,8 @@ torchvision
 decord
 tqdm
 torchmetrics
+requests
+rarfile
+Pillow
+pandas
+openTSNE==1.0.4

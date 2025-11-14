@@ -7,7 +7,8 @@
 
 import logging
 import math
-import pkg_resources
+import os
+import importlib
 
 import torch
 import torch.nn as nn
@@ -25,9 +26,21 @@ DEFAULT_AUDIO_FRAME_SHIFT_MS = 10  # in milliseconds
 
 
 def return_bpe_path():
-    return pkg_resources.resource_filename(
-        "imagebind", "bpe/bpe_simple_vocab_16e6.txt.gz"
-    )
+    """Locate the BPE vocab file without using pkg_resources (deprecated).
+    Prefer the installed imagebind package location; fallback to repo-relative path.
+    """
+    try:
+        imagebind_mod = importlib.import_module("imagebind")
+        base_dir = os.path.dirname(imagebind_mod.__file__)
+        candidate = os.path.join(base_dir, "bpe", "bpe_simple_vocab_16e6.txt.gz")
+        if os.path.exists(candidate):
+            return candidate
+    except Exception:
+        pass
+    # Fallback: repo-relative path (when running from source)
+    here = os.path.dirname(os.path.abspath(__file__))
+    fallback = os.path.abspath(os.path.join(here, "..", "..", "..", "imagebind", "bpe", "bpe_simple_vocab_16e6.txt.gz"))
+    return fallback
 
 
 def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):

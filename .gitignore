@@ -12,5 +12,5 @@ results/
 output
 cache/
 cache_dir
-bpe/
 .checkpoints/
+.cache

@@ -2,10 +2,10 @@
 set -e
 
 # === Directories ===
-ROOT_DIR="/home/user/datasets"
+ROOT_DIR="/data/datasets"
 CKPT_DIR="./ckpts"
 CENTER_EMB_DIR="./centre_embs"
-OUTPUT_DIR="./output"
+OUTPUT_DIR="/data/output"
 
 # === Center Embedding Files ===
 CENTER_AUDIO="${CENTER_EMB_DIR}/audio_esc_center_embeddings.pkl"
@@ -20,7 +20,7 @@ VAL_EVENT="./datasets/N-ImageNet-1K/val_data.json"
 VAL_POINT="./datasets/ModelNet40/val_data.json"
 
 # === Run Distributed Cross-Modality Search ===
-torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) cross_modality_search.py \
+torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) -m downstream.cross_modality_search \
   --dataset_root "${ROOT_DIR}" \
   --val_json_audio "${VAL_AUDIO}" \
   --val_json_image "${VAL_IMAGE}" \
@@ -31,6 +31,6 @@ torchrun --nproc_per_node=$(nvidia-smi -L | wc -l) cross_modality_search.py \
   --center_emb_event "${CENTER_EVENT}" \
   --center_emb_point "${CENTER_POINT}" \
   --label_map "./datasets/esc50_label_map.json" \
-  --pretrain_weights "${CKPT_DIR}/pretrained_weights_flash_atten.pt" \
+  --pretrain_weights "${CKPT_DIR}/pretrained_weights_flash_atten_image_patchs.pt" \
   --output_dir "${OUTPUT_DIR}" \
   --use_flash_attention

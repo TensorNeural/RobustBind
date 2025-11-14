@@ -49,7 +49,8 @@ def generate_val_metadata(dataset_root, synset_mapping, class_names):
         if not os.path.isdir(class_path):
             continue
 
-        label = synset_mapping.get(class_folder, "unknown")
+        # Fallback to synset ID if mapping is missing
+        label = synset_mapping.get(class_folder, class_folder)
         if label not in class_names:
             class_names.append(label)
 

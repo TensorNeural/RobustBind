@@ -3,7 +3,7 @@ import torch
 from datetime import datetime
 
 ckpt_dir = "./ckpts"
-output_dir = "./output"
+output_dir = "/data/output"
 os.makedirs(output_dir, exist_ok=True)
 
 modalities = ["audio", "thermal", "vision"]

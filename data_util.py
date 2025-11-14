@@ -1,6 +1,7 @@
 import os
 import json
 import math
+from tkinter import NO
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,6 +20,7 @@ from shared_types import BindModelType, Modality
 from binds.languagebind import transform_dict as lb_transform_dict
 
 from utils.utils import load_centre_embeddings
+import torch.multiprocessing as mp  # ensure alias mp is defined for spawn context
 
 BPE_PATH = "bpe/bpe_simple_vocab_16e6.txt.gz"
 
@@ -45,17 +47,30 @@ STD_MAP = {
 
 NUM_FRAMES = 2
 
+EVENT_TRANSFORM = transforms.Compose([
+    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN_MAP[Modality.EVENT], std=STD_MAP[Modality.EVENT]),
+])
+
+PATCHABLE_IMAGE_TRANSFORM = transforms.Compose([
+    transforms.Resize(336, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(336),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
+])
+
 # ===================
 # Dataset
 # ===================
 class JsonDataset(Dataset):
-    def __init__(self, dataset_root, data_json_path, transform, label_to_index=None, max_samples=None, debug=False):
+    def __init__(self, dataset_root, data_json_path, label_to_index=None, max_samples=None, debug=False):
         self.root_dir = dataset_root
-        self.transform = transform
         self.label_to_index_fn = label_to_index
 
         with open(data_json_path, "r") as f:
-            self.samples = [(item["data"], item["label"]) for item in json.load(f)]
+            self.samples = [(item["data"], item.get("description"), item["label"]) for item in json.load(f)]
 
         if max_samples is not None and max_samples < len(self.samples):
             indices = torch.arange(max_samples) if debug else torch.randperm(len(self.samples))[:max_samples]
@@ -65,11 +80,18 @@ class JsonDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        rel_path, label_str = self.samples[idx]
+        rel_path, description, label_str = self.samples[idx]
         full_path = os.path.join(self.root_dir, rel_path)
-        tensor = self.transform([full_path], device="cpu")[0]
         label = self.label_to_index_fn[label_str] if self.label_to_index_fn else 0
-        return tensor, label
+        return {"path": full_path, "description": description, "label": label}
+
+def image_transform_fn(resize=224):
+    return transforms.Compose([
+        transforms.Resize(resize, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.CenterCrop(resize),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
+    ])
 
 # ===================
 # Transforms
@@ -79,137 +101,160 @@ def get_transform_fn(modality, minSample=False, model_type=None):
         Modality.TEXT: load_and_transform_text,
         Modality.IMAGE: load_and_transform_vision_data,
         Modality.EVENT: load_and_transform_event_data,
-        # Modality.EVENT: load_and_transform_vision_data,
-        Modality.THERMAL: load_and_transform_thermal_data(model_type=model_type),
-        Modality.VIDEO: load_and_transform_video_data(minSample=minSample, model_type=model_type),
-        Modality.AUDIO: load_and_transform_audio_data(model_type),
+        Modality.THERMAL: ThermalTransform(model_type=model_type),
+        Modality.VIDEO: VideoTransform(minSample=minSample, model_type=model_type),
+        Modality.AUDIO: AudioTransform(model_type),
         Modality.POINT: load_and_transform_point_data
     }[modality]
 
-IMAGE_TRANSFORM = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN_MAP[Modality.IMAGE], std=STD_MAP[Modality.IMAGE]),
-])
-
-EVENT_TRANSFORM = transforms.Compose([
-    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=MEAN_MAP[Modality.EVENT], std=STD_MAP[Modality.EVENT]),
-])
-
-def load_and_transform_vision_data(image_paths, device):
+def load_and_transform_vision_data(image_paths, device, resize=224):
     images = []
     for p in image_paths:
         with open(p, "rb") as f:
             img = Image.open(f).convert("RGB")
-        images.append(IMAGE_TRANSFORM(img).to(device))
+        images.append(image_transform_fn(resize=resize)(img).to(device))
     return torch.stack(images)
 
-def load_and_transform_thermal_data(model_type=BindModelType.IMAGEBIND):
-    def transform(thermal_paths, device):
-        # Determine expected channels and color mode
-        if model_type == BindModelType.LANGUAGEBIND:
-            expected_channels = 3
-            color_mode = "RGB"
-        else:  # UniBind/ImageBind expects 1 channel
-            expected_channels = 1
-            color_mode = "L"
+def load_and_transform_patchable_image_data(images):
+    transformed_list = []
+    for image in images:
+        transformed = PATCHABLE_IMAGE_TRANSFORM(image)  # [B, 3, H, W]
+        transformed_list.append(transformed)
+    return torch.stack(transformed_list)
 
-        # Load mean and std, then expand if needed
+class ThermalTransform:
+    def __init__(self, model_type=BindModelType.IMAGEBIND):
+        self.model_type = model_type
+        if model_type == BindModelType.LANGUAGEBIND:
+            self.expected_channels = 3
+            self.color_mode = "RGB"
+        else:
+            self.expected_channels = 1
+            self.color_mode = "L"
         mean = MEAN_MAP[Modality.THERMAL]
         std = STD_MAP[Modality.THERMAL]
-        if len(mean) == 1 and expected_channels == 3:
+        if len(mean) == 1 and self.expected_channels == 3:
             mean = mean * 3
             std = std * 3
-
-        preprocess = transforms.Compose([
+        self.preprocess = transforms.Compose([
             transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
             transforms.Normalize(mean, std)
         ])
-
+    def __call__(self, thermal_paths, device):
         images = []
         for p in thermal_paths:
             with open(p, "rb") as f:
-                img = Image.open(f).convert(color_mode)
-            images.append(preprocess(img).to(device))
-
+                img = Image.open(f).convert(self.color_mode)
+            images.append(self.preprocess(img).to(device))
         return torch.stack(images)
 
-    return transform
-
-def load_and_transform_point_data(point_paths, device):
-    return torch.stack([torch.load(p) for p in point_paths]).to(device)
-
-def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
-    waveform -= waveform.mean()
-    fbank = torchaudio.compliance.kaldi.fbank(
-        waveform, htk_compat=True, sample_frequency=sample_rate,
-        use_energy=False, window_type="hanning", num_mel_bins=num_mel_bins,
-        dither=0.0, frame_length=25, frame_shift=10
-    ).transpose(0, 1)
-    p = target_length - fbank.size(1)
-    if abs(p) / fbank.size(1) > 0.2:
-        logging.warning(f"Audio frame mismatch: {fbank.size(1)} vs {target_length}")
-    fbank = torch.nn.functional.pad(fbank, (0, max(0, p)))[:, :target_length]
-    return fbank.unsqueeze(0)
-
-def load_and_transform_audio_data(model_type):
-    def transform(
-        audio_paths,
-        device,
-        num_mel_bins=128,
-        target_length=204,
-        sample_rate=16000,
-        clip_duration=2,
-        clips_per_video=3,
-        mean=-4.268,
-        std=9.138
-    ):
+class VideoTransform:
+    def __init__(self, minSample=False, model_type=BindModelType.IMAGEBIND):
+        self.model_type = model_type
+        self.minSample = minSample
         if model_type == BindModelType.LANGUAGEBIND:
-            num_mel_bins = 112
-            target_length = 1036
-            clip_duration = 10.4
+            self.frame_sampler = UniformTemporalSubsample(num_samples=8)
+            self.spatial_crop = None
+            self.video_transform = transforms.Compose([
+                ShortSideScale(224),
+                transforms.CenterCrop(224),
+                Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
+            ])
+        else:
+            self.frame_sampler = UniformTemporalSubsample(num_samples=2)
+            self.spatial_crop = SpatialCrop(224, num_crops=1 if minSample else 3)
+            self.video_transform = transforms.Compose([
+                ShortSideScale(224),
+                Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
+            ])
+    def __call__(self, video_paths, device, sample_rate=16000, target_t=8):
+        if video_paths is None:
+            return None
+        video_outputs = []
+        for video_path in video_paths:
+            video = EncodedVideo.from_path(
+                video_path,
+                decoder="decord",
+                decode_audio=False,
+                **{"sample_rate": sample_rate},
+            )
+            if self.model_type == BindModelType.LANGUAGEBIND:
+                all_clips_timepoints = [(0, video.duration)]
+            else:
+                clip_duration = 2
+                clips_per_video = 1
+                all_clips_timepoints = get_clip_timepoints(
+                    ConstantClipsPerVideoSampler(clip_duration, clips_per_video),
+                    video.duration
+                )
+            all_video = []
+            for clip_timepoints in all_clips_timepoints:
+                clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
+                if clip is None:
+                    continue
+                video_clip = self.frame_sampler(clip["video"]) / 255.0
+                all_video.append(video_clip)
+            if not all_video:
+                raise ValueError(f"No valid clips in video {video_path}")
+            if self.model_type == BindModelType.LANGUAGEBIND:
+                video_tensor = self.video_transform(all_video[0])
+                T_actual = video_tensor.shape[1]
+                if T_actual < 8:
+                    raise ValueError(f"Video {video_path} has only {T_actual} frames, require ≥8")
+                T_trim = (T_actual // 8) * 8
+                video_tensor = video_tensor[:, :T_trim]
+            else:
+                all_video = [self.video_transform(clip) for clip in all_video]
+                all_video = self.spatial_crop(all_video)
+                video_tensor = torch.stack(all_video, dim=0)
+            video_outputs.append(video_tensor)
+        if self.model_type == BindModelType.LANGUAGEBIND:
+            return torch.stack(video_outputs, dim=0).to(device)
+        else:
+            return torch.stack(video_outputs, dim=0).to(device)
 
-        normalize = transforms.Normalize(mean=[mean], std=[std])
+class AudioTransform:
+    def __init__(self, model_type):
+        self.model_type = model_type
+        if model_type == BindModelType.LANGUAGEBIND:
+            self.num_mel_bins = 112
+            self.target_length = 1036
+            self.clip_duration = 10.4
+        else:
+            self.num_mel_bins = 128
+            self.target_length = 204
+            self.clip_duration = 2
+        self.clips_per_video = 3
+        self.sample_rate = 16000
+        self.mean = -4.268
+        self.std = 9.138
+        self.normalize = transforms.Normalize(mean=[self.mean], std=[self.std])
+    def __call__(self, audio_paths, device):
         outputs = []
         sampler = ConstantClipsPerVideoSampler(
-            clip_duration=clip_duration, clips_per_video=clips_per_video
+            clip_duration=self.clip_duration, clips_per_video=self.clips_per_video
         )
-
         for path in audio_paths:
             waveform, sr = torchaudio.load(path)
-            if sr != sample_rate:
-                waveform = torchaudio.functional.resample(waveform, sr, sample_rate)
-
-            # Ensure minimum total duration
-            total_duration = waveform.size(1) / sample_rate
-            expected_samples = int(clip_duration * sample_rate)
-            if total_duration < clip_duration:
+            if sr != self.sample_rate:
+                waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
+            total_duration = waveform.size(1) / self.sample_rate
+            expected_samples = int(self.clip_duration * self.sample_rate)
+            if total_duration < self.clip_duration:
                 pad_len = expected_samples - waveform.size(1)
                 waveform = torch.nn.functional.pad(waveform, (0, pad_len))
-
             segments = []
-            clip_timepoints = get_clip_timepoints(sampler, waveform.size(1) / sample_rate)
-
+            clip_timepoints = get_clip_timepoints(sampler, waveform.size(1) / self.sample_rate)
             for start, end in clip_timepoints:
-                clip = waveform[:, int(start * sample_rate):int(end * sample_rate)]
-
-                # Pad clip if still too short (e.g., end too close to waveform end)
+                clip = waveform[:, int(start * self.sample_rate):int(end * self.sample_rate)]
                 if clip.size(1) < expected_samples:
                     clip = torch.nn.functional.pad(clip, (0, expected_samples - clip.size(1)))
-
-                spec = waveform2melspec(clip, sample_rate, num_mel_bins, target_length)
-                segments.append(normalize(spec))
-
+                spec = waveform2melspec(clip, self.sample_rate, self.num_mel_bins, self.target_length)
+                segments.append(self.normalize(spec))
             outputs.append(torch.stack(segments))
-
         return torch.stack(outputs).to(device)
-    return transform
 
 def crop_boxes(boxes, x_offset, y_offset):
     """
@@ -346,7 +391,7 @@ def load_and_transform_video_data(
         video_outputs = []
 
         if model_type == BindModelType.LANGUAGEBIND:
-            # LanguageBind settings
+            # LanguageBind settings: one full clip
             frame_sampler = UniformTemporalSubsample(num_samples=target_t)
             spatial_crop = None  # no multi-crop
             video_transform = transforms.Compose([
@@ -355,9 +400,9 @@ def load_and_transform_video_data(
                 Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
             ])
         else:
-            # ImageBind settings
+            # ImageBind settings: short clips with spatial crops
             frame_sampler = UniformTemporalSubsample(num_samples=2)
-            spatial_crop = SpatialCrop(224, num_crops=3)
+            spatial_crop = SpatialCrop(224, num_crops=1 if minSample else 3)
             video_transform = transforms.Compose([
                 ShortSideScale(224),
                 Normalize(mean=MEAN_MAP[Modality.VIDEO], std=STD_MAP[Modality.VIDEO]),
@@ -370,12 +415,11 @@ def load_and_transform_video_data(
                 decode_audio=False,
                 **{"sample_rate": sample_rate},
             )
-
             if model_type == BindModelType.LANGUAGEBIND:
-                # One full clip
+                # One full clip for LanguageBind
                 all_clips_timepoints = [(0, video.duration)]
             else:
-                # One short clip of 2 frames
+                # Short clips for ImageBind
                 clip_duration = 2
                 clips_per_video = 1
                 all_clips_timepoints = get_clip_timepoints(
@@ -388,6 +432,7 @@ def load_and_transform_video_data(
                 clip = video.get_clip(clip_timepoints[0], clip_timepoints[1])
                 if clip is None:
                     continue
+
                 video_clip = frame_sampler(clip["video"]) / 255.0  # [C, T, H, W]
                 all_video.append(video_clip)
 
@@ -404,14 +449,14 @@ def load_and_transform_video_data(
             else:
                 all_video = [video_transform(clip) for clip in all_video]
                 all_video = spatial_crop(all_video)  # list of [C, T=2, H, W]
-                video_tensor = torch.stack(all_video, dim=0)  # [V=3, C, T=2, H, W]
+                video_tensor = torch.stack(all_video, dim=0)  # [V=1 or 3, C, T=2, H, W]
 
             video_outputs.append(video_tensor)
 
         if model_type == BindModelType.LANGUAGEBIND:
             return torch.stack(video_outputs, dim=0).to(device)  # [B, C, T, H, W]
         else:
-            return torch.stack(video_outputs, dim=0).to(device)  # [B, V, C, T=2, H, W]
+            return torch.stack(video_outputs, dim=0).to(device)  # [B, V, C, T, H, W]
 
     return transform
 
@@ -457,34 +502,6 @@ def split_events_temporally(events, num_bins):
     events = events[events[:, 2].argsort()]
     return torch.tensor_split(events, num_bins)
 
-def render_event_frame_gpu(events: torch.Tensor, H: int, W: int, device: torch.device):
-    x = events[:, 0].clamp(0, W - 1).long()
-    y = events[:, 1].clamp(0, H - 1).long()
-    p = events[:, 3].long()
-
-    h_pos = torch.zeros((H, W), dtype=torch.float32, device=device)
-    h_neg = torch.zeros((H, W), dtype=torch.float32, device=device)
-
-    pos_mask = p > 0
-    neg_mask = ~pos_mask
-
-    indices_pos = y[pos_mask] * W + x[pos_mask]
-    indices_neg = y[neg_mask] * W + x[neg_mask]
-
-    h_pos.view(-1).index_add_(0, indices_pos, torch.ones_like(indices_pos, dtype=torch.float32, device=device))
-    h_neg.view(-1).index_add_(0, indices_neg, torch.ones_like(indices_neg, dtype=torch.float32, device=device))
-
-    h_pos /= h_pos.max().clamp(min=1e-6)
-    h_neg /= h_neg.max().clamp(min=1e-6)
-
-    rgb = torch.stack([
-        h_neg,                 # R
-        h_pos + h_neg,        # G
-        h_pos                 # B
-    ], dim=0)  # [3, H, W]
-
-    return rgb.clamp(0, 1)
-
 def _load_event_segment_cpu(path):
     try:
         events = load_event_file(path)
@@ -498,8 +515,74 @@ def _load_event_segment_cpu(path):
         print(f"[ERROR] Failed to read {path} — {e}")
         return None
 
+def load_and_transform_text(text, device):
+    if text is None:
+        return None
+    tokenizer = SimpleTokenizer(bpe_path=BPE_PATH)
+    tokens = [tokenizer(t).unsqueeze(0).to(device) for t in text]
+    tokens = torch.cat(tokens, dim=0)
+    return tokens
+
+def _eventbind_colorize_torch(h_pos: torch.Tensor, h_neg: torch.Tensor, gain=2.0, gamma=0.7):
+    """
+    h_pos, h_neg: [H, W] float32 >= 0
+    returns: [3, H, W] in [0,1]
+    """
+    pmax = torch.clamp(h_pos.max(), min=1e-6)
+    nmax = torch.clamp(h_neg.max(), min=1e-6)
+    p = torch.pow(torch.clamp(h_pos / pmax, 0, 1) * gain, gamma)
+    n = torch.pow(torch.clamp(h_neg / nmax, 0, 1) * gain, gamma)
+    r = n
+    g = torch.clamp(p + n, 0, 1)
+    b = p
+    return torch.stack([r, g, b], dim=0).clamp(0, 1)
+
+def _render_event_frames_eventbind(events: torch.Tensor, H: int, W: int, device: torch.device, T: int = 2):
+    """
+    events: [N, 4] -> x,y,t,p
+    returns: [T, 3, H, W] in [0,1]
+    """
+    if events.numel() == 0:
+        return torch.zeros((T, 3, H, W), dtype=torch.float32, device=device)
+
+    # sort by time and split into T bins
+    _, idx = torch.sort(events[:, 2])
+    ev_sorted = events[idx]
+    bins = torch.linspace(0, ev_sorted.shape[0], steps=T + 1, device=device).long()
+
+    frames = []
+    for i in range(T):
+        s, e = bins[i].item(), bins[i + 1].item()
+        seg = ev_sorted[s:e]
+        if seg.numel() == 0:
+            frames.append(torch.zeros((3, H, W), dtype=torch.float32, device=device))
+            continue
+
+        x = seg[:, 0].clamp(0, W - 1).long()
+        y = seg[:, 1].clamp(0, H - 1).long()
+        p = (seg[:, 3] > 0)
+
+        h_pos = torch.zeros((H, W), dtype=torch.float32, device=device)
+        h_neg = torch.zeros((H, W), dtype=torch.float32, device=device)
+
+        if p.any():
+            idx_pos = y[p] * W + x[p]
+            h_pos.view(-1).index_add_(0, idx_pos, torch.ones_like(idx_pos, dtype=torch.float32))
+        if (~p).any():
+            idx_neg = y[~p] * W + x[~p]
+            h_neg.view(-1).index_add_(0, idx_neg, torch.ones_like(idx_neg, dtype=torch.float32))
+
+        frames.append(_eventbind_colorize_torch(h_pos, h_neg))  # [3,H,W]
+
+    return torch.stack(frames, dim=0)  # [T,3,H,W]
+
 def load_and_transform_event_data(event_paths, device):
-    images = []
+    """
+    ImageBind-only.
+    Renders each event file into T=2 EventBind frames.
+    Output shape: [B, V=1, C=3, T=2, H=224, W=224]
+    """
+    samples = []
 
     for path in event_paths:
         result = _load_event_segment_cpu(path)
@@ -508,23 +591,31 @@ def load_and_transform_event_data(event_paths, device):
 
         segment, H, W = result
         segment = segment.to(device)
-        rgb_tensor = render_event_frame_gpu(segment, H, W, device)
-        img = transforms.ToPILImage()(rgb_tensor.cpu())
-        images.append(EVENT_TRANSFORM(img).to(device))
 
-    if not images:
-        print("[ERROR] All event files failed. Returning dummy.")
-        return torch.zeros((1, 3, 224, 224), device=device)
+        # Render [T=2, 3, H, W]
+        frames = _render_event_frames_eventbind(segment, H, W, device, T=2)
 
-    return torch.stack(images)
+        # Apply EVENT_TRANSFORM to each frame -> [T, 3, 224, 224]
+        frames_224 = []
+        for t in range(frames.shape[0]):
+            pil = transforms.ToPILImage()(frames[t].cpu())
+            frames_224.append(EVENT_TRANSFORM(pil).to(device))
+        frames_224 = torch.stack(frames_224, dim=0)  # [T,3,224,224]
 
-def load_and_transform_text(text, device):
-    if text is None:
-        return None
-    tokenizer = SimpleTokenizer(bpe_path=BPE_PATH)
-    tokens = [tokenizer(t).unsqueeze(0).to(device) for t in text]
-    tokens = torch.cat(tokens, dim=0)
-    return tokens
+        # Permute to [3, T, 224, 224] to match video channel/time order
+        frames_cthw = frames_224.permute(1, 0, 2, 3)  # [3,2,224,224]
+
+        # Add spatial crop dim V=1 -> [1, 3, 2, 224, 224]
+        frames_vcthw = frames_cthw.unsqueeze(0)
+
+        samples.append(frames_vcthw)
+
+    if not samples:
+        # Return dummy with shape [B=1, V=1, C=3, T=2, 224, 224]
+        return torch.zeros((1, 1, 3, 2, 224, 224), device=device)
+
+    # Stack into [B, 1, 3, 2, 224, 224]
+    return torch.stack(samples, dim=0)
 
 # ===================
 # Loader & Utility
@@ -537,25 +628,76 @@ def load_label_mapping(center_emb_path, device):
     idx_to_lbl = {v: k for k, v in lbl_to_idx.items()}
     return raw_emb, raw_lbls, lbl_to_idx, idx_to_lbl
 
+class CollateFn:
+    """Picklable collate function that performs per-sample CPU transforms.
+    Now initializes the transform in __init__ to avoid recreating every batch.
+    """
+    def __init__(self, modality, min_sample: bool, model_type):
+        self.modality = modality
+        self.min_sample = min_sample
+        self.model_type = model_type
+        # Initialize and store transform once (user requested initialization in __init__).
+        self.transform = get_transform_fn(self.modality, minSample=self.min_sample, model_type=self.model_type)
+
+    def __call__(self, batch):
+        transform = self.transform
+        paths = [item['path'] for item in batch]
+        desc_items = [item['description'] for item in batch if item['description'] is not None]
+        # Per-path transform (CPU)
+        inputs = [transform([p], device='cpu')[0] for p in paths]
+        inputs = torch.stack(inputs)
+        labels = torch.tensor([item['label'] for item in batch])
+        if desc_items:
+            desc_tokens = [load_and_transform_text([d], device='cpu').squeeze(0) for d in desc_items]
+            desc_tokens = torch.stack(desc_tokens)
+        else:
+            desc_tokens = None
+        batch_out = {'inputs': inputs, 'labels': labels}
+        # Include original file paths for per-sample bookkeeping (saving adv examples, CSV rows)
+        batch_out['paths'] = paths
+        if desc_tokens is not None:
+            batch_out['descriptions'] = desc_tokens
+        return batch_out
+
 def train_data_loader(
     modality, dataset_root, train_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False,
     model_type=BindModelType.IMAGEBIND
 ):
-    transform = get_transform_fn(modality, minSample=True, model_type=model_type)
-    dataset = JsonDataset(dataset_root, train_json, transform, label_to_index, max_samples, debug)
+    dataset = JsonDataset(dataset_root, train_json, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=True)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
+    mp_ctx = mp.get_context("spawn")
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=False,
+        persistent_workers=True if num_workers > 0 else False,
+        collate_fn=CollateFn(modality, True, model_type),
+        multiprocessing_context=mp_ctx
+    )
+
 
 def val_data_loader(
     modality, dataset_root, val_json, label_to_index,
     batch_size, num_workers, max_samples=None, debug=False,
-    model_type=BindModelType.IMAGEBIND
+    model_type=BindModelType.IMAGEBIND,
+    multiprocessing_context=None
 ):
-    transform = get_transform_fn(modality, minSample=True, model_type=model_type)
-    dataset = JsonDataset(dataset_root, val_json, transform, label_to_index, max_samples, debug)
+    dataset = JsonDataset(dataset_root, val_json, label_to_index, max_samples, debug)
     sampler = DistributedSampler(dataset, shuffle=False)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=False, persistent_workers=True)
+    mp_ctx = multiprocessing_context or mp.get_context("spawn")
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=False,
+        persistent_workers=True if num_workers > 0 else False,
+        collate_fn=CollateFn(modality, True, model_type),
+        multiprocessing_context=mp_ctx
+    )
 
 def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBIND):
     mean = torch.tensor(MEAN_MAP[modality], device=device)
@@ -564,7 +706,7 @@ def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBI
     if modality == Modality.IMAGE:
         return mean.view(1, 3, 1, 1), std.view(1, 3, 1, 1)
     elif modality == Modality.EVENT:
-        return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)
+        return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
     elif modality == Modality.POINT:
         return mean.view(1, 1, 3), std.view(1, 1, 3)
     elif modality == Modality.THERMAL:
@@ -578,3 +720,19 @@ def get_normalization_tensors(modality, device, model_type=BindModelType.IMAGEBI
             return mean.view(1, 1, 3, 1, 1, 1), std.view(1, 1, 3, 1, 1, 1)
     else:
         return mean.view(1, -1, 1, 1), std.view(1, -1, 1, 1)
+
+def load_and_transform_point_data(point_paths, device):
+    return torch.stack([torch.load(p) for p in point_paths]).to(device)
+
+def waveform2melspec(waveform, sample_rate, num_mel_bins, target_length):
+    waveform -= waveform.mean()
+    fbank = torchaudio.compliance.kaldi.fbank(
+        waveform, htk_compat=True, sample_frequency=sample_rate,
+        use_energy=False, window_type="hanning", num_mel_bins=num_mel_bins,
+        dither=0.0, frame_length=25, frame_shift=10
+    ).transpose(0, 1)
+    p = target_length - fbank.size(1)
+    if abs(p) / fbank.size(1) > 0.2:
+        logging.warning(f"Audio frame mismatch: {fbank.size(1)} vs {target_length}")
+    fbank = torch.nn.functional.pad(fbank, (0, max(0, p)))[:, :target_length]
+    return fbank.unsqueeze(0)

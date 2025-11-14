@@ -101,5 +101,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = f"./output/param_stats_{timestamp}.log"
+    log_path = f"/data/output/param_stats_{timestamp}.log"
     analyze_weights(args.pretrained_ckpt, args.lora_ckpt, log_path)

@@ -1,4 +1,4 @@
-from model import UniBindModel, ForwardMode
+from model import UniBindClassifier, ForwardMode
 from loss import l2_loss, ce_loss
 import torch
 from torch.optim import AdamW
@@ -24,7 +24,7 @@ def find_lr(
 ):
     logger.info("Finding learning rate ...")
     logger.info("Initializing original model ...")
-    model_original = UniBindModel(
+    model_original = UniBindClassifier(
         device=device,
         pretrain_weights=pretrain_weights,
         modality="image",
@@ -34,12 +34,12 @@ def find_lr(
         index_to_label=idx_to_lbl,
         logger=logger,
         use_flash_attention=use_flash_attention,
-        fine_tuned_weights=None
+        modality_head_mlp_weights=None
     )
     model_original.to(device)
 
     logger.info("Initializing training model ...")
-    model_train = UniBindModel(
+    model_train = UniBindClassifier(
         device=device,
         pretrain_weights=pretrain_weights,
         modality="image",
@@ -50,7 +50,7 @@ def find_lr(
         logger=logger,
         use_flash_attention=use_flash_attention,
         use_lora=True,
-        use_fine_tune=False,
+        use_modality_head_mlp=False,
         fine_tuned_weights=None,
     )
     model_train.to(device)

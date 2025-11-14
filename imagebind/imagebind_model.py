@@ -33,7 +33,7 @@ ModalityType = SimpleNamespace(
 )
 
 
-class ImageBindModel(nn.Module):
+class ImageBindClassifier(nn.Module):
     def __init__(
         self,
         video_frames=2,
@@ -419,7 +419,6 @@ class ImageBindModel(nn.Module):
 
         modality_heads[ModalityType.VISION] = nn.Sequential(
             nn.LayerNorm(normalized_shape=vision_embed_dim, eps=1e-6),
-            SelectElement(index=0),
             nn.Linear(vision_embed_dim, out_embed_dim, bias=False),
         )
 
@@ -483,17 +482,13 @@ class ImageBindModel(nn.Module):
 
         return nn.ModuleDict(modality_postprocessors)
 
-    def forward(self, inputs):
+    def forward(self, inputs, only_cls=True):
         outputs = {}
         for modality_key, modality_value in inputs.items():
-            reduce_list = (
-                modality_value.ndim >= 5
-            )  # Audio and Video inputs consist of multiple clips
+            reduce_list = modality_value.ndim >= 5  # Audio/Video clips
             if reduce_list:
                 B, S = modality_value.shape[:2]
-                modality_value = modality_value.reshape(
-                    B * S, *modality_value.shape[2:]
-                )
+                modality_value = modality_value.reshape(B * S, *modality_value.shape[2:])
 
             if modality_value is not None:
                 modality_value = self.modality_preprocessors[modality_key](
@@ -502,9 +497,19 @@ class ImageBindModel(nn.Module):
                 trunk_inputs = modality_value["trunk"]
                 head_inputs = modality_value["head"]
                 modality_value = self.modality_trunks[modality_key](**trunk_inputs)
-                modality_value = self.modality_heads[modality_key](
-                    modality_value, **head_inputs
-                )
+
+                if modality_key == ModalityType.VISION:
+                    modality_value = self.modality_heads[modality_key][0](modality_value)
+
+                    if only_cls:
+                        modality_value = modality_value[:, 0]
+
+                    modality_value = self.modality_heads[modality_key][1](modality_value)
+                else:
+                    modality_value = self.modality_heads[modality_key](
+                        modality_value, **head_inputs
+                    )
+                
                 modality_value = self.modality_postprocessors[modality_key](
                     modality_value
                 )
@@ -517,13 +522,12 @@ class ImageBindModel(nn.Module):
 
         return outputs
 
-
 def imagebind_huge(
         use_flash_attn=False, 
         use_lora=False, 
         lora_rank=4, 
         lora_alpha=8.0):
-    return ImageBindModel(
+    return ImageBindClassifier(
         vision_embed_dim=1280,
         vision_num_blocks=32,
         vision_num_heads=16,

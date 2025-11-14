@@ -10,7 +10,7 @@ else
   # Start a new session with btop
   tmux new-session -d -s $SESSION_NAME "btop"
   # Split and run nvtop
-  tmux split-window -h "nvtop"
+  tmux split-window -h -t $SESSION_NAME "nvtop"
   # Attach to the session
   tmux -2 attach-session -t $SESSION_NAME
 fi

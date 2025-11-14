@@ -73,7 +73,7 @@ def organize_split(split_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare Kinetics-400: download, extract, and organize.")
-    parser.add_argument('--dataset_root', required=True, help='Root path for the Kinetics-400 dataset')
+    parser.add_argument('--dataset_root', default="/data/datasets/Kinetics-400", help='Root path for the Kinetics-400 dataset')
     args = parser.parse_args()
 
     base_dir = os.path.abspath(args.dataset_root)
@@ -82,26 +82,26 @@ def main():
     safe_mkdir(base_dir)
     safe_mkdir(tar_dir)
 
-    # # Download annotations
-    # ann_dir = os.path.join(base_dir, "annotations")
-    # safe_mkdir(ann_dir)
-    # for split, url in ANNOTATIONS.items():
-    #     out_path = os.path.join(ann_dir, f"{split}.csv")
-    #     download_file(url, out_path)
+    # Download annotations
+    ann_dir = os.path.join(base_dir, "annotations")
+    safe_mkdir(ann_dir)
+    for split, url in ANNOTATIONS.items():
+        out_path = os.path.join(ann_dir, f"{split}.csv")
+        download_file(url, out_path)
 
-    # # Download readme
-    # download_file(README_URL, os.path.join(base_dir, "readme.md"))
+    # Download readme
+    download_file(README_URL, os.path.join(base_dir, "readme.md"))
 
-    # # Download tarballs
-    # for split in K400_SPLITS:
-    #     split_tar_dir = os.path.join(tar_dir, split)
-    #     safe_mkdir(split_tar_dir)
-    #     download_tar_list(TAR_URLS[split], split_tar_dir)
+    # Download tarballs
+    for split in K400_SPLITS:
+        split_tar_dir = os.path.join(tar_dir, split)
+        safe_mkdir(split_tar_dir)
+        download_tar_list(TAR_URLS[split], split_tar_dir)
 
-    # # Download replacement
-    # repl_dir = os.path.join(tar_dir, "replacement")
-    # safe_mkdir(repl_dir)
-    # download_file(REPLACEMENT_URL, os.path.join(repl_dir, os.path.basename(REPLACEMENT_URL)))
+    # Download replacement
+    repl_dir = os.path.join(tar_dir, "replacement")
+    safe_mkdir(repl_dir)
+    download_file(REPLACEMENT_URL, os.path.join(repl_dir, os.path.basename(REPLACEMENT_URL)))
 
     # Extract and organize splits
     for split in K400_SPLITS:
@@ -114,6 +114,13 @@ def main():
     repl_extract = os.path.join(base_dir, "replacement")
     extract_archives(os.path.join(tar_dir, "replacement"), repl_extract)
     organize_split(repl_extract)
+
+    # Delete all downloaded tar.gz archives to save space
+    try:
+        shutil.rmtree(tar_dir, ignore_errors=True)
+        print(f"🗑️  Deleted archive directory: {tar_dir}")
+    except Exception as e:
+        print(f"⚠️  Warning: failed to delete archive directory {tar_dir}: {e}")
 
     print(f"\n✅ Kinetics-400 is fully prepared under: {base_dir}")
 

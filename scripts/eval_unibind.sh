@@ -164,7 +164,7 @@ OUTPUT_DIR=output
 NUM_WORKERS=2
 EPSILONS="2,4"
 TWO_STAGE_ITERS=100
-PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten.pt"
+PRETRAIN_WEIGHTS="./ckpts/pretrained_weights_flash_atten_image_patchs.pt"
 
 # === Eval Loop ===
 for dataset in "${!MODALITY_MAP[@]}"; do
@@ -184,7 +184,7 @@ for dataset in "${!MODALITY_MAP[@]}"; do
     --modality "$modality" \
     --dataset_name "$dataset" \
     --output_dir "$OUTPUT_DIR" \
-    --dataset_root "/home/user/datasets/$dataset" \
+    --dataset_root "/data/datasets/$dataset" \
     --clean_val_json "$clean_val_json" \
     --attack_val_json "$attack_val_json" \
     --clean_val_batch_size "$clean_val_batch_size" \
