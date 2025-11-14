@@ -71,22 +71,21 @@ def build_model(args, device, logger, raw_emb, raw_lbls, lbl_to_idx, use_lora=Fa
         ).to(device)
 
     # Non-UniBind models ignore alignment completely.
-    with open(args.classes_json, "r") as f:
-        class_strings = json.load(f)
-    class_strings = [normalize_label(lbl) for lbl in class_strings]
     if args.model_type == BindModelType.LANGUAGEBIND:
         return LanguageBindClassifier(
             device=device,
             modality=args.modality,
-            class_strings=class_strings,
-            logger=logger
+            class_strings=None,
+            logger=logger,
+            label_to_index=lbl_to_idx
         ).to(device)
     if args.model_type == BindModelType.IMAGEBIND:
         return ImageBindClassifier(
             device=device,
             modality=args.modality,
-            class_strings=class_strings,
-            logger=logger
+            class_strings=None,
+            logger=logger,
+            label_to_index=lbl_to_idx
         ).to(device)
     raise ValueError(f"Unsupported model type: {args.model_type}")
 

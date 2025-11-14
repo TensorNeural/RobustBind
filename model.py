@@ -17,6 +17,7 @@ from binds.languagebind import (
     LanguageBindImageTokenizer, LanguageBindVideoTokenizer, LanguageBindAudioTokenizer,
     LanguageBindThermalTokenizer, LanguageBindDepthTokenizer
 )
+from transformers import CLIPProcessor, CLIPModel
 
 # ImageBind
 from binds.imagebind.models import imagebind_model
@@ -524,11 +525,17 @@ class UniBindClassifier(Model):
 
 # ============================ LanguageBindClassifier ============================
 class LanguageBindClassifier(Model):
-    def __init__(self, device, modality, class_strings, logger=None):
+    def __init__(self, device, modality, class_strings, logger=None, label_to_index=None):
         super().__init__()
         self.device = device
         self.modality = modality
-        self.class_strings = class_strings
+        # If a label->index mapping is provided, construct class_strings in the same
+        # order so that class_embeddings[i] corresponds to numeric class index i.
+        if label_to_index is not None:
+            ordered = [lbl for lbl, _ in sorted(label_to_index.items(), key=lambda kv: kv[1])]
+            self.class_strings = ordered
+        else:
+            self.class_strings = class_strings
         self.logger = logger or logging.getLogger(__name__)
 
         template = MODALITY_TEMPLATES.get(modality, "a {}")
@@ -617,11 +624,16 @@ class LanguageBindClassifier(Model):
 
 # ============================ ImageBindClassifier ============================
 class ImageBindClassifier(Model):
-    def __init__(self, device, modality, class_strings, logger=None):
+    def __init__(self, device, modality, class_strings, logger=None, label_to_index=None):
         super().__init__()
         self.device = device
         self.modality = modality
-        self.class_strings = class_strings
+        # Align class_strings ordering with label_to_index if provided
+        if label_to_index is not None:
+            ordered = [lbl for lbl, _ in sorted(label_to_index.items(), key=lambda kv: kv[1])]
+            self.class_strings = ordered
+        else:
+            self.class_strings = class_strings
         self.logger = logger or logging.getLogger(__name__)
 
         template = MODALITY_TEMPLATES.get(modality, "a {}")
@@ -655,6 +667,90 @@ class ImageBindClassifier(Model):
     def _encode(self, x):
         imagebind_modality = IMAGEBIND_MODALITY_MAP[self.modality]
         emb = self.model({IMAGEBIND_MODALITY_MAP[self.modality]: x})[imagebind_modality]
+        return emb / emb.norm(dim=-1, keepdim=True)
+
+    def _logits(self, x, temperature=100.0):
+        emb = self._encode(x)
+        logits = emb @ self.class_embeddings.T
+        return logits / temperature, logits
+
+
+# ============================ CLIPClassifier (true CLIP) ============================
+class CLIPClassifier(Model):
+    """Simple wrapper around Hugging Face CLIPModel to provide the same Model interface.
+
+    Exposes forward(x, mode) where x is expected to be an image tensor of shape [B, C, H, W]
+    with pixel values in [0, 1] (the caller should ensure preprocessing / normalization).
+    """
+    def __init__(self, device, modality, class_strings, logger=None, model_name: str = "openai/clip-vit-large-patch14", label_to_index=None):
+        super().__init__()
+        self.device = device
+        self.modality = modality
+        # If label_to_index provided, use its ordering to build class_strings so
+        # the numeric class indices match the classifier embeddings ordering.
+        if label_to_index is not None:
+            ordered = [lbl for lbl, _ in sorted(label_to_index.items(), key=lambda kv: kv[1])]
+            self.class_strings = ordered
+        else:
+            self.class_strings = class_strings
+        self.logger = logger or logging.getLogger(__name__)
+        self.model_name = model_name
+    # CLIPClassifier allows gradients through the CLIP encoders by default.
+
+        # Load CLIP model + processor
+        self.processor = CLIPProcessor.from_pretrained(self.model_name, cache_dir="./.cache/clip")
+        self.clip = CLIPModel.from_pretrained(self.model_name, cache_dir="./.cache/clip").to(device)
+        self.clip.eval()
+
+        # Build text prompts and compute class embeddings once
+        # If the caller passed class_strings derived from label_to_index we'll
+        # assume they are already in the correct, deduplicated order. Otherwise
+        # fall back to the previous behavior (dedupe+sort).
+        if label_to_index is None:
+            unique_labels = sorted(set(self.class_strings))
+            if len(unique_labels) != len(self.class_strings):
+                self.logger.info(f"CLIPClassifier: deduplicated {len(self.class_strings)} centre labels -> {len(unique_labels)} classes")
+            self.class_strings = unique_labels
+        template = MODALITY_TEMPLATES.get(modality, "a {}")
+        prompts = [template.format(cls) for cls in self.class_strings]
+        # Tokenize text and move to device
+        tok = self.processor(text=prompts, padding=True, truncation=True, return_tensors="pt")
+        tok = {k: v.to(self.device) for k, v in tok.items()}
+        # Compute text embeddings once. Other models do not force no_grad during
+        # embedding/logits computation, so allow gradients here as well to keep
+        # behavior consistent across model wrappers.
+
+        with torch.no_grad():
+            text_embs = self.clip.get_text_features(**tok)
+        self.class_embeddings = text_embs / text_embs.norm(dim=-1, keepdim=True)
+        # number of classes
+        self.num_classes = len(self.class_strings)
+
+    def forward(self, x, mode: ForwardMode):
+        if mode == ForwardMode.EMBEDDINGS:
+            return self._encode(x)
+        elif mode == ForwardMode.LOGITS:
+            return self._logits(x)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+    def extract_tensor(self, x):
+        # Expect x to be raw pixel tensor
+        return x
+
+    def wrap_tensor(self, x_tensor):
+        return x_tensor
+
+    def data_to_device(self, x, device):
+        return x.to(device)
+
+    def _encode(self, x):
+        # x is expected to be a float tensor on the correct device
+        # CLIP's get_image_features accepts pixel_values; we assume caller already resized/preprocessed
+        if x.device != self.device:
+            x = x.to(self.device)
+        # Always compute image features normally so gradients can flow when needed by callers.
+        emb = self.clip.get_image_features(x)
         return emb / emb.norm(dim=-1, keepdim=True)
 
     def _logits(self, x, temperature=100.0):

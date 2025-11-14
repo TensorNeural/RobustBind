@@ -653,6 +653,8 @@ class CollateFn:
         else:
             desc_tokens = None
         batch_out = {'inputs': inputs, 'labels': labels}
+        # Include original file paths for per-sample bookkeeping (saving adv examples, CSV rows)
+        batch_out['paths'] = paths
         if desc_tokens is not None:
             batch_out['descriptions'] = desc_tokens
         return batch_out

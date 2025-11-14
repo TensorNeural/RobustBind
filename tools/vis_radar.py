@@ -4,7 +4,7 @@ from datetime import datetime
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+# helper imports
 
 # ============================================================
 # Styling configuration (adjust here)
@@ -180,6 +180,11 @@ def draw_modality_background(ax, angles, modalities, max_radius=1.0):
                 current = modalities[i]
                 start_idx = i
 
+    # NOTE: This background helper is defined for possible future use but is not
+    # currently invoked by the default plotting pipeline. It intentionally leaves
+    # the axes state unchanged (fills under the chart) so callers may enable it
+    # selectively.
+
 def plot_radar_subplot(ax, norm_data, axis_labels, modalities, title, colors):
     n_axes = len(axis_labels)
     angles = radar_angles(n_axes)
@@ -305,16 +310,34 @@ def generate_figures(save_dir: str) -> None:
             out_name = f"radar_{key}_{eval_name}.pdf"
             out_path = os.path.join(save_dir, out_name)
             # Transparent figure background
-            fig.patch.set_alpha(0.0)
-            fig.patch.set_facecolor('none')
-            for r in fig.get_children():
-                try:
-                    r.set_facecolor('none')
-                except Exception:
-                    pass
-            fig.savefig(out_path, bbox_inches="tight", transparent=True)
+            _set_transparent_figure(fig)
+            _save_transparent_pdf(fig, out_path)
             plt.close(fig)
             print(f"Saved: {out_path}")
+
+
+def _set_transparent_figure(fig):
+    """Make a Matplotlib figure and its children use a transparent background."""
+    try:
+        fig.patch.set_alpha(0.0)
+        fig.patch.set_facecolor('none')
+    except Exception:
+        pass
+    for child in fig.get_children():
+        try:
+            child.set_facecolor('none')
+        except Exception:
+            # Not all children support set_facecolor; ignore.
+            pass
+
+
+def _save_transparent_pdf(fig, out_path: str) -> None:
+    """Save figure to PDF with transparent background, ensuring tight bbox."""
+    try:
+        fig.savefig(out_path, bbox_inches="tight", transparent=True)
+    except Exception:
+        # Fall back to a standard save in case of driver/backend issues
+        fig.savefig(out_path)
 
 
 def parse_args() -> argparse.Namespace:

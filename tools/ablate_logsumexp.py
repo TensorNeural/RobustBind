@@ -15,64 +15,7 @@ from model import UniBindClassifier, Modality
 from shared_types import BindModelType
 from data_util import JsonDataset, CollateFn
 from utils.utils import load_centre_embeddings
-
-
-# ==================== Notes ====================
-# (UniBind optional CLI defaults are inlined in argparse below)
-
-MODALITY_DATASETS: Dict[Modality, Dict[str, str]] = {
-    Modality.IMAGE: {
-        "dataset_name": "ImageNet-1K",
-        "dataset_root": "/data/datasets/ImageNet-1K",
-        "val_json": "./datasets/ImageNet-1K/val_data.json",
-        "centre_embeddings_path": "./centre_embs/image_in_center_embeddings.pkl",
-    },
-    Modality.AUDIO: {
-        "dataset_name": "ESC-50",
-        "dataset_root": "/data/datasets/ESC-50",
-        "val_json": "./datasets/ESC-50/val_data.json",
-        "centre_embeddings_path": "./centre_embs/audio_esc_center_embeddings.pkl",
-    },
-    Modality.EVENT: {
-        "dataset_name": "N-Caltech-101",
-        "dataset_root": "/data/datasets/N-Caltech-101",
-        "val_json": "./datasets/N-Caltech-101/val_data.json",
-        "centre_embeddings_path": "./centre_embs/event_caltech_center_embeddings.pkl",
-    },
-    Modality.POINT: {
-        "dataset_name": "ModelNet40",
-        "dataset_root": "/data/datasets/ModelNet40",
-        "val_json": "./datasets/ModelNet40/val_data.json",
-        "centre_embeddings_path": "./centre_embs/point_modelnet40_center_embeddings.pkl",
-    },
-    Modality.VIDEO: {
-        "dataset_name": "MSR-VTT",
-        "dataset_root": "/data/datasets/MSR-VTT",
-        "val_json": "./datasets/MSR-VTT/val_data.json",
-        "centre_embeddings_path": "./centre_embs/video_msrvtt_center_embeddings.pkl",
-    },
-    Modality.THERMAL: {
-        "dataset_name": "LLVIP",
-        "dataset_root": "/data/datasets/LLVIP",
-        "val_json": "./datasets/LLVIP/val_data.json",
-        "centre_embeddings_path": "./centre_embs/thermal_llvip_center_embeddings.pkl",
-    },
-}
-
-CLEAN_VAL_BATCH_SIZE_MAP: Dict[str, int] = {
-    "ImageNet-1K": 2000,
-    "Places365": 2000,
-    "ModelNet40": 64,
-    "ShapeNet": 64,
-    "ESC-50": 50,
-    "UrbanSound8K": 50,
-    "LLVIP": 2000,
-    "RGB-T": 16,
-    "MSR-VTT": 100,
-    "UCF-101": 100,
-    "N-Caltech-101": 500,
-    "N-ImageNet-1K": 500,
-}
+from datasets import MODALITY_DATASETS, CLEAN_VAL_BATCH_SIZE_MAP
 
 
 def setup_logger(log_path: str) -> logging.Logger:
@@ -556,14 +499,6 @@ def run_ablation(args) -> None:
         torch.cuda.empty_cache()
 
     # Sort single-GPU rows
-    header, *data_rows = rows
-    def _row_key_single(r: str):
-        try:
-            mod, ds, T, acc = r.split(',')
-            return (mod, ds, float(T))
-        except Exception:
-            return ("~", "~", 1e9)
-    data_rows_sorted = sorted(data_rows, key=_row_key_single)
     header, *data_rows = rows
     def _row_key_single(r: str):
         try:

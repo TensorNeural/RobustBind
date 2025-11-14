@@ -8,7 +8,6 @@ from typing import Dict, List, Tuple
 from multiprocessing import get_context
 
 import torch
-import torch.nn.functional as F
 import torch_scatter
 from tqdm import tqdm
 
@@ -16,72 +15,12 @@ from model import UniBindClassifier, Modality
 from shared_types import BindModelType
 from data_util import JsonDataset, CollateFn
 from utils.utils import load_centre_embeddings
-
-
-# ==================== Constants (top-level) ====================
-MODALITY_DATASETS: Dict[Modality, Dict[str, str]] = {
-    Modality.IMAGE: {
-        "dataset_name": "ImageNet-1K",
-        "dataset_root": "/data/datasets/ImageNet-1K",
-        "val_json": "./datasets/ImageNet-1K/val_data.json",
-        "centre_embeddings_path": "./centre_embs/image_in_center_embeddings.pkl",
-    },
-    Modality.AUDIO: {
-        "dataset_name": "ESC-50",
-        "dataset_root": "/data/datasets/ESC-50",
-        "val_json": "./datasets/ESC-50/val_data.json",
-        "centre_embeddings_path": "./centre_embs/audio_esc_center_embeddings.pkl",
-    },
-    Modality.EVENT: {
-        "dataset_name": "N-Caltech-101",
-        "dataset_root": "/data/datasets/N-Caltech-101",
-        "val_json": "./datasets/N-Caltech-101/val_data.json",
-        "centre_embeddings_path": "./centre_embs/event_caltech_center_embeddings.pkl",
-    },
-    Modality.POINT: {
-        "dataset_name": "ModelNet40",
-        "dataset_root": "/data/datasets/ModelNet40",
-        "val_json": "./datasets/ModelNet40/val_data.json",
-        "centre_embeddings_path": "./centre_embs/point_modelnet40_center_embeddings.pkl",
-    },
-    Modality.VIDEO: {
-        "dataset_name": "MSR-VTT",
-        "dataset_root": "/data/datasets/MSR-VTT",
-        "val_json": "./datasets/MSR-VTT/val_data.json",
-        "centre_embeddings_path": "./centre_embs/video_msrvtt_center_embeddings.pkl",
-    },
-    Modality.THERMAL: {
-        "dataset_name": "LLVIP",
-        "dataset_root": "/data/datasets/LLVIP",
-        "val_json": "./datasets/LLVIP/val_data.json",
-        "centre_embeddings_path": "./centre_embs/thermal_llvip_center_embeddings.pkl",
-    },
-}
-
-# Per-dataset temperature mapping
-DATASET_TEMPERATURES: Dict[str, float] = {
-    "ESC-50": 200.0,          # Audio
-    "N-Caltech-101": 100.0,   # Event
-    "ImageNet-1K": 100.0,     # Image
-    "LLVIP": 1000.0,          # Thermal
-    "MSR-VTT": 50.0,          # Video
-}
-
-# Batch size map (clean val) per dataset
-CLEAN_VAL_BATCH_SIZE_MAP: Dict[str, int] = {
-    "ImageNet-1K": 2000,
-    "Places365": 2000,
-    "ModelNet40": 64,
-    "ShapeNet": 64,
-    "ESC-50": 50,
-    "UrbanSound8K": 50,
-    "LLVIP": 2000,
-    "RGB-T": 16,
-    "MSR-VTT": 100,
-    "UCF-101": 100,
-    "N-Caltech-101": 500,
-    "N-ImageNet-1K": 500,
-}
+from datasets import (
+    MODALITY_DATASETS,
+    DATASET_TEMPERATURES,
+    CLEAN_VAL_BATCH_SIZE_MAP,
+    ATTACK_VAL_BATCH_SIZE_MAP,
+)
 
 # (UniBind optional CLI defaults are inlined in argparse below)
 
